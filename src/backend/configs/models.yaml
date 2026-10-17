@@ -1,0 +1,62 @@
+# YuanWork LLM Models Configuration
+# Edit this file to add your API keys and switch models.
+#
+# To use a model:
+# 1. Set the corresponding environment variable (e.g., OPENAI_API_KEY)
+# 2. Reference the model name in the "routing" section below
+# 3. Restart YuanWork backend
+
+models:
+  # Example: MiniMax (uses Anthropic-compatible API)
+  minimax-chat:
+    provider: anthropic
+    api_base: https://api.minimaxi.com/anthropic
+    api_key_env: MINIMAX_API_KEY
+    model_name: MiniMax-M3
+
+  # Example: OpenAI
+  gpt-4o:
+    provider: openai
+    api_key_env: OPENAI_API_KEY
+    model_name: gpt-4o
+
+  gpt-4o-mini:
+    provider: openai
+    api_key_env: OPENAI_API_KEY
+    model_name: gpt-4o-mini
+
+  # Example: Anthropic
+  claude-sonnet:
+    provider: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    model_name: claude-3-5-sonnet-latest
+
+  # Example: DeepSeek (cost-effective for Chinese)
+  deepseek-chat:
+    provider: openai
+    api_base: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    model_name: deepseek-chat
+
+  # Example: Local Ollama (fully offline)
+  ollama-llama3:
+    provider: ollama
+    api_base: http://localhost:11434
+    model_name: llama3.1:8b
+
+# Task routing: which model handles which task type
+routing:
+  understand: gpt-4o-mini       # Query understanding (cheap, fast)
+  extract: gpt-4o-mini          # Information extraction (cheap)
+  answer: gpt-4o                # Final answer generation (powerful)
+  conflict_check: gpt-4o-mini   # Conflict detection (cheap)
+  reflection: gpt-4o-mini       # Memory reflection (cheap)
+  wiki_compile: gpt-4o          # Wiki page compilation (needs quality)
+  ner: gpt-4o-mini             # Named entity recognition (cheap)
+  general: gpt-4o               # Generic chat fallback
+
+budget:
+  per_session_max_tokens: 200000
+  per_query_max_tokens: 8000
+  monthly_cap_usd: 30
+  alert_at: 0.8  # Alert when 80% of budget consumed

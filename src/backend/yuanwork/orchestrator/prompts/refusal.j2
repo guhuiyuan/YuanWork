@@ -1,0 +1,16 @@
+# Refusal Response Template
+
+我在你的知识库里没有找到足够明确的证据来回答这个问题。
+
+## 最可能相关的位置
+
+{% for chunk in candidates %}
+- 《{{ chunk.file_name }}》{% if chunk.meta.slide_number %}（Slide {{ chunk.meta.slide_number }}）{% endif %}{% if chunk.meta.page %}（第 {{ chunk.meta.page }} 页）{% endif %}{% if chunk.meta.heading %}（{{ chunk.meta.heading }}）{% endif %}
+{% endfor %}
+
+## 你可以：
+
+1. **点击上面位置直接查看原文**
+2. **换个问法**（例如使用更具体的关键词）
+3. **允许我使用通用知识回答**（精度较低，仅供参考）
+4. **添加更多文档**到知识库，让我有更多可参考的资料

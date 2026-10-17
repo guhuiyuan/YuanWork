@@ -1,0 +1,1 @@
+"""Consolidation (integration layer) package."""

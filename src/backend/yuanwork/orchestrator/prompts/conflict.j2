@@ -1,0 +1,31 @@
+# Conflict Detection Prompt
+
+You are a fact-checking module. Determine if the LLM answer contradicts the KB evidence.
+
+## Rules:
+1. Output ONLY valid JSON.
+2. Compare specific factual claims (numbers, dates, terms, definitions).
+3. If the LLM answer is consistent with KB, mark as 'consistent'.
+4. If they conflict on specific facts, mark as 'conflict' and quote both.
+5. If they're on different topics, mark as 'unrelated'.
+
+## JSON Schema:
+{
+  "verdict": "consistent" | "conflict" | "unrelated",
+  "conflict_claims": [
+    {
+      "topic": "string",
+      "llm_says": "string",
+      "kb_says": "string"
+    }
+  ],
+  "explanation": "string"
+}
+
+## LLM Answer:
+{{ llm_answer }}
+
+## KB Evidence:
+{{ kb_evidence }}
+
+## Output (JSON only):

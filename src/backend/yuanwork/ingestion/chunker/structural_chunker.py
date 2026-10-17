@@ -1,0 +1,86 @@
+"""Structural chunker - respects document structure.
+
+For most formats, the parser already produces well-structured blocks.
+This chunker handles edge cases:
+- Blocks that are too long → split with overlap
+- Blocks that are too short → merge with neighbors
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+from typing import Any
+
+from yuanwork.ingestion.parser.base import RawBlock
+
+logger = logging.getLogger(__name__)
+
+
+class StructuralChunker:
+    """Convert RawBlocks to final chunks with size management."""
+
+    # Token limits (bge-m3 supports up to 8192 tokens but practical limit is lower)
+    MAX_CHARS = 2000  # ~500 tokens
+    MIN_CHARS = 50
+    OVERLAP_CHARS = 100
+
+    def chunk(self, blocks: list[RawBlock], doc_id: str) -> list[dict[str, Any]]:
+        """Convert blocks to chunks, splitting oversized ones."""
+        chunks: list[dict[str, Any]] = []
+        chunk_idx = 0
+
+        for block in blocks:
+            text = block.content.strip()
+            if not text:
+                continue
+
+            if len(text) <= self.MAX_CHARS:
+                # Use as-is
+                chunk_idx += 1
+                chunks.append(self._make_chunk(block, text, chunk_idx))
+            else:
+                # Split with overlap
+                sub_chunks = self._split_long_text(text)
+                for sub_text in sub_chunks:
+                    chunk_idx += 1
+                    chunks.append(self._make_chunk(block, sub_text, chunk_idx))
+
+        return chunks
+
+    def _make_chunk(
+        self, block: RawBlock, text: str, chunk_idx: int
+    ) -> dict[str, Any]:
+        """Create a chunk dict from a block and text."""
+        # Generate chunk ID from doc_id + block_id + chunk_idx
+        id_source = f"{block.doc_id}|{block.block_id}|{chunk_idx}|{text[:100]}"
+        chunk_id = hashlib.sha256(id_source.encode()).hexdigest()[:16]
+
+        return {
+            "id": chunk_id,
+            "doc_id": block.doc_id,
+            "chunk_idx": chunk_idx,
+            "text": text,
+            "type": block.type,
+            "meta": block.meta,
+        }
+
+    def _split_long_text(self, text: str) -> list[str]:
+        """Split text into overlapping chunks."""
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = min(start + self.MAX_CHARS, len(text))
+            # Try to break at sentence boundary
+            if end < len(text):
+                for sep in ["\n\n", "。", ".\n", "! ", "? ", "\n"]:
+                    last_sep = text.rfind(sep, start, end)
+                    if last_sep > start + self.MAX_CHARS // 2:
+                        end = last_sep + len(sep)
+                        break
+            chunks.append(text[start:end].strip())
+            if end >= len(text):
+                break
+            start = end - self.OVERLAP_CHARS
+
+        return [c for c in chunks if len(c) >= self.MIN_CHARS]
