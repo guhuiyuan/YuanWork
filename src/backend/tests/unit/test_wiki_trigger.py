@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 
 from yuanwork.db.sqlite import SQLiteStore
+from yuanwork.wiki.page_generator import WikiPageGenerator
 from yuanwork.wiki.trigger import (
     GENERIC_INTENTS,
     WikiCompileTrigger,
@@ -267,6 +268,50 @@ def test_derive_category_maps_intents():
     assert t.derive_category({"intent": "person"}) == "person"
     assert t.derive_category({"intent": "general"}) == "general"
     assert t.derive_category({}) == "general"
+
+
+def test_wiki_prompt_format_does_not_raise():
+    """Regression: the WIKI_PAGE_PROMPT used to have Chinese example
+    placeholders ({标题}, {category}, etc.) that .format() consumed as
+    format fields, causing KeyError at runtime. The fix escapes them as
+    {{...}} so they're literal in the prompt."""
+    from yuanwork.wiki.page_generator import WIKI_PAGE_PROMPT
+
+    # This must not raise KeyError on the example placeholders.
+    rendered = WIKI_PAGE_PROMPT.format(
+        title="违约金条款",
+        chunks_text="片段内容",
+        date_placeholder="2026-10-18",
+    )
+    # The real placeholders are substituted.
+    assert "片段内容" in rendered
+    # The escaped example placeholders appear as literal braces in the prompt.
+    # (The LLM sees these and is expected to copy them; the post-process
+    # step in compile_page() then replaces {date_placeholder} with the
+    # real date in the final stored markdown.)
+    assert "{标题}" in rendered
+    assert "{category}" in rendered
+    assert "{doc1, doc2, ...}" in rendered
+    assert "{date_placeholder}" in rendered
+
+
+@pytest.mark.asyncio
+async def test_compile_page_replaces_date_placeholder_in_output(sqlite_store):
+    """The LLM copies {date_placeholder} literally from the example format.
+    The page generator must substitute it before saving."""
+    # Use the no-LLM fallback path so we control the output exactly.
+    gen = WikiPageGenerator(sqlite_store=sqlite_store, llm_gateway=None)
+    chunks = [_evidence_chunk("a", 0.9, "占位符 {date_placeholder} 测试")]
+    result = await gen.compile_page(
+        title="日期占位符测试",
+        chunks=chunks,
+        category="general",
+        page_id="test/date-placeholder",
+    )
+    page = await sqlite_store.get_wiki_page("test/date-placeholder")
+    assert page is not None
+    # The stored markdown should not contain the raw placeholder.
+    assert "{date_placeholder}" not in page["markdown"]
 
 
 # ===== Imports for tests =====

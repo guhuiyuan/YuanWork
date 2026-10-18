@@ -36,23 +36,23 @@ WIKI_PAGE_PROMPT = """\
 ## 输出格式（Markdown）
 
 ```markdown
-# {标题}
+# {{标题}}
 
-> 来源：{doc1, doc2, ...}（共 N 个片段）
-> 分类：{category}
-> 标签：{tag1, tag2, tag3}
-> 最后更新：{now}
+> 来源：{{doc1, doc2, ...}}（共 N 个片段）
+> 分类：{{category}}
+> 标签：{{tag1, tag2, tag3}}
+> 最后更新：{{date_placeholder}}
 
 ## 摘要
-{200 字以内}
+{{200 字以内}}
 
 ## 核心内容
 
-### {子章节 1}
-{内容} [[来源:文件名 页码/slide]]
+### {{子章节 1}}
+{{内容}} [[来源:文件名 页码/slide]]
 
-### {子章节 2}
-{内容} [[来源:文件名 页码/slide]]
+### {{子章节 2}}
+{{内容}} [[来源:文件名 页码/slide]]
 
 ## 相关页面/概念
 - [[概念名 1]]
@@ -115,6 +115,12 @@ class WikiPageGenerator:
         else:
             markdown = self._fallback_compile(title, chunks)
 
+        # Post-process: substitute the date placeholder that the LLM
+        # copies verbatim from the example output format.
+        markdown = markdown.replace(
+            "{date_placeholder}", datetime.now().strftime("%Y-%m-%d")
+        )
+
         # Extract summary, tags from generated markdown
         summary = self._extract_summary(markdown)
         tags = self._extract_tags_from_md(markdown)
@@ -164,7 +170,7 @@ class WikiPageGenerator:
         prompt = WIKI_PAGE_PROMPT.format(
             title=title,
             chunks_text=chunks_text,
-            now=datetime.now().strftime("%Y-%m-%d"),
+            date_placeholder=datetime.now().strftime("%Y-%m-%d"),
         )
 
         task = LLMTask(

@@ -199,8 +199,8 @@ class WikiCompileTrigger:
                     result["title"] = compiled.get("title")
                     self._last_compile[topic_key] = time.monotonic()
             except Exception as e:
-                logger.warning(f"Wiki compile trigger failed: {e}")
-                result["error"] = str(e)
+                logger.warning(f"Wiki compile trigger failed: {e!r}", exc_info=True)
+                result["error"] = repr(e)
 
         return result
 
