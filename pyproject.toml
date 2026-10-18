@@ -93,5 +93,7 @@ ignore = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# Tests live under src/backend/tests/ (yuanwork package is at src/backend/yuanwork/).
+# The src/backend/conftest.py takes care of adding that dir to sys.path.
+testpaths = ["src/backend/tests"]
 asyncio_mode = "auto"

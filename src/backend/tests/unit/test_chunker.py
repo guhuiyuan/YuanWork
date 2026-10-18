@@ -31,14 +31,17 @@ def test_short_block_unchanged():
 def test_long_block_split():
     """Long blocks are split into overlapping chunks."""
     chunker = StructuralChunker()
-    # Generate text longer than MAX_CHARS
-    long_text = "这是一个测试句子。" * 200  # ~1200 chars
+    # MAX_CHARS = 2000; generate text comfortably above that
+    # "这是一个测试句子。" is 9 Chinese characters
+    long_text = "这是一个测试句子。" * 300  # ~2700 chars, well over MAX_CHARS=2000
     block = make_block(long_text)
     chunks = chunker.chunk([block], "doc-1")
 
     assert len(chunks) > 1
     # All chunks have content
     assert all(len(c["text"]) > 0 for c in chunks)
+    # Sub-chunks respect the MAX_CHARS limit (with small overlap allowance)
+    assert all(len(c["text"]) <= chunker.MAX_CHARS + chunker.OVERLAP_CHARS for c in chunks)
 
 
 def test_chunk_ids_unique():
