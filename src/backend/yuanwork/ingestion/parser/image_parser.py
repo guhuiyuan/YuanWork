@@ -3,13 +3,27 @@
 Stage 2 differentiator: lets users drop screenshots / scanned documents
 into the KB and have the extracted text indexed + searchable.
 
+Chunking strategy (Stage 3 — OCR short-text fix):
+  For each image we emit MULTIPLE blocks, not one:
+    1. One `image_ocr` block per detected text line, content prefixed with
+       `[OCR] ` for semantic anchoring. This addresses two problems:
+         a) bge-m3 dense vectors of multi-field OCR strings dilute into
+            a single "average" vector (see CSDN bge-m3 case study).
+         b) The confidence scorer hard-refuses on `len(results) < 2`, so
+            a single-block image always loses the chat — per-line blocks
+            give us 6+ chunks per image and the scorer can do its job.
+    2. One `image_ocr_full` block carrying the joined OCR text. This is
+       the "context summary" anchor for queries that need the whole
+       document in one hit (e.g. "总结这个截图").
+    3. If OCR engine missing: a single `image_placeholder` block (with
+       metadata only) so the file is at least registered in the index.
+       Also: a per-line `image_ocr` block would be noise without text,
+       so we don't emit it in this case.
+
 The parser is **graceful** — if rapidocr-onnxruntime isn't installed, the
 file is still registered as a placeholder block carrying only metadata
 (width/height/format/EXIF). The chat pipeline can then surface a
 "⚠️ image without OCR" hint instead of silently dropping the file.
-
-For each detected text region we record the bounding box in `meta.boxes`
-so the UI can highlight the text on the image later.
 """
 
 from __future__ import annotations
@@ -65,8 +79,9 @@ class ImageParser(BaseParser):
         """Parse an image file via OCR.
 
         Returns:
-            - 1 block of type `image_ocr` with the detected text + boxes
-            - 1 block of type `image_placeholder` if OCR engine missing
+            - N+1 blocks when OCR succeeds: N `image_ocr` (one per line)
+              + 1 `image_ocr_full` (joined text)
+            - 1 `image_placeholder` block if OCR engine missing
             - [] if the file can't be opened
         """
         meta = await self.extract_metadata(file_path)
@@ -113,10 +128,16 @@ class ImageParser(BaseParser):
         boxes: list[dict[str, Any]] = []
         for det in detections:
             box, text, conf = det
-            lines.append(text)
+            # Filter empty / very-low-confidence lines. Below 0.30 is
+            # almost always a stray shape; we don't want it in the KB.
+            if not text or not text.strip():
+                continue
+            if float(conf) < 0.30:
+                continue
+            lines.append(text.strip())
             boxes.append({
                 "box": [[float(x), float(y)] for x, y in box],
-                "text": text,
+                "text": text.strip(),
                 "confidence": float(conf),
             })
 
@@ -134,17 +155,47 @@ class ImageParser(BaseParser):
                 )
             ]
 
-        text_block = "\n".join(lines)
-        meta_with_boxes = {**meta, "text_count": len(lines), "boxes": boxes}
-        return [
-            RawBlock(
-                block_id=f"{doc_id}_image_ocr",
-                doc_id=doc_id,
-                content=text_block,
-                type="image_ocr",
-                meta=meta_with_boxes,
+        # Emit one block per line. The [OCR] prefix is a Docling-style
+        # "contextualize" header so the embedding model has a few extra
+        # tokens of context to anchor on (bge-m3 prefers ≥10 tokens of
+        # context for short fields).
+        blocks: list[RawBlock] = []
+        for i, (line, box) in enumerate(zip(lines, boxes)):
+            blocks.append(
+                RawBlock(
+                    block_id=f"{doc_id}_image_ocr_line_{i}",
+                    doc_id=doc_id,
+                    content=f"[OCR] {line}",
+                    type="image_ocr",
+                    meta={
+                        "line_index": i,
+                        "confidence": box["confidence"],
+                        "box": box["box"],
+                        "file_name": file_path.name,
+                    },
+                )
             )
-        ]
+
+        # Plus one full-text block as the "context anchor" for queries
+        # that need the whole document in one hit. The [OCR全文] prefix
+        # marks it as the joined view (so retrieval can distinguish it
+        # from per-line hits if we ever add a re-ranker that cares).
+        joined = "\n".join(lines)
+        blocks.append(
+            RawBlock(
+                block_id=f"{doc_id}_image_ocr_full",
+                doc_id=doc_id,
+                content=f"[OCR全文] {joined}",
+                type="image_ocr_full",
+                meta={
+                    "line_count": len(lines),
+                    "file_name": file_path.name,
+                    "boxes": boxes,
+                },
+            )
+        )
+
+        return blocks
 
     def _run_ocr(self, file_path: Path) -> tuple:
         """Run OCR synchronously. rapidocr returns (detections, timing)."""

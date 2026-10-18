@@ -1,7 +1,11 @@
-"""Hybrid retrieval - vector + metadata filter + reranking.
+"""Hybrid retrieval - vector + lexical + reranking.
 
-Stage 1 implementation: vector similarity with metadata filter.
-Stage 2 will add BM25 sparse retrieval and proper hybrid scoring.
+Stage 1: vector search with optional LanceDB filter expression.
+Stage 2: rerank top candidates with bge-reranker-v2-m3.
+Stage 3: add bge-m3 sparse (lexical) channel and fuse with dense
+         via weighted sum. This rescues literal-token queries
+         ("1280", "INV-2024-001", "金额") that pure dense retrieval
+         underweights.
 """
 
 from __future__ import annotations
@@ -16,10 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 class HybridRetriever:
-    """Hybrid retrieval: vector recall + optional cross-encoder rerank.
+    """Hybrid retrieval: dense + sparse recall + optional cross-encoder rerank.
 
-    Stage 1: vector search with optional LanceDB filter expression.
-    Stage 2: rerank top candidates with bge-reranker-v2-m3 (when enabled).
+    Stage 3 default: calls `search_hybrid()` on the semantic store
+    (which fuses bge-m3 dense + bge-m3 sparse). Then optionally
+    reranks the fused top-K with a cross-encoder.
     """
 
     def __init__(
@@ -28,11 +33,19 @@ class HybridRetriever:
         reranker: Reranker | None = None,
         use_reranker: bool = True,
         top_k_initial: int = 50,
+        use_hybrid: bool = True,
+        alpha: float = 0.65,
+        beta: float = 0.35,
     ):
         self.semantic = semantic_memory
         self.reranker = reranker
         self.use_reranker_flag = use_reranker
         self.top_k_initial = top_k_initial
+        self.use_hybrid_flag = use_hybrid
+        # Defaults to the same weights used inside SemanticMemory.override
+        # these per-instance for experimentation.
+        self.alpha = alpha
+        self.beta = beta
 
     async def search(
         self,
@@ -49,7 +62,7 @@ class HybridRetriever:
             top_k: Number of results to return
             doc_ids: Optional list of doc_ids to restrict to
             file_types: Optional file type filter (e.g., ["pptx", "pdf"])
-            min_score: Minimum similarity score
+            min_score: Minimum similarity score (applied after rerank)
 
         Returns:
             List of chunks with scores, sorted by relevance
@@ -68,11 +81,23 @@ class HybridRetriever:
 
         # Overfetch for reranking / filtering
         recall_k = max(top_k, self.top_k_initial) if self.use_reranker_flag else top_k * 2
-        results = await self.semantic.search(
-            query=query,
-            top_k=recall_k,
-            filter_expr=filter_expr,
-        )
+
+        if self.use_hybrid_flag:
+            # Stage 3 path: dense + sparse fusion
+            results = await self.semantic.search_hybrid(
+                query=query,
+                top_k=recall_k,
+                filter_expr=filter_expr,
+                alpha=self.alpha,
+                beta=self.beta,
+                recall_k=recall_k,
+            )
+        else:
+            results = await self.semantic.search(
+                query=query,
+                top_k=recall_k,
+                filter_expr=filter_expr,
+            )
 
         # Filter by min_score
         results = [r for r in results if r.get("_score", 0) >= min_score]
@@ -118,10 +143,20 @@ class HybridRetriever:
 
         filter_expr = " AND ".join(filter_parts) if filter_parts else None
 
-        results = await self.semantic.search(
-            query=query,
-            top_k=top_k,
-            filter_expr=filter_expr,
-        )
+        if self.use_hybrid_flag:
+            results = await self.semantic.search_hybrid(
+                query=query,
+                top_k=top_k,
+                filter_expr=filter_expr,
+                alpha=self.alpha,
+                beta=self.beta,
+                recall_k=max(top_k * 3, 30),
+            )
+        else:
+            results = await self.semantic.search(
+                query=query,
+                top_k=top_k,
+                filter_expr=filter_expr,
+            )
 
         return results
