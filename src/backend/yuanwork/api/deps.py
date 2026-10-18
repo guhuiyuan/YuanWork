@@ -9,6 +9,7 @@ from fastapi import Depends
 from yuanwork.config import YuanWorkSettings, get_settings
 
 if TYPE_CHECKING:
+    from yuanwork.consolidation.engine import ConsolidationEngine
     from yuanwork.db.sqlite import SQLiteStore
     from yuanwork.llm.gateway import LLMGateway
     from yuanwork.memory.semantic import SemanticMemory
@@ -28,6 +29,7 @@ _semantic_memory: "SemanticMemory | None" = None
 _episodic_memory: "EpisodicMemory | None" = None
 _profile_store: "ProfileStore | None" = None
 _sqlite_store: "SQLiteStore | None" = None
+_consolidation_engine: "ConsolidationEngine | None" = None
 
 
 def set_llm_gateway(gateway: "LLMGateway") -> None:
@@ -95,11 +97,25 @@ def get_sqlite_store() -> "SQLiteStore":
     return _sqlite_store
 
 
+def set_consolidation_engine(engine: "ConsolidationEngine") -> None:
+    """Set the consolidation engine singleton."""
+    global _consolidation_engine
+    _consolidation_engine = engine
+
+
+def get_consolidation_engine() -> "ConsolidationEngine":
+    """Get the consolidation engine instance."""
+    if _consolidation_engine is None:
+        raise RuntimeError("Consolidation engine not initialized")
+    return _consolidation_engine
+
+
 def reset_dependencies() -> None:
     """Reset all dependencies (for testing)."""
-    global _llm_gateway, _semantic_memory, _episodic_memory, _profile_store, _sqlite_store
+    global _llm_gateway, _semantic_memory, _episodic_memory, _profile_store, _sqlite_store, _consolidation_engine
     _llm_gateway = None
     _semantic_memory = None
     _episodic_memory = None
     _profile_store = None
     _sqlite_store = None
+    _consolidation_engine = None

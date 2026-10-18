@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from yuanwork import __version__
 from yuanwork.api.deps import (
+    set_consolidation_engine,
     set_episodic_memory,
     set_llm_gateway,
     set_profile_store,
@@ -22,6 +23,7 @@ from yuanwork.api.deps import (
 from yuanwork.config import YuanWorkSettings
 
 if TYPE_CHECKING:
+    from yuanwork.consolidation.engine import ConsolidationEngine
     from yuanwork.db.sqlite import SQLiteStore
     from yuanwork.llm.gateway import LLMGateway
     from yuanwork.memory.episodic import EpisodicMemory
@@ -32,6 +34,45 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _load_dotenv_into_environ() -> None:
+    """Best-effort load of .env into os.environ.
+
+    pydantic-settings only consumes .env for its own field resolution; it
+    does not mutate os.environ. The LLM gateway (and any other library
+    that reads env vars directly) needs the values in os.environ. This
+    helper searches the project root for a .env file and applies the
+    key=value pairs without overwriting already-set variables.
+    """
+    import os
+
+    from pathlib import Path
+
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        # python-dotenv not installed; nothing to do
+        return
+
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent.parent.parent.parent / ".env",
+    ]
+    loaded = 0
+    for path in candidates:
+        if not path.is_file():
+            continue
+        for key, value in dotenv_values(path).items():
+            if value is None:
+                continue
+            # Don't clobber a value the user already exported.
+            if key not in os.environ and key.upper() not in os.environ:
+                os.environ[key] = value
+                os.environ.setdefault(key.upper(), value)
+                loaded += 1
+    if loaded:
+        logger.info(f"Loaded {loaded} env var(s) from .env into os.environ")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: initialize resources on startup, cleanup on shutdown."""
@@ -40,6 +81,11 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing YuanWork components...")
     logger.info(f"   Data dir: {settings.data_dir}")
     logger.info(f"   Network mode: {settings.network_mode.name}")
+
+    # Load .env into os.environ so downstream libraries (litellm, httpx) can
+    # see API keys referenced as api_key_env in models.yaml. pydantic-settings
+    # reads .env into the model fields but does NOT export to os.environ.
+    _load_dotenv_into_environ()
 
     # Initialize SQLite store
     from yuanwork.db.sqlite import SQLiteStore
@@ -70,6 +116,13 @@ async def lifespan(app: FastAPI):
     set_semantic_memory(semantic_memory)
     logger.info("✓ Semantic memory initialized (embedding lazy-loaded)")
 
+    # Kick off a background task to prewarm the embedding model. The first
+    # chat/ingest will block until it finishes (~1-3 min on CPU) but the
+    # server can serve other requests (health, status, file listing) while
+    # the model loads in a thread.
+    await semantic_memory.prewarm_embedding_model()
+    logger.info("✓ Background embedding prewarm started")
+
     # Initialize episodic memory
     from yuanwork.memory.episodic import EpisodicMemory
 
@@ -84,12 +137,26 @@ async def lifespan(app: FastAPI):
     set_profile_store(profile_store)
     logger.info("✓ Profile store initialized")
 
+    # Initialize consolidation engine (integration layer)
+    from yuanwork.consolidation.engine import ConsolidationEngine
+
+    consolidation_engine = ConsolidationEngine(
+        episodic_memory=episodic_memory,
+        semantic_memory=semantic_memory,
+        profile_store=profile_store,
+        sqlite_store=sqlite_store,
+        llm_gateway=llm_gateway,
+    )
+    set_consolidation_engine(consolidation_engine)
+    logger.info("✓ Consolidation engine initialized")
+
     # Store references for shutdown
     app.state.sqlite_store = sqlite_store
     app.state.llm_gateway = llm_gateway
     app.state.semantic_memory = semantic_memory
     app.state.episodic_memory = episodic_memory
     app.state.profile_store = profile_store
+    app.state.consolidation_engine = consolidation_engine
 
     logger.info("🚀 YuanWork backend ready")
 

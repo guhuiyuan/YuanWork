@@ -6,6 +6,7 @@ Supports hybrid retrieval (vector + BM25 + metadata filter).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -48,6 +49,11 @@ class SemanticMemory:
         self._table = None
         self._embedder = None
         self._embedding_dim: int | None = None
+        # Set to True while a background prewarm is in flight so callers
+        # (e.g. /health) can report "loading" instead of pretending the
+        # model is ready.
+        self._prewarm_in_flight: bool = False
+        self._prewarm_task: asyncio.Task | None = None
 
     async def initialize(self) -> None:
         """Initialize LanceDB connection."""
@@ -65,7 +71,12 @@ class SemanticMemory:
         return self._embedder is not None
 
     def load_embedding_model(self) -> None:
-        """Load the embedding model (called on first use to avoid boot delay)."""
+        """Load the embedding model synchronously (called from a thread).
+
+        Returns immediately if already loaded. This is a CPU-bound operation
+        that takes 1-3 minutes on first run; callers should use
+        `load_embedding_model_async` to keep the event loop responsive.
+        """
         if self._embedder is not None:
             return
 
@@ -80,6 +91,26 @@ class SemanticMemory:
             devices=self.embedding_device,
         )
         logger.info("Embedding model loaded")
+
+    async def load_embedding_model_async(self) -> None:
+        """Async wrapper that runs the synchronous load in a thread."""
+        if self._embedder is not None:
+            return
+        self._prewarm_in_flight = True
+        try:
+            await asyncio.to_thread(self.load_embedding_model)
+        finally:
+            self._prewarm_in_flight = False
+
+    async def prewarm_embedding_model(self) -> None:
+        """Kick off a background task to load the model without blocking.
+
+        Idempotent: subsequent calls are no-ops. The health endpoint reports
+        `_prewarm_in_flight` so the UI can show a "loading" state.
+        """
+        if self._embedder is not None or self._prewarm_in_flight:
+            return
+        self._prewarm_task = asyncio.create_task(self.load_embedding_model_async())
 
     def list_tables(self) -> list[str]:
         """List all tables in the database."""
@@ -224,6 +255,11 @@ class SemanticMemory:
             List of chunk dicts with scores
         """
         table = self.get_or_create_chunks_table()
+
+        # Short-circuit when the KB is empty. This avoids triggering the
+        # heavy bge-m3 model load on a fresh install.
+        if table.count_rows() == 0:
+            return []
 
         # Embed query
         embeddings = await self.embed_texts([query])

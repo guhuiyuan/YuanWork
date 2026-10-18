@@ -36,6 +36,7 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
         try:
             from yuanwork.orchestrator.agent import AgentLoop
             from yuanwork.api.deps import (
+                get_consolidation_engine,
                 get_episodic_memory,
                 get_llm_gateway,
                 get_semantic_memory,
@@ -44,11 +45,13 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
             semantic = get_semantic_memory()
             episodic = get_episodic_memory()
             llm = get_llm_gateway()
+            consolidation = get_consolidation_engine()
 
             agent = AgentLoop(
                 llm_gateway=llm,
                 semantic_memory=semantic,
                 episodic_memory=episodic,
+                consolidation_engine=consolidation,
             )
 
             async for event in agent.stream(
@@ -82,6 +85,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     try:
         from yuanwork.orchestrator.agent import AgentLoop
         from yuanwork.api.deps import (
+            get_consolidation_engine,
             get_episodic_memory,
             get_llm_gateway,
             get_semantic_memory,
@@ -90,11 +94,13 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         semantic = get_semantic_memory()
         episodic = get_episodic_memory()
         llm = get_llm_gateway()
+        consolidation = get_consolidation_engine()
 
         agent = AgentLoop(
             llm_gateway=llm,
             semantic_memory=semantic,
             episodic_memory=episodic,
+            consolidation_engine=consolidation,
         )
 
         result = await agent.run(

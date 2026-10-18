@@ -48,10 +48,14 @@ async def health_check(request: Request) -> HealthResponse:
     try:
         semantic = getattr(request.app.state, "semantic_memory", None)
         if semantic is not None:
+            embedding_loaded = semantic.is_embedding_loaded()
+            prewarm_in_flight = getattr(semantic, "_prewarm_in_flight", False)
+            status = "ok" if embedding_loaded else ("loading" if prewarm_in_flight else "deferred")
             components["semantic_memory"] = {
-                "status": "ok",
+                "status": status,
                 "table_count": len(semantic.list_tables()),
-                "embedding_loaded": semantic.is_embedding_loaded(),
+                "embedding_loaded": embedding_loaded,
+                "embedding_model": semantic.embedding_model_name,
             }
         else:
             components["semantic_memory"] = {"status": "not_initialized"}

@@ -77,11 +77,14 @@ class LLMGateway:
     def __init__(self, settings: YuanWorkSettings):
         self.settings = settings
         self._routing: dict[str, str] = {}
+        # alias -> {provider, model_name, api_base, api_key, ...}
         self._models: dict[str, dict[str, Any]] = {}
         self._load_config()
 
     def _load_config(self) -> None:
         """Load model configuration from configs/models.yaml."""
+        import os
+
         config_path = self.settings.config_dir / "models.yaml"
 
         if not config_path.exists():
@@ -90,15 +93,37 @@ class LLMGateway:
                 f"Using defaults. Create configs/models.yaml to customize."
             )
             self._routing = self._default_routing()
+            self._models = {}
             return
 
         with config_path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
-        self._models = data.get("models", {})
+        raw_models = data.get("models", {})
         self._routing = data.get("routing", self._default_routing())
 
-        logger.info(f"Loaded {len(self._models)} models from config")
+        # Resolve api_key_env -> api_key and keep provider/base/model_name
+        # for later assembly into the litellm call.
+        for alias, spec in raw_models.items():
+            spec = dict(spec)  # copy so we don't mutate YAML in memory
+            api_key_env = spec.pop("api_key_env", None)
+            if api_key_env:
+                resolved = os.environ.get(api_key_env) or os.environ.get(
+                    api_key_env.upper()
+                )
+                if resolved:
+                    spec["api_key"] = resolved
+                else:
+                    logger.warning(
+                        f"Model '{alias}' references api_key_env={api_key_env} "
+                        f"but that env var is not set"
+                    )
+            self._models[alias] = spec
+
+        logger.info(
+            f"Loaded {len(self._models)} models from config "
+            f"({sum(1 for s in self._models.values() if s.get('api_key'))} with keys)"
+        )
 
     def _default_routing(self) -> dict[str, str]:
         """Default task-to-model routing."""
@@ -118,22 +143,81 @@ class LLMGateway:
         return list(self._models.keys())
 
     def get_model_for_task(self, task_type: str) -> str:
-        """Get the model name for a task type."""
-        return self._routing.get(task_type, self._routing.get("general", "gpt-4o-mini"))
+        """Get the model name for a task type.
+
+        If the routed model has no api_key configured, fall back to the
+        first configured model that does have one. This lets a fresh
+        install with only one API key still work end-to-end instead of
+        returning 'Missing credentials' on every call.
+        """
+        target = self._routing.get(task_type) or self._routing.get("general")
+        if target and self._models.get(target, {}).get("api_key"):
+            return target
+        # Fallback: any configured model with a key
+        for alias, spec in self._models.items():
+            if spec.get("api_key"):
+                if target and not self._models.get(target, {}).get("api_key"):
+                    logger.warning(
+                        f"Routing target '{target}' has no API key; "
+                        f"falling back to '{alias}'"
+                    )
+                return alias
+        return target or "gpt-4o-mini"
+
+    def _resolve_litellm_kwargs(self, alias: str) -> dict[str, Any]:
+        """Translate a configured alias into litellm-ready kwargs.
+
+        The alias from `routing` (e.g. "gpt-4o-mini") is looked up in the
+        `models` section to get provider/model_name/api_base/api_key. The
+        resulting litellm model string is `provider/model_name` (or the raw
+        model_name if the provider is already embedded, or just model_name
+        for ollama where provider is implicit).
+        """
+        spec = self._models.get(alias)
+        if not spec:
+            # Fall back: treat the alias itself as the litellm model.
+            # (Lets routing work even if user only configures routing.)
+            return {"model": alias}
+
+        provider = spec.get("provider", "").lower()
+        model_name = spec.get("model_name") or alias
+
+        # ollama uses host:port prefix; litellm detects the provider from
+        # the "ollama/" prefix or api_base.
+        if provider == "ollama":
+            litellm_model = f"ollama/{model_name}"
+        elif provider == "anthropic":
+            litellm_model = f"anthropic/{model_name}"
+        elif provider == "openai":
+            litellm_model = f"openai/{model_name}"
+        elif provider in ("deepseek", "minimax", "custom"):
+            # deepseek uses OpenAI-compatible API; minimax uses anthropic-
+            # compatible. We model both by setting api_base so litellm routes
+            # the call to the right endpoint with the right protocol.
+            litellm_model = model_name
+        else:
+            litellm_model = model_name
+
+        kwargs: dict[str, Any] = {"model": litellm_model}
+        if spec.get("api_key"):
+            kwargs["api_key"] = spec["api_key"]
+        if spec.get("api_base"):
+            kwargs["api_base"] = spec["api_base"]
+        return kwargs
 
     async def complete(self, task: LLMTask) -> LLMResponse:
         """Run a non-streaming completion."""
-        model = self.get_model_for_task(task.task_type)
+        alias = self.get_model_for_task(task.task_type)
 
         # Build litellm messages
         messages = [{"role": m.role, "content": m.content} for m in task.messages]
 
-        kwargs: dict[str, Any] = {
-            "model": model,
+        kwargs = self._resolve_litellm_kwargs(alias)
+        kwargs.update({
             "messages": messages,
             "temperature": task.temperature,
             "stream": False,
-        }
+        })
 
         if task.max_tokens:
             kwargs["max_tokens"] = task.max_tokens
@@ -143,10 +227,10 @@ class LLMGateway:
 
         # Apply offline mode check
         if self.settings.network_mode == NetworkMode.OFFLINE:
-            # Force local model
-            if not model.startswith("ollama/") and not model.startswith("local/"):
+            model_str = kwargs.get("model", "")
+            if not model_str.startswith("ollama/") and not model_str.startswith("local/"):
                 logger.warning(
-                    f"Offline mode: redirecting {model} to local fallback"
+                    f"Offline mode: redirecting {alias} to local fallback"
                 )
                 kwargs["model"] = "ollama/llama3.1:8b"
 
@@ -160,26 +244,26 @@ class LLMGateway:
             }
             return LLMResponse(
                 content=content or "",
-                model=model,
+                model=alias,
                 finish_reason=response.choices[0].finish_reason or "stop",
                 usage=usage,
                 raw=response,
             )
         except Exception as e:
-            logger.exception(f"LLM call failed for model {model}: {e}")
+            logger.exception(f"LLM call failed for model {alias}: {e}")
             raise
 
     async def stream(self, task: LLMTask) -> AsyncIterator[str]:
         """Stream completion tokens."""
-        model = self.get_model_for_task(task.task_type)
+        alias = self.get_model_for_task(task.task_type)
         messages = [{"role": m.role, "content": m.content} for m in task.messages]
 
-        kwargs: dict[str, Any] = {
-            "model": model,
+        kwargs = self._resolve_litellm_kwargs(alias)
+        kwargs.update({
             "messages": messages,
             "temperature": task.temperature,
             "stream": True,
-        }
+        })
 
         if task.max_tokens:
             kwargs["max_tokens"] = task.max_tokens
@@ -188,7 +272,8 @@ class LLMGateway:
             kwargs["response_format"] = {"type": "json_object"}
 
         if self.settings.network_mode == NetworkMode.OFFLINE:
-            if not model.startswith("ollama/") and not model.startswith("local/"):
+            model_str = kwargs.get("model", "")
+            if not model_str.startswith("ollama/") and not model_str.startswith("local/"):
                 kwargs["model"] = "ollama/llama3.1:8b"
 
         try:

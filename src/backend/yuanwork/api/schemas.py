@@ -138,10 +138,12 @@ class ConflictInfo(BaseModel):
     """Information about an LLM-vs-KB conflict."""
 
     type: Literal["llm_vs_kb", "episodic_vs_semantic"]
-    llm_answer: str
-    kb_evidence: str
-    citation: Citation
-    message: str
+    topic: str | None = None
+    llm_answer: str = ""
+    kb_evidence: str = ""
+    citation: Citation | None = None
+    message: str = ""
+    explanation: str | None = None
 
 
 class ChatResponse(BaseModel):

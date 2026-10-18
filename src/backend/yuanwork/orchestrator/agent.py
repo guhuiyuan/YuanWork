@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from yuanwork.api.schemas import ChatMessage
 from yuanwork.llm.gateway import LLMGateway
@@ -23,6 +23,9 @@ from yuanwork.orchestrator.steps.extract import extract_evidence
 from yuanwork.orchestrator.steps.answer import generate_answer, generate_refusal
 from yuanwork.retrieval.confidence import ConfidenceScorer
 from yuanwork.retrieval.hybrid import HybridRetriever
+
+if TYPE_CHECKING:
+    from yuanwork.consolidation.engine import ConsolidationEngine
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,10 @@ class AgentState:
     refused: bool = False
     refusal_reason: str | None = None
 
+    # Memory bookkeeping
+    user_episode_id: int | None = None
+    assistant_episode_id: int | None = None
+
     # Debug
     trace: list[dict[str, Any]] = field(default_factory=list)
 
@@ -60,10 +67,12 @@ class AgentLoop:
         llm_gateway: LLMGateway,
         semantic_memory: SemanticMemory,
         episodic_memory: EpisodicMemory,
+        consolidation_engine: "ConsolidationEngine | None" = None,
     ):
         self.llm = llm_gateway
         self.semantic = semantic_memory
         self.episodic = episodic_memory
+        self.consolidation = consolidation_engine
         self.retriever = HybridRetriever(semantic_memory)
         self.scorer = ConfidenceScorer()
 
@@ -85,10 +94,10 @@ class AgentLoop:
         await self._step_localize(state)
         await self._step_extract(state)
         await self._step_answer(state)
+        await self._step_check_conflicts(state)
 
-        # Record episodic memory (async, non-blocking)
-        # TODO: add to background task queue
-        # await self._record_episode(state)
+        # Record episodic memory for this turn (best-effort, don't fail chat)
+        await self._record_episode_safe(state)
 
         return {
             "answer": state.answer,
@@ -166,6 +175,21 @@ class AgentLoop:
                 "refused": state.refused,
             },
         }
+
+        # Step 5 (Stage 2): LLM-vs-KB conflict detection
+        yield {"type": "trace", "data": {"step": "check_conflicts", "status": "started"}}
+        await self._step_check_conflicts(state)
+        yield {
+            "type": "trace",
+            "data": {
+                "step": "check_conflicts",
+                "status": "completed",
+                "conflict_count": len(state.conflicts),
+            },
+        }
+
+        # Record episodic memory
+        await self._record_episode_safe(state)
 
         # Final events
         if state.refused:
@@ -314,3 +338,117 @@ class AgentLoop:
             }
             citations.append(citation)
         return citations
+
+    async def _step_check_conflicts(self, state: AgentState) -> None:
+        """Step 5 (Stage 2): detect LLM-vs-KB conflicts.
+
+        Runs only if we generated an answer (not refused) and have evidence.
+        Persists detected conflicts to SQLite via the consolidation engine.
+        """
+        # Skip if refused or no usable answer/evidence
+        if state.refused or not state.answer or not state.evidence:
+            return
+
+        from yuanwork.consolidation.conflict import detect_conflict, format_conflict_message
+
+        # Build a compact KB evidence digest (top 3 chunks, truncated)
+        kb_parts: list[str] = []
+        for chunk in state.evidence[:3]:
+            text = (chunk.get("text") or "").strip()
+            if text:
+                kb_parts.append(text[:600])
+        kb_evidence = "\n\n---\n\n".join(kb_parts) if kb_parts else "(no evidence)"
+
+        try:
+            detection = await detect_conflict(
+                llm=self.llm,
+                llm_answer=state.answer,
+                kb_evidence=kb_evidence,
+            )
+        except Exception as e:
+            logger.exception(f"Conflict detection crashed: {e}")
+            state.trace.append({"step": "check_conflicts", "error": str(e)})
+            return
+
+        verdict = detection.get("verdict", "unrelated")
+        claims = detection.get("conflict_claims") or []
+        explanation = detection.get("explanation", "")
+
+        state.trace.append({
+            "step": "check_conflicts",
+            "verdict": verdict,
+            "claim_count": len(claims),
+        })
+
+        if verdict != "conflict" or not claims:
+            return
+
+        # Attach citation context per claim (best-effort)
+        first_citation = state.citations[0] if state.citations else {}
+        for claim in claims:
+            conflict_obj = {
+                "type": "llm_vs_kb",
+                "topic": claim.get("topic", "N/A"),
+                "llm_says": claim.get("llm_says", ""),
+                "kb_says": claim.get("kb_says", ""),
+                "citation": first_citation,
+                "message": format_conflict_message({"verdict": "conflict", "conflict_claims": [claim]}),
+                "explanation": explanation,
+            }
+            state.conflicts.append(conflict_obj)
+
+        # Persist each claim to the conflicts table (best-effort)
+        if self.consolidation is not None:
+            first_chunk_id = (
+                state.evidence[0].get("id") if state.evidence else None
+            )
+            for conflict_obj in state.conflicts:
+                try:
+                    await self.consolidation.log_conflict(
+                        llm_answer=conflict_obj["llm_says"],
+                        kb_evidence=conflict_obj["kb_says"],
+                        episode_id=state.assistant_episode_id,
+                        knowledge_chunk_id=first_chunk_id,
+                        resolution=conflict_obj["explanation"],
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist conflict: {e}")
+
+    async def _record_episode_safe(self, state: AgentState) -> None:
+        """Record this turn in episodic memory (best-effort, never raises)."""
+        if self.consolidation is None:
+            return
+        try:
+            topic_tags = []
+            entities = []
+            if state.understanding:
+                topic = state.understanding.get("topic")
+                if topic:
+                    topic_tags.append(topic)
+                entity_hints = state.understanding.get("entity_hints") or []
+                if isinstance(entity_hints, list):
+                    entities.extend(str(e) for e in entity_hints[:10])
+
+            # Pull a topic tag from the conflict type if present
+            if state.conflicts:
+                topic_tags.append("conflict-detected")
+
+            state.user_episode_id = await self.consolidation.record_episode(
+                session_id=state.session_id,
+                role="user",
+                content=state.query,
+                topic_tags=list(dict.fromkeys(topic_tags)),
+                entities=entities,
+                importance_score=0.5,
+            )
+            if state.answer and not state.refused:
+                state.assistant_episode_id = await self.consolidation.record_episode(
+                    session_id=state.session_id,
+                    role="assistant",
+                    content=state.answer,
+                    topic_tags=list(dict.fromkeys(topic_tags + ["answer"])),
+                    entities=entities,
+                    importance_score=0.6,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to record episode: {e}")
