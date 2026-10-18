@@ -156,6 +156,7 @@ class ChatResponse(BaseModel):
     refused: bool = False
     refusal_reason: str | None = None
     conflicts: list[ConflictInfo] = Field(default_factory=list)
+    wiki_compile: dict[str, Any] | None = None
     trace: list[dict[str, Any]] = Field(default_factory=list)
 
 

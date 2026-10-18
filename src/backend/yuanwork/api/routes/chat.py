@@ -40,18 +40,21 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
                 get_episodic_memory,
                 get_llm_gateway,
                 get_semantic_memory,
+                get_wiki_compile_trigger,
             )
 
             semantic = get_semantic_memory()
             episodic = get_episodic_memory()
             llm = get_llm_gateway()
             consolidation = get_consolidation_engine()
+            wiki_trigger = get_wiki_compile_trigger()
 
             agent = AgentLoop(
                 llm_gateway=llm,
                 semantic_memory=semantic,
                 episodic_memory=episodic,
                 consolidation_engine=consolidation,
+                wiki_compile_trigger=wiki_trigger,
             )
 
             async for event in agent.stream(
@@ -89,18 +92,21 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             get_episodic_memory,
             get_llm_gateway,
             get_semantic_memory,
+            get_wiki_compile_trigger,
         )
 
         semantic = get_semantic_memory()
         episodic = get_episodic_memory()
         llm = get_llm_gateway()
         consolidation = get_consolidation_engine()
+        wiki_trigger = get_wiki_compile_trigger()
 
         agent = AgentLoop(
             llm_gateway=llm,
             semantic_memory=semantic,
             episodic_memory=episodic,
             consolidation_engine=consolidation,
+            wiki_compile_trigger=wiki_trigger,
         )
 
         result = await agent.run(
@@ -118,6 +124,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             refused=result.get("refused", False),
             refusal_reason=result.get("refusal_reason"),
             conflicts=result.get("conflicts", []),
+            wiki_compile=result.get("wiki_compile"),
             trace=result.get("trace", []),
         )
 

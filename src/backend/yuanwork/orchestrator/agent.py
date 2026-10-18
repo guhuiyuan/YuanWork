@@ -26,6 +26,7 @@ from yuanwork.retrieval.hybrid import HybridRetriever
 
 if TYPE_CHECKING:
     from yuanwork.consolidation.engine import ConsolidationEngine
+    from yuanwork.wiki.trigger import WikiCompileTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ class AgentState:
     user_episode_id: int | None = None
     assistant_episode_id: int | None = None
 
+    # Wiki compile outcome (Stage 2)
+    wiki_compile: dict[str, Any] | None = None
+
     # Debug
     trace: list[dict[str, Any]] = field(default_factory=list)
 
@@ -68,11 +72,13 @@ class AgentLoop:
         semantic_memory: SemanticMemory,
         episodic_memory: EpisodicMemory,
         consolidation_engine: "ConsolidationEngine | None" = None,
+        wiki_compile_trigger: "WikiCompileTrigger | None" = None,
     ):
         self.llm = llm_gateway
         self.semantic = semantic_memory
         self.episodic = episodic_memory
         self.consolidation = consolidation_engine
+        self.wiki_trigger = wiki_compile_trigger
         self.retriever = HybridRetriever(semantic_memory)
         self.scorer = ConfidenceScorer()
 
@@ -93,6 +99,8 @@ class AgentLoop:
         await self._step_understand(state)
         await self._step_localize(state)
         await self._step_extract(state)
+        # Stage 2: opportunistic Wiki page compile (fire-and-forget, after extract)
+        await self._step_maybe_compile_wiki_page(state)
         await self._step_answer(state)
         await self._step_check_conflicts(state)
 
@@ -106,6 +114,7 @@ class AgentLoop:
             "refused": state.refused,
             "refusal_reason": state.refusal_reason,
             "conflicts": state.conflicts,
+            "wiki_compile": state.wiki_compile,
             "trace": state.trace,
         }
 
@@ -160,6 +169,18 @@ class AgentLoop:
                 "step": "extract",
                 "status": "completed",
                 "evidence_count": len(state.evidence),
+            },
+        }
+
+        # Step 3.5 (Stage 2): opportunistic Wiki page compile from extract output
+        yield {"type": "trace", "data": {"step": "wiki_compile", "status": "started"}}
+        await self._step_maybe_compile_wiki_page(state)
+        yield {
+            "type": "trace",
+            "data": {
+                "step": "wiki_compile",
+                "status": "completed",
+                "wiki_compile": state.wiki_compile,
             },
         }
 
@@ -279,6 +300,32 @@ class AgentLoop:
             "evidence_count": len(state.evidence),
             "confidence": state.confidence,
         })
+
+    async def _step_maybe_compile_wiki_page(self, state: AgentState) -> None:
+        """Step 3.5 (Stage 2): opportunistically compile a Wiki page from
+        the extracted evidence.
+
+        Fires only when:
+          - Wiki trigger is configured
+          - Trigger conditions are met (multi-doc, enough evidence, etc.)
+          - Throttle allows
+
+        Errors are swallowed: a failed compile must never fail the chat.
+        """
+        if self.wiki_trigger is None:
+            return
+        try:
+            result = await self.wiki_trigger.maybe_compile(
+                evidence=state.evidence,
+                understanding=state.understanding,
+            )
+        except Exception as e:
+            logger.warning(f"Wiki compile step crashed: {e}")
+            result = {"triggered": False, "reason": "exception", "error": str(e),
+                      "page_id": None, "title": None}
+
+        state.wiki_compile = result
+        state.trace.append({"step": "wiki_compile", **result})
 
     async def _step_answer(self, state: AgentState) -> None:
         """Step 4: Generate answer or refuse."""

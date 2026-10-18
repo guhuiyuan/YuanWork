@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from yuanwork.memory.semantic import SemanticMemory
     from yuanwork.memory.episodic import EpisodicMemory
     from yuanwork.memory.profile import ProfileStore
+    from yuanwork.wiki.trigger import WikiCompileTrigger
+    from yuanwork.wiki.trigger import WikiCompileTrigger
 
 
 # Type aliases for cleaner endpoint signatures
@@ -30,6 +32,7 @@ _episodic_memory: "EpisodicMemory | None" = None
 _profile_store: "ProfileStore | None" = None
 _sqlite_store: "SQLiteStore | None" = None
 _consolidation_engine: "ConsolidationEngine | None" = None
+_wiki_compile_trigger: "WikiCompileTrigger | None" = None
 
 
 def set_llm_gateway(gateway: "LLMGateway") -> None:
@@ -110,12 +113,25 @@ def get_consolidation_engine() -> "ConsolidationEngine":
     return _consolidation_engine
 
 
+def set_wiki_compile_trigger(trigger: "WikiCompileTrigger") -> None:
+    """Set the Wiki compile trigger singleton."""
+    global _wiki_compile_trigger
+    _wiki_compile_trigger = trigger
+
+
+def get_wiki_compile_trigger() -> "WikiCompileTrigger":
+    if _wiki_compile_trigger is None:
+        raise RuntimeError("Wiki compile trigger not initialized")
+    return _wiki_compile_trigger
+
+
 def reset_dependencies() -> None:
     """Reset all dependencies (for testing)."""
-    global _llm_gateway, _semantic_memory, _episodic_memory, _profile_store, _sqlite_store, _consolidation_engine
+    global _llm_gateway, _semantic_memory, _episodic_memory, _profile_store, _sqlite_store, _consolidation_engine, _wiki_compile_trigger
     _llm_gateway = None
     _semantic_memory = None
     _episodic_memory = None
     _profile_store = None
     _sqlite_store = None
     _consolidation_engine = None
+    _wiki_compile_trigger = None

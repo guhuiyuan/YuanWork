@@ -20,6 +20,7 @@ from yuanwork.api.deps import (
     set_profile_store,
     set_semantic_memory,
     set_sqlite_store,
+    set_wiki_compile_trigger,
 )
 from yuanwork.config import YuanWorkSettings
 
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from yuanwork.memory.episodic import EpisodicMemory
     from yuanwork.memory.profile import ProfileStore
     from yuanwork.memory.semantic import SemanticMemory
+    from yuanwork.wiki.trigger import WikiCompileTrigger
 
 
 logger = logging.getLogger(__name__)
@@ -154,6 +156,19 @@ async def lifespan(app: FastAPI):
     set_consolidation_engine(consolidation_engine)
     logger.info("✓ Consolidation engine initialized")
 
+    # Initialize wiki page compile trigger (Stage 2 differentiator).
+    # Decides when to compile a Wiki page from the chunks surfaced during
+    # a chat turn. Uses the LLM gateway for actual compilation; the
+    # trigger itself is in-process state.
+    from yuanwork.wiki.trigger import WikiCompileTrigger
+
+    wiki_compile_trigger = WikiCompileTrigger(
+        sqlite_store=sqlite_store,
+        llm_gateway=llm_gateway,
+    )
+    set_wiki_compile_trigger(wiki_compile_trigger)
+    logger.info("✓ Wiki compile trigger initialized")
+
     # Store references for shutdown
     app.state.sqlite_store = sqlite_store
     app.state.llm_gateway = llm_gateway
@@ -161,6 +176,7 @@ async def lifespan(app: FastAPI):
     app.state.episodic_memory = episodic_memory
     app.state.profile_store = profile_store
     app.state.consolidation_engine = consolidation_engine
+    app.state.wiki_compile_trigger = wiki_compile_trigger
 
     logger.info("🚀 YuanWork backend ready")
 
