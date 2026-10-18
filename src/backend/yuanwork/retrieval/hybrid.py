@@ -10,19 +10,29 @@ import logging
 from typing import Any
 
 from yuanwork.memory.semantic import SemanticMemory
+from yuanwork.retrieval.reranker import Reranker
 
 logger = logging.getLogger(__name__)
 
 
 class HybridRetriever:
-    """Hybrid retrieval combining vector + metadata filtering.
+    """Hybrid retrieval: vector recall + optional cross-encoder rerank.
 
     Stage 1: vector search with optional LanceDB filter expression.
-    Stage 2: add BM25 + cross-encoder reranking.
+    Stage 2: rerank top candidates with bge-reranker-v2-m3 (when enabled).
     """
 
-    def __init__(self, semantic_memory: SemanticMemory):
+    def __init__(
+        self,
+        semantic_memory: SemanticMemory,
+        reranker: Reranker | None = None,
+        use_reranker: bool = True,
+        top_k_initial: int = 50,
+    ):
         self.semantic = semantic_memory
+        self.reranker = reranker
+        self.use_reranker_flag = use_reranker
+        self.top_k_initial = top_k_initial
 
     async def search(
         self,
@@ -56,18 +66,26 @@ class HybridRetriever:
 
         filter_expr = " AND ".join(filter_parts) if filter_parts else None
 
-        # Run search (overfetch by 2x for filtering)
+        # Overfetch for reranking / filtering
+        recall_k = max(top_k, self.top_k_initial) if self.use_reranker_flag else top_k * 2
         results = await self.semantic.search(
             query=query,
-            top_k=top_k * 2,
+            top_k=recall_k,
             filter_expr=filter_expr,
         )
 
         # Filter by min_score
         results = [r for r in results if r.get("_score", 0) >= min_score]
 
-        # Trim to top_k
-        results = results[:top_k]
+        # Cross-encoder rerank (Stage 2)
+        if self.use_reranker_flag and self.reranker is not None and results:
+            try:
+                results = await self.reranker.rerank(query, results, top_k=top_k)
+            except Exception as e:
+                logger.warning(f"Reranker failed, falling back to vector order: {e}")
+                results = results[:top_k]
+        else:
+            results = results[:top_k]
 
         return results
 

@@ -123,7 +123,7 @@ class SemanticMemory:
         if self._db is None:
             raise RuntimeError("SemanticMemory not initialized")
 
-        if self.CHUNKS_TABLE in self._db.table_names():
+        if self.CHUNKS_TABLE in self._db.list_tables():
             self._table = self._db.open_table(self.CHUNKS_TABLE)
         else:
             # Create empty table with schema

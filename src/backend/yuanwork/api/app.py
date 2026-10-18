@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -116,12 +117,15 @@ async def lifespan(app: FastAPI):
     set_semantic_memory(semantic_memory)
     logger.info("✓ Semantic memory initialized (embedding lazy-loaded)")
 
-    # Kick off a background task to prewarm the embedding model. The first
-    # chat/ingest will block until it finishes (~1-3 min on CPU) but the
-    # server can serve other requests (health, status, file listing) while
-    # the model loads in a thread.
-    await semantic_memory.prewarm_embedding_model()
-    logger.info("✓ Background embedding prewarm started")
+    # Optionally prewarm the embedding model. Off by default — the first
+    # chat/ingest that needs embeddings will trigger the load, which on CPU
+    # takes 1-3 minutes but doesn't block the rest of the server.
+    # Set YUANWORK_PREWARM_EMBEDDING=1 to enable.
+    if os.environ.get("YUANWORK_PREWARM_EMBEDDING") == "1":
+        await semantic_memory.prewarm_embedding_model()
+        logger.info("✓ Background embedding prewarm started")
+    else:
+        logger.info("ℹ Embedding model not prewarming (set YUANWORK_PREWARM_EMBEDDING=1 to enable)")
 
     # Initialize episodic memory
     from yuanwork.memory.episodic import EpisodicMemory
