@@ -64,7 +64,9 @@ async def lifespan(app: FastAPI):
         embedding_model=settings.embedding_model,
         embedding_device=settings.embedding_device,
     )
-    # Don't initialize embedding model at startup (lazy, saves boot time)
+    # Open LanceDB connection. The bge-m3 embedding model is intentionally NOT
+    # loaded here (lazy, saves boot time and 2.3GB model download on first use).
+    await semantic_memory.initialize()
     set_semantic_memory(semantic_memory)
     logger.info("✓ Semantic memory initialized (embedding lazy-loaded)")
 
