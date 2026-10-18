@@ -91,5 +91,8 @@ $RECYCLE.BIN/
 *.log
 logs/
 
+# Session locks (managed by Claude Code, not project state)
+.claude/scheduled_tasks.lock
+
 # User-specific KB paths
 kb_personal/

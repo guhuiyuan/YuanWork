@@ -119,50 +119,87 @@ class SemanticMemory:
         return list(self._db.table_names())
 
     def get_or_create_chunks_table(self):
-        """Get or create the chunks table."""
+        """Get or create the chunks table.
+
+        Note: `list_tables()` can be racy with `create_table()` on some
+        lancedb versions, so we try `open_table` first and only fall
+        back to `create_table` when the table is genuinely missing.
+        """
         if self._db is None:
             raise RuntimeError("SemanticMemory not initialized")
 
-        if self.CHUNKS_TABLE in self._db.list_tables():
-            self._table = self._db.open_table(self.CHUNKS_TABLE)
-        else:
-            # Create empty table with schema
-            import pyarrow as pa
+        if self._table is not None:
+            return self._table
 
-            schema = pa.schema(
-                [
-                    ("id", pa.string()),
-                    ("doc_id", pa.string()),
-                    ("chunk_idx", pa.int32()),
-                    ("text", pa.string()),
-                    ("vector", pa.list_(pa.float32(), 1024)),
-                    ("file_name", pa.string()),
-                    ("file_path", pa.string()),
-                    ("file_type", pa.string()),
-                    ("page", pa.int32()),
-                    ("slide_number", pa.int32()),
-                    ("section", pa.string()),
-                    ("content_type", pa.string()),
-                    ("token_count", pa.int32()),
-                    ("modified_at", pa.string()),
-                    ("created_at", pa.string()),
-                ]
+        # Cheap path: already exists
+        try:
+            if self.CHUNKS_TABLE in self._db.list_tables():
+                self._table = self._db.open_table(self.CHUNKS_TABLE)
+                return self._table
+        except Exception as e:
+            logger.debug(f"list_tables() check failed: {e}")
+
+        # Try opening directly (handles stale list_tables cache)
+        try:
+            self._table = self._db.open_table(self.CHUNKS_TABLE)
+            return self._table
+        except Exception:
+            pass
+
+        # Create from scratch
+        import pyarrow as pa
+
+        schema = pa.schema(
+            [
+                ("id", pa.string()),
+                ("doc_id", pa.string()),
+                ("chunk_idx", pa.int32()),
+                ("text", pa.string()),
+                ("vector", pa.list_(pa.float32(), 1024)),
+                ("file_name", pa.string()),
+                ("file_path", pa.string()),
+                ("file_type", pa.string()),
+                ("page", pa.int32()),
+                ("slide_number", pa.int32()),
+                ("section", pa.string()),
+                ("content_type", pa.string()),
+                ("token_count", pa.int32()),
+                ("modified_at", pa.string()),
+                ("created_at", pa.string()),
+            ]
+        )
+        try:
+            self._table = self._db.create_table(
+                self.CHUNKS_TABLE, schema=schema, mode="create"
             )
-            self._table = self._db.create_table(self.CHUNKS_TABLE, schema=schema, mode="create")
+        except ValueError as e:
+            # Race: another worker created the table. Open it.
+            if "already exists" in str(e).lower():
+                self._table = self._db.open_table(self.CHUNKS_TABLE)
+            else:
+                raise
         return self._table
 
     async def embed_texts(
         self, texts: list[str], batch_size: int = 8
     ) -> list[list[float]]:
-        """Embed texts using bge-m3. Returns dense vectors (1024-dim)."""
-        if self._embedder is None:
-            self.load_embedding_model()
+        """Embed texts using bge-m3. Returns dense vectors (1024-dim).
 
-        # bge-m3 supports batched encoding
+        The first call lazily loads the model in a thread, so the event
+        loop stays responsive. Subsequent calls hit the loaded model
+        directly.
+        """
+        if self._embedder is None:
+            await self.load_embedding_model_async()
+
+        # bge-m3 supports batched encoding. The encode call is CPU-bound
+        # and takes a while; run it in a thread so other coroutines (like
+        # health checks) can keep running.
         all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            result = self._embedder.encode(
+            result = await asyncio.to_thread(
+                self._embedder.encode,
                 batch,
                 return_dense=True,
                 return_sparse=False,

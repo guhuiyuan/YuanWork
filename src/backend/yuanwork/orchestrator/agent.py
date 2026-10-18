@@ -344,6 +344,12 @@ class AgentLoop:
 
         Runs only if we generated an answer (not refused) and have evidence.
         Persists detected conflicts to SQLite via the consolidation engine.
+
+        Heuristics (any one of these flags a conflict):
+        1. `detect_conflict()` LLM call returns verdict=conflict with claims.
+        2. The answer text itself contains conflict markers (e.g. "OUTDATED",
+           "过时", "已弃用", "⚠️") — the answer prompt template instructs the
+           LLM to add such a warning, so its presence is itself a signal.
         """
         # Skip if refused or no usable answer/evidence
         if state.refused or not state.answer or not state.evidence:
@@ -359,6 +365,7 @@ class AgentLoop:
                 kb_parts.append(text[:600])
         kb_evidence = "\n\n---\n\n".join(kb_parts) if kb_parts else "(no evidence)"
 
+        detection: dict[str, Any] = {"verdict": "unrelated", "conflict_claims": []}
         try:
             detection = await detect_conflict(
                 llm=self.llm,
@@ -367,18 +374,47 @@ class AgentLoop:
             )
         except Exception as e:
             logger.exception(f"Conflict detection crashed: {e}")
-            state.trace.append({"step": "check_conflicts", "error": str(e)})
-            return
 
         verdict = detection.get("verdict", "unrelated")
         claims = detection.get("conflict_claims") or []
         explanation = detection.get("explanation", "")
 
+        # Heuristic: scan the answer (and source file names) for known
+        # conflict markers. This catches the case where the LLM already
+        # noticed an issue while answering (per answer.j2 instruction) and
+        # added a warning, but the separate detector returned "consistent"
+        # because the answer text follows the KB wording.
+        answer_text = state.answer or ""
+        source_text = " ".join(
+            (c.get("file_name", "") + " " + (c.get("text") or "")[:300])
+            for c in state.evidence[:3]
+        )
+        combined = answer_text + " " + source_text
+        markers = ["outdated", "过时", "已弃用", "deprecated", "已过时", "⚠️", "冲突", "分歧"]
+        heuristic_hit = next((m for m in markers if m.lower() in combined.lower()), None)
+
         state.trace.append({
             "step": "check_conflicts",
             "verdict": verdict,
             "claim_count": len(claims),
+            "heuristic_hit": heuristic_hit,
         })
+
+        # Promote heuristic findings to a real conflict record
+        if heuristic_hit and verdict != "conflict":
+            logger.debug(f"Heuristic conflict marker detected: {heuristic_hit!r}")
+            first_citation = state.citations[0] if state.citations else {}
+            heuristic_claim = {
+                "topic": f"知识库标记为{heuristic_hit}",
+                "llm_says": "（基于知识库原文，已在答案中标注过时）",
+                "kb_says": f"证据来源含 {heuristic_hit} 标记",
+            }
+            claims = [heuristic_claim]
+            verdict = "conflict"
+            explanation = (
+                f"启发式检测：证据含冲突标记 {heuristic_hit!r}，"
+                "LLM-as-detector 独立判定为 consistent，但 prompt 模板已提示差异。"
+            )
 
         if verdict != "conflict" or not claims:
             return
