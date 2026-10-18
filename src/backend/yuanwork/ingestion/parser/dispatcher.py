@@ -17,6 +17,7 @@ class ParserDispatcher:
             from yuanwork.ingestion.parser.pptx_parser import PptxParser
             from yuanwork.ingestion.parser.xlsx_parser import XlsxParser
             from yuanwork.ingestion.parser.md_txt_parser import MarkdownTxtParser
+            from yuanwork.ingestion.parser.image_parser import ImageParser
 
             parsers = [
                 PDFParser(),
@@ -24,6 +25,7 @@ class ParserDispatcher:
                 PptxParser(),
                 XlsxParser(),
                 MarkdownTxtParser(),
+                ImageParser(),
             ]
         self.parsers = parsers
 

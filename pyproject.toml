@@ -37,9 +37,15 @@ dependencies = [
     "python-pptx>=0.6.23",
     "openpyxl>=3.1.0",
     "markdown-it-py>=3.0.0",
+    "Pillow>=10.0.0",
 
-    # OCR (stage 2)
-    "paddleocr>=2.7.0; platform_machine != 'arm'",
+    # OCR (stage 2) — rapidocr-onnxruntime is a pure-ONNX port of RapidOCR.
+    # We prefer it over PaddleOCR because (a) no PaddlePaddle native dep
+    # needed, (b) installs in ~50 MB instead of ~2 GB, (c) works on Windows
+    # / CPU out of the box. Chinese support is on par with PaddleOCR for
+    # printed text (the typical KB use case).
+    "rapidocr-onnxruntime>=1.2.0",
+    "opencv-python>=4.8.0",
 
     # File watching
     "watchdog>=4.0.0",

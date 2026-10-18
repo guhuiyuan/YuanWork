@@ -54,12 +54,16 @@ async def test_dispatcher_routing():
     assert dispatcher.get_parser(Path("test.pptx")) is not None
     assert dispatcher.get_parser(Path("test.xlsx")) is not None
     assert dispatcher.get_parser(Path("test.md")) is not None
+    assert dispatcher.get_parser(Path("test.png")) is not None
+    assert dispatcher.get_parser(Path("test.jpg")) is not None
     assert dispatcher.get_parser(Path("test.unknown")) is None
 
     exts = dispatcher.supported_extensions()
     assert "pdf" in exts
     assert "pptx" in exts
     assert "docx" in exts
+    assert "png" in exts
+    assert "jpg" in exts
 
 
 @pytest.mark.asyncio
