@@ -34,6 +34,51 @@ export interface WikiPage {
   title: string;
   summary: string;
   category: string;
+  tags: string[];
+  source_doc_ids: string[];
+  chunk_count: number;
+  version: number;
+  updated_at: string;
+  last_compiled_at: string | null;
+}
+
+export interface WikiPageDetail extends WikiPage {
+  markdown: string;
+  source_doc_ids: string[];
+}
+
+export interface WikiLink {
+  source_id: string;
+  source_type: "page" | "chunk" | "doc" | "episode";
+  target_id: string;
+  target_type: "page" | "chunk" | "doc" | "episode";
+  link_type: string;
+  weight: number;
+}
+
+export interface WikiBacklinksPayload {
+  page_id: string;
+  backlinks: WikiLink[];
+}
+
+export interface WikiGraphNode {
+  id: string;
+  label: string;
+  type: string; // "page" | "entity_person" | "entity_concept" | ...
+  category?: string;
+  weight: number;
+}
+
+export interface WikiGraphEdge {
+  source: string;
+  target: string;
+  type: string;
+  weight: number;
+}
+
+export interface WikiGraph {
+  nodes: WikiGraphNode[];
+  edges: WikiGraphEdge[];
 }
 
 interface AppState {
@@ -56,6 +101,15 @@ interface AppState {
   setWikiPages: (p: WikiPage[]) => void;
   selectedWikiPage: string | null;
   selectWikiPage: (id: string | null) => void;
+
+  wikiPageDetail: WikiPageDetail | null;
+  setWikiPageDetail: (d: WikiPageDetail | null) => void;
+
+  wikiBacklinks: WikiBacklinksPayload | null;
+  setWikiBacklinks: (b: WikiBacklinksPayload | null) => void;
+
+  wikiGraph: WikiGraph | null;
+  setWikiGraph: (g: WikiGraph | null) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -88,4 +142,13 @@ export const useAppStore = create<AppState>((set) => ({
   setWikiPages: (p) => set({ wikiPages: p }),
   selectedWikiPage: null,
   selectWikiPage: (id) => set({ selectedWikiPage: id }),
+
+  wikiPageDetail: null,
+  setWikiPageDetail: (d) => set({ wikiPageDetail: d }),
+
+  wikiBacklinks: null,
+  setWikiBacklinks: (b) => set({ wikiBacklinks: b }),
+
+  wikiGraph: null,
+  setWikiGraph: (g) => set({ wikiGraph: g }),
 }));

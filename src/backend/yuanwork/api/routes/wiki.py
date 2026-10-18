@@ -9,11 +9,15 @@ from fastapi import APIRouter, HTTPException, Query
 from yuanwork.api.deps import get_sqlite_store
 from yuanwork.api.schemas import (
     WikiBacklinks,
+    WikiGraphEdge,
+    WikiGraphNode,
+    WikiGraphResponse,
     WikiLink,
     WikiPageDetail,
     WikiPageInfo,
     WikiPagesResponse,
 )
+from yuanwork.wiki.graph import WikiGraph
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +58,34 @@ async def list_wiki_pages(
     )
 
 
-@router.get("/wiki/pages/{page_id}", response_model=WikiPageDetail)
+@router.get("/wiki/pages/{page_id:path}/backlinks", response_model=WikiBacklinks)
+async def get_wiki_backlinks(page_id: str) -> WikiBacklinks:
+    """Get backlinks for a wiki page.
+
+    NOTE: this MUST be registered BEFORE the catch-all
+    `/wiki/pages/{page_id:path}` route, otherwise Starlette's path
+    converter greedily matches `/backlinks` into the page_id.
+    """
+    sqlite = get_sqlite_store()
+    links = await sqlite.get_wiki_backlinks(page_id)
+
+    return WikiBacklinks(
+        page_id=page_id,
+        backlinks=[
+            WikiLink(
+                source_id=l["source_id"],
+                source_type=l["source_type"],
+                target_id=l["target_id"],
+                target_type=l["target_type"],
+                link_type=l["link_type"],
+                weight=l["weight"],
+            )
+            for l in links
+        ],
+    )
+
+
+@router.get("/wiki/pages/{page_id:path}", response_model=WikiPageDetail)
 async def get_wiki_page(page_id: str) -> WikiPageDetail:
     """Get a wiki page by ID (full content)."""
     sqlite = get_sqlite_store()
@@ -79,29 +110,35 @@ async def get_wiki_page(page_id: str) -> WikiPageDetail:
     )
 
 
-@router.get("/wiki/pages/{page_id}/backlinks", response_model=WikiBacklinks)
-async def get_wiki_backlinks(page_id: str) -> WikiBacklinks:
-    """Get backlinks for a wiki page."""
+@router.get("/wiki/graph", response_model=WikiGraphResponse)
+async def get_wiki_graph() -> WikiGraphResponse:
+    """Get the full wiki graph (pages + links + entities) for visualization."""
     sqlite = get_sqlite_store()
-    links = await sqlite.get_wiki_backlinks(page_id)
+    graph_engine = WikiGraph(sqlite)
+    raw = await graph_engine.build_graph()
+    nodes = [
+        WikiGraphNode(
+            id=n["id"],
+            label=n["label"],
+            type=n["type"],
+            category=n.get("category"),
+            weight=n.get("weight", 1) or 1,
+        )
+        for n in raw.get("nodes", [])
+    ]
+    edges = [
+        WikiGraphEdge(
+            source=e["source"],
+            target=e["target"],
+            type=e["type"],
+            weight=e.get("weight", 1.0) or 1.0,
+        )
+        for e in raw.get("edges", [])
+    ]
+    return WikiGraphResponse(nodes=nodes, edges=edges)
 
-    return WikiBacklinks(
-        page_id=page_id,
-        backlinks=[
-            WikiLink(
-                source_id=l["source_id"],
-                source_type=l["source_type"],
-                target_id=l["target_id"],
-                target_type=l["target_type"],
-                link_type=l["link_type"],
-                weight=l["weight"],
-            )
-            for l in links
-        ],
-    )
 
-
-@router.post("/wiki/compile/{topic}")
+@router.post("/wiki/compile/{topic:path}")
 async def trigger_wiki_compile(topic: str) -> dict:
     """Trigger wiki page compilation for a topic."""
     # TODO: implement wiki page generation

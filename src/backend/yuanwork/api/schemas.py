@@ -286,6 +286,32 @@ class WikiPagesResponse(BaseModel):
     total: int
 
 
+class WikiGraphNode(BaseModel):
+    """A node in the wiki graph (page or entity)."""
+
+    id: str
+    label: str
+    type: str
+    category: str | None = None
+    weight: int = 1
+
+
+class WikiGraphEdge(BaseModel):
+    """An edge in the wiki graph (link between two nodes)."""
+
+    source: str
+    target: str
+    type: str
+    weight: float = 1.0
+
+
+class WikiGraphResponse(BaseModel):
+    """Wiki graph payload (nodes + edges) for visualization."""
+
+    nodes: list[WikiGraphNode]
+    edges: list[WikiGraphEdge]
+
+
 # ===== Generic =====
 
 

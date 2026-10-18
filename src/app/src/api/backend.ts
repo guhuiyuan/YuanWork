@@ -4,7 +4,14 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage, Citation, KbFile, WikiPage } from "../store";
+import type {
+  Citation,
+  KbFile,
+  WikiBacklinksPayload,
+  WikiGraph,
+  WikiPage,
+  WikiPageDetail,
+} from "../store";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -36,6 +43,13 @@ export interface ChatResponse {
   confidence: number;
   refused: boolean;
   conflict?: string | null;
+  wiki_compile?: {
+    triggered: boolean;
+    page_id?: string;
+    title?: string;
+    reason?: string;
+    error?: string;
+  };
 }
 
 export async function chat(req: ChatRequest): Promise<ChatResponse> {
@@ -92,15 +106,37 @@ export async function listWikiPages(): Promise<WikiPage[]> {
   if (isTauri) {
     return invoke<WikiPage[]>("list_wiki_pages");
   }
-  const body = await callBackend<{ pages: WikiPage[] }>("/wiki/pages");
+  const body = await callBackend<{ pages: WikiPage[]; total: number }>(
+    "/wiki/pages"
+  );
   return body.pages ?? [];
 }
 
-export async function getWikiPage(pageId: string) {
+export async function getWikiPage(pageId: string): Promise<WikiPageDetail> {
   if (isTauri) {
-    return invoke<unknown>("get_wiki_page", { pageId });
+    return invoke<WikiPageDetail>("get_wiki_page", { pageId });
   }
-  return callBackend(`/wiki/pages/${pageId}`);
+  return callBackend<WikiPageDetail>(
+    `/wiki/pages/${encodeURIComponent(pageId)}`
+  );
+}
+
+export async function getWikiBacklinks(
+  pageId: string
+): Promise<WikiBacklinksPayload> {
+  if (isTauri) {
+    return invoke<WikiBacklinksPayload>("get_wiki_backlinks", { pageId });
+  }
+  return callBackend<WikiBacklinksPayload>(
+    `/wiki/pages/${encodeURIComponent(pageId)}/backlinks`
+  );
+}
+
+export async function getWikiGraph(): Promise<WikiGraph> {
+  if (isTauri) {
+    return invoke<WikiGraph>("get_wiki_graph");
+  }
+  return callBackend<WikiGraph>("/wiki/graph");
 }
 
 // ===== Memory =====
