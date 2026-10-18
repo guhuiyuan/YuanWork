@@ -47,6 +47,13 @@ dependencies = [
     "rapidocr-onnxruntime>=1.2.0",
     "opencv-python>=4.8.0",
 
+    # Full-text search (Stage 3+) — tantivy replaces the bge-m3 sparse
+    # channel because bge-m3 sparse scored 0.0 on pure-number and
+    # short-CJK tokens. tantivy gives proper BM25 over jieba-segmented
+    # text, so "1280" / "金额" / "INV-2024-001" all match reliably.
+    "tantivy>=0.21.0",
+    "jieba>=0.42",
+
     # File watching
     "watchdog>=4.0.0",
 

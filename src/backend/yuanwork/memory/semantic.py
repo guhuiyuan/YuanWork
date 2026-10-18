@@ -1,13 +1,17 @@
 """Semantic Memory - LanceDB vector store for document chunks.
 
-Uses bge-m3 for embedding. Stage 3 also stores the bge-m3 **sparse**
-(lexical weights) output and fuses dense + sparse at query time, so
-literal-token queries like "1280" can beat the "1280 vs Chinese context"
-near-orthogonality problem of pure dense retrieval.
+Uses bge-m3 for embedding. Stage 3 added a bge-m3 **sparse** (lexical
+weights) channel for fusion. Stage 3+ replaces the bge-m3 sparse
+channel with a proper tantivy + jieba **FTS index** because bge-m3's
+sparse scored 0.0 on pure numbers and short CJK tokens (verified on
+the OCR test fixture). The bge-m3 sparse column is still populated
+for back-compat / future reactivation; the `sparse_str` JSON column
+is now informational only.
 
-Retrieval modes (Stage 3):
+Retrieval modes:
   - `search(query, ...)`           — pure dense (back-compat)
-  - `search_hybrid(query, ...)`    — dense + sparse fusion (alpha/beta)
+  - `search_hybrid(query, ...)`    — dense (LanceDB) + sparse (tantivy FTS)
+                                     fused via weighted sum (alpha/beta)
 """
 
 from __future__ import annotations
@@ -71,12 +75,77 @@ class SemanticMemory:
         # vectors. Sparse is cheap (a dict of token weights per text)
         # so we keep it on by default for Stage 3 hybrid retrieval.
         self._sparse_enabled: bool = True
+        # Stage 3+ full-text search index (tantivy + jieba). Replaces
+        # the bge-m3 sparse channel for hybrid retrieval because
+        # bge-m3 sparse scored 0.0 on pure-number / short-CJK queries.
+        # Created lazily on first use to avoid native-module import
+        # cost when search isn't needed.
+        self._fts_index: Any = None
+        self._fts_index_dir: Path | None = None
+        # When True, the next FTS read will rebuild the index from
+        # LanceDB (used for one-time migration of v3 KBs).
+        self._fts_needs_reindex: bool = True
 
     async def initialize(self) -> None:
         """Initialize LanceDB connection."""
         lancedb = _import_lancedb()
         self._db = lancedb.connect(str(self.data_dir))
         logger.info(f"LanceDB connected at {self.data_dir}")
+
+    def _get_fts_index(self):
+        """Lazily create / open the FTS index. First call also migrates
+        existing v3 KBs (LanceDB chunks with no FTS index yet) by
+        rebuilding FTS from the text field.
+        """
+        if self._fts_index is not None:
+            return self._fts_index
+        # Lazy import — tantivy pulls in a Rust extension
+        from yuanwork.retrieval.fts import FTSIndex
+
+        fts_dir = self.data_dir / "fts"
+        self._fts_index_dir = fts_dir
+        self._fts_index = FTSIndex(fts_dir)
+
+        # One-time migration: if FTS is empty but LanceDB has rows,
+        # rebuild FTS from LanceDB text. This makes the upgrade from
+        # v3 (bge-m3 sparse only) seamless.
+        if self._fts_needs_reindex:
+            try:
+                fts_count = self._fts_index.count()
+                # Use the sync table.count_rows() here — the public
+                # `self.count()` is async and we're inside a sync helper.
+                lancedb_count = (
+                    self._table.count_rows() if self._table is not None else 0
+                )
+            except Exception:
+                fts_count, lancedb_count = 0, 0
+            if fts_count == 0 and lancedb_count > 0:
+                logger.info(
+                    f"Migrating {lancedb_count} chunks from LanceDB to FTS index"
+                )
+                self._reindex_from_lancedb()
+            self._fts_needs_reindex = False
+        return self._fts_index
+
+    def _reindex_from_lancedb(self) -> int:
+        """Rebuild the FTS index from current LanceDB contents.
+
+        Used by the migration path; called inside `_get_fts_index()`.
+        """
+        if self._fts_index is None or self._table is None:
+            return 0
+        try:
+            import pandas as pd
+
+            df = self._table.to_pandas()
+            chunks = [
+                {"id": r["id"], "doc_id": r["doc_id"], "text": r.get("text", "")}
+                for _, r in df.iterrows()
+            ]
+            return self._fts_index.reindex_from_chunks(chunks)
+        except Exception as e:
+            logger.warning(f"FTS reindex from LanceDB failed: {e!r}")
+            return 0
 
     async def close(self) -> None:
         """Close the database (LanceDB doesn't need explicit close but be safe)."""
@@ -414,7 +483,36 @@ class SemanticMemory:
         # Add new records
         table.add(records)
 
-        logger.info(f"Added {len(records)} chunks to LanceDB")
+        # Mirror into the FTS index. Best-effort: if tantivy/jieba are
+        # missing or fail, dense-only retrieval still works (we just lose
+        # the literal-token rescue channel). We log and continue.
+        try:
+            fts = self._get_fts_index()
+            # The migration check inside _get_fts_index() runs once and
+            # only when fts_count==0 AND lancedb_count>0. We've just
+            # added N rows to lancedb, so on a *truly* fresh KB the
+            # migration would otherwise pull these same N rows from
+            # lancedb and then add_documents would double them. Mark
+            # migration as "not needed anymore" so it doesn't run
+            # mid-add_chunks.
+            self._fts_needs_reindex = False
+            # Delete-then-add: if the same IDs were indexed before
+            # (re-ingestion), remove them first so add_documents doesn't
+            # double up. This mirrors the table.delete(f"id IN (...)")
+            # pattern used for LanceDB above.
+            existing_ids = [c["id"] for c in chunks]
+            await asyncio.to_thread(fts.delete_by_ids, existing_ids)
+            fts_docs = [
+                {"id": c["id"], "doc_id": c["doc_id"], "text": c["text"]}
+                for c in chunks
+            ]
+            # FTS add is sync (tantivy is fast). Run in a thread so we
+            # don't block the event loop for big batches.
+            await asyncio.to_thread(fts.add_documents, fts_docs)
+        except Exception as e:
+            logger.warning(f"FTS index add failed (dense-only fallback): {e!r}")
+
+        logger.info(f"Added {len(records)} chunks to LanceDB + FTS")
         return [c["id"] for c in chunks]
 
     async def search(
@@ -486,12 +584,14 @@ class SemanticMemory:
         if table.count_rows() == 0:
             return []
 
-        # Embed query with both channels
+        # Embed query with both channels. Note: the bge-m3 sparse
+        # channel is still requested (so the column stays populated for
+        # back-compat) but no longer drives retrieval — see Channel 2
+        # below for the Tantivy FTS path.
         dense_q, sparse_q_list = await self.embed_texts(
             [query], return_sparse=True
         )
         dense_q = dense_q[0]
-        sparse_q = sparse_q_list[0] if sparse_q_list else {}
 
         # Pad dense to 1024 (bge-m3 already returns 1024 but be safe)
         dense_q = list(dense_q)[:1024]
@@ -509,32 +609,55 @@ class SemanticMemory:
             distance = r.pop("_distance", 0.0)
             r["_score_dense"] = 1.0 / (1.0 + distance)
 
-        # --- Channel 2: sparse lexical recall ---
-        # Pull the same recall_k candidates (we overfetch because sparse
-        # scoring needs the actual stored sparse vectors, which LanceDB
-        # doesn't index by default). For our KB scale (≤10k chunks) this
-        # is fine; for larger KBs we'd add a Tantivy FTS index later.
-        try:
-            if filter_expr:
-                rows = table.search(dense_q).where(filter_expr).limit(recall_k).to_list()
-            else:
-                rows = table.search(dense_q).limit(recall_k).to_list()
-        except Exception:
-            rows = []
+        # --- Channel 2: sparse lexical recall (tantivy FTS + jieba) ---
+        # The FTS index is the new sparse channel. It gives proper BM25
+        # scoring on jieba-segmented text, so "1280", "金额", "INV-2024-001"
+        # all match via real token overlap. bge-m3's lexical_weights
+        # underweighted these, which is why we replaced it.
+        #
+        # FTS results carry only (id, score). We need the full chunk row
+        # for the response (text, file_name, etc.), so we look up each
+        # hit in the dense result set first; if the FTS hit is not in
+        # the dense top-K we fetch it directly from the table.
+        dense_ids = {r["id"]: r for r in dense_results}
         sparse_results: list[dict[str, Any]] = []
-        if sparse_q:
-            for r in rows:
-                d_sparse = self._sparse_from_json(r.get("sparse_str"))
-                if not d_sparse:
+        try:
+            fts = self._get_fts_index()
+            fts_hits = await asyncio.to_thread(fts.search, query, recall_k)
+        except Exception as e:
+            logger.warning(f"FTS search failed (sparse channel empty): {e!r}")
+            fts_hits = []
+        for cid, fts_score in fts_hits:
+            base = dense_ids.get(cid)
+            if base is None:
+                # FTS hit not in dense top-K — pull it from the table.
+                try:
+                    if filter_expr:
+                        rows = (
+                            table.search(dense_q)
+                            .where(f"{filter_expr} AND id = '{cid}'")
+                            .limit(1)
+                            .to_list()
+                        )
+                    else:
+                        rows = (
+                            table.search(dense_q)
+                            .where(f"id = '{cid}'")
+                            .limit(1)
+                            .to_list()
+                        )
+                except Exception:
+                    rows = []
+                if not rows:
                     continue
-                score = self._sparse_dot(sparse_q, d_sparse)
-                if score <= 0:
-                    continue
-                # Drop _distance so dense_q-search artifacts don't leak
-                r.pop("_distance", None)
-                r2 = dict(r)
-                r2["_score_sparse"] = score
-                sparse_results.append(r2)
+                base = rows[0]
+                # base is from a dummy vector search so its _distance is
+                # meaningless; drop it
+                base.pop("_distance", None)
+                base["_score_dense"] = 0.0
+            r2 = dict(base)
+            r2["_score_sparse"] = float(fts_score)
+            sparse_results.append(r2)
         # Sort by sparse score, take top recall_k
         sparse_results.sort(key=lambda r: r.get("_score_sparse", 0.0), reverse=True)
         sparse_results = sparse_results[:recall_k]
@@ -578,14 +701,20 @@ class SemanticMemory:
         return fused[:top_k]
 
     async def delete_by_doc_id(self, doc_id: str) -> int:
-        """Delete all chunks for a document."""
+        """Delete all chunks for a document (LanceDB + FTS)."""
         table = self.get_or_create_chunks_table()
         try:
             table.delete(f"doc_id = '{doc_id}'")
-            return 1  # LanceDB doesn't return count
         except Exception as e:
             logger.warning(f"Failed to delete chunks for doc {doc_id}: {e}")
             return 0
+        # Mirror deletion into FTS (best-effort)
+        try:
+            fts = self._get_fts_index()
+            await asyncio.to_thread(fts.delete_by_doc_id, doc_id)
+        except Exception as e:
+            logger.warning(f"FTS delete for doc {doc_id} failed: {e!r}")
+        return 1  # LanceDB doesn't return count
 
     async def count(self) -> int:
         """Count total chunks."""
