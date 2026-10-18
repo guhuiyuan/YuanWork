@@ -13,6 +13,28 @@ from pathlib import Path
 import uvicorn
 
 
+def _configure_stdio_for_unicode() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so emojis/logs render on Windows.
+
+    On Windows the default console code page is often GBK, which can't encode
+    the 🚀 emoji or many log characters. Python 3.7+ supports reconfigure().
+    We ignore errors so the program still starts if reconfigure isn't
+    available (e.g. when stdout is not a real TTY).
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # Stream may already be closed or non-configurable
+            pass
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -45,6 +67,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """Main entry point."""
+    # Must run before any print() call
+    _configure_stdio_for_unicode()
+
     args = parse_args()
 
     # Ensure the backend root is in sys.path for relative imports
@@ -63,7 +88,7 @@ def main() -> None:
     port = args.port or settings.port
     log_level = (args.log_level or settings.log_level).lower()
 
-    print(f"🚀 Starting YuanWork backend at http://{host}:{port}")
+    print(f"Starting YuanWork backend at http://{host}:{port}")
     print(f"   Data dir: {settings.data_dir}")
     print(f"   Network mode: {settings.network_mode.name}")
     print(f"   Log level: {log_level}")

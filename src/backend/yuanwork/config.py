@@ -41,7 +41,12 @@ class YuanWorkSettings(BaseSettings):
 
     # ===== Paths =====
     data_dir: Path = Field(default=Path("~/.yuanwork").expanduser())
-    config_dir: Path = Field(default=Path("configs"))
+    # Default config_dir: walk up from the package to find the bundled
+    # configs/models.yaml.  Layout is src/backend/yuanwork/*.py and
+    # src/backend/configs/*.yaml, so configs/ is the package's parent.
+    config_dir: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent / "configs"
+    )
     log_level: str = Field(default="INFO")
 
     # ===== Server =====
