@@ -100,8 +100,12 @@ async def lifespan(app: FastAPI):
 
     # Initialize LLM gateway
     from yuanwork.llm.gateway import LLMGateway
+    from yuanwork.privacy.audit import AuditLogger
 
-    llm_gateway = LLMGateway(settings)
+    audit_logger = AuditLogger(settings.data_dir / "logs" / "audit.jsonl")
+    logger.info(f"✓ Audit logger at {audit_logger.audit_path}")
+
+    llm_gateway = LLMGateway(settings, audit_logger=audit_logger)
     set_llm_gateway(llm_gateway)
     logger.info(f"✓ LLM gateway initialized ({len(llm_gateway.configured_models())} models)")
 
@@ -172,6 +176,7 @@ async def lifespan(app: FastAPI):
     # Store references for shutdown
     app.state.sqlite_store = sqlite_store
     app.state.llm_gateway = llm_gateway
+    app.state.audit_logger = audit_logger
     app.state.semantic_memory = semantic_memory
     app.state.episodic_memory = episodic_memory
     app.state.profile_store = profile_store
@@ -234,7 +239,7 @@ def create_app(settings: YuanWorkSettings | None = None) -> FastAPI:
     )
 
     # Register routers
-    from yuanwork.api.routes import chat, health, ingest, kb, memory, wiki
+    from yuanwork.api.routes import audit, chat, health, ingest, kb, memory, wiki
 
     app.include_router(health.router, prefix="/api/v1", tags=["health"])
     app.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])
@@ -242,6 +247,7 @@ def create_app(settings: YuanWorkSettings | None = None) -> FastAPI:
     app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
     app.include_router(memory.router, prefix="/api/v1", tags=["memory"])
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
 
     # Global exception handler
     @app.exception_handler(Exception)

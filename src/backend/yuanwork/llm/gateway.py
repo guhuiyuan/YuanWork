@@ -6,12 +6,17 @@ Supports:
 - Fallback chain on failure
 - Token budget tracking
 - Streaming support
+- Audit logging (Stage 3): every LLM call is recorded with timing,
+  tokens, model, and a query hash (no full text). See AuditLogger.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +33,21 @@ logger = logging.getLogger(__name__)
 # Suppress litellm's noisy logs
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
+
+
+def _query_hash(messages: list["LLMMessage"]) -> str:
+    """Stable 16-char hash of the prompt, for audit deduplication.
+
+    The hash lets a user verify 'did I send this prompt before' without
+    exposing the prompt text in the audit log. We serialize messages
+    canonically (role + content) and SHA-256 the result.
+    """
+    canon = json.dumps(
+        [{"role": m.role, "content": m.content} for m in messages],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -74,8 +94,22 @@ class LLMTask:
 class LLMGateway:
     """Unified LLM gateway with task-based routing."""
 
-    def __init__(self, settings: YuanWorkSettings):
+    def __init__(
+        self,
+        settings: YuanWorkSettings,
+        audit_logger: Any | None = None,
+    ):
+        """
+        Args:
+            settings: YuanWorkSettings instance.
+            audit_logger: Optional AuditLogger (from yuanwork.privacy.audit).
+                When provided, every complete() and stream() call is
+                recorded with model, task_type, token counts, duration,
+                success/failure, and a hash of the prompt (no full text).
+                Pass `None` to disable audit logging (e.g. in tests).
+        """
         self.settings = settings
+        self.audit_logger = audit_logger
         self._routing: dict[str, str] = {}
         # alias -> {provider, model_name, api_base, api_key, ...}
         self._models: dict[str, dict[str, Any]] = {}
@@ -234,6 +268,15 @@ class LLMGateway:
                 )
                 kwargs["model"] = "ollama/llama3.1:8b"
 
+        # Audit-logging state
+        start = time.monotonic()
+        qhash = _query_hash(task.messages)
+        prompt_summary = "\n".join(
+            f"[{m.role}] {m.content[:200]}" for m in task.messages
+        )[:200]
+        response_content: str | None = None
+        usage: dict[str, int] = {}
+        error: str | None = None
         try:
             response = await asyncio.to_thread(litellm.completion, **kwargs)
             content = response.choices[0].message.content
@@ -242,8 +285,9 @@ class LLMGateway:
                 "completion_tokens": response.usage.completion_tokens if response.usage else 0,
                 "total_tokens": response.usage.total_tokens if response.usage else 0,
             }
+            response_content = content or ""
             return LLMResponse(
-                content=content or "",
+                content=response_content,
                 model=alias,
                 finish_reason=response.choices[0].finish_reason or "stop",
                 usage=usage,
@@ -251,7 +295,25 @@ class LLMGateway:
             )
         except Exception as e:
             logger.exception(f"LLM call failed for model {alias}: {e}")
+            error = repr(e)
             raise
+        finally:
+            if self.audit_logger is not None:
+                try:
+                    duration_ms = (time.monotonic() - start) * 1000.0
+                    self.audit_logger.log_llm_call(
+                        model=alias,
+                        task_type=task.task_type,
+                        prompt_summary=f"#{qhash} {prompt_summary}",
+                        response_summary=(response_content or "")[:200],
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        duration_ms=duration_ms,
+                        success=error is None,
+                        error=error,
+                    )
+                except Exception:
+                    logger.exception("Audit log write failed (non-fatal)")
 
     async def stream(self, task: LLMTask) -> AsyncIterator[str]:
         """Stream completion tokens."""
@@ -276,15 +338,50 @@ class LLMGateway:
             if not model_str.startswith("ollama/") and not model_str.startswith("local/"):
                 kwargs["model"] = "ollama/llama3.1:8b"
 
+        # Audit-logging state
+        start = time.monotonic()
+        qhash = _query_hash(task.messages)
+        prompt_summary = "\n".join(
+            f"[{m.role}] {m.content[:200]}" for m in task.messages
+        )[:200]
+        accumulated: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        error: str | None = None
+        success = False
         try:
             # Use litellm's streaming completion
             response = await asyncio.to_thread(litellm.completion, **kwargs)
             for chunk in response:
                 if chunk.choices and chunk.choices[0].delta.content:
+                    accumulated.append(chunk.choices[0].delta.content)
                     yield chunk.choices[0].delta.content
+                # The final chunk carries usage info for some providers
+                if getattr(chunk, "usage", None):
+                    prompt_tokens = chunk.usage.prompt_tokens or prompt_tokens
+                    completion_tokens = chunk.usage.completion_tokens or completion_tokens
+            success = True
         except Exception as e:
             logger.exception(f"Streaming LLM call failed: {e}")
+            error = repr(e)
             raise
+        finally:
+            if self.audit_logger is not None:
+                try:
+                    duration_ms = (time.monotonic() - start) * 1000.0
+                    self.audit_logger.log_llm_call(
+                        model=alias,
+                        task_type=task.task_type,
+                        prompt_summary=f"#{qhash} {prompt_summary}",
+                        response_summary="".join(accumulated)[:200],
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        duration_ms=duration_ms,
+                        success=success,
+                        error=error,
+                    )
+                except Exception:
+                    logger.exception("Audit log write failed (non-fatal)")
 
     async def chat(
         self,
