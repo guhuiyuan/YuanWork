@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tauri 桌面 Debug 二进制** — Tauri 2.x 壳编译通过，产出 `D:\cargo-target\debug\yuanwork.exe` (23 MB)
+  - `sidecar.rs` 重写：`BackendLaunch` 枚举支持 bundled 二进制 + Python venv 两种启动模式
+  - `find_python_interpreter()` 向上爬 8 层找 `.venv/Scripts/python.exe`，fallback 到 `py` / `python` / `python3`
+  - `find_backend_module_dir()` 向上爬 8 层找 `src/backend/`，让 `python -m yuanwork` 可解析模块
+  - 新增 `get_wiki_backlinks` / `get_wiki_graph` Tauri commands（前端已调用，Python 后端 `/api/v1/wiki/graph` + `/api/v1/wiki/pages/{id}/backlinks` 早已存在）
+  - 占位图标：32/128/256 PNG + multi-resolution ICO + ICNS（深蓝 + "Y"）
+  - `run.bat` 项目根目录启动器：先 `cd` 再启动 .exe，确保 sidecar 找得到项目
+  - 工具链：Rust 1.99.1 (stable-msvc) → `D:\cargo-target`，避免 C: 盘空间不足
+  - `Cargo.lock` 提交（Rust 二进制项目约定）
 - 文档 / 配置：完整的 README.md / CHANGELOG.md / CONTRIBUTING.md / docs/
 
 ## [0.3.0] - 2026-10-19 — Stage 3: 开源准备

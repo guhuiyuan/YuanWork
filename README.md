@@ -96,18 +96,38 @@ python -m yuanwork --port 8765
 
 ### 2. 启动 Tauri 桌面端（可选）
 
+#### 2.1 直接跑 debug 二进制
+
+```bash
+# 项目根目录
+./run.bat                        # Windows
+# 或
+cd "$(dirname "$0")" && ./D:/cargo-target/debug/yuanwork.exe   # bash
+```
+
+**前提**：
+
+- 工具链：Rust 1.75+ (`stable-msvc`) + MSVC BuildTools 2022 + WebView2
+- `CARGO_TARGET_DIR` 推荐设到非 C: 盘（首次编译约 5-10 GB）
+- 项目 venv 在 `.venv/`（Sidecar 启动 Python 走 venv）
+
+Sidecar 启动链路：
+
+1. Tauri shell 在项目根目录启动（`run.bat` 自动 `cd`）
+2. `find_python_interpreter()` 向上爬树找 `.venv/Scripts/python.exe`
+3. `find_backend_module_dir()` 向上爬树找 `src/backend/`
+4. spawn `python -m yuanwork --port 8765 --host 127.0.0.1`
+5. 等待 `/api/v1/health` 返回 200（最长 30 秒）
+6. 打开 WebView 显示前端
+
+#### 2.2 开发模式（Vite HMR + 浏览器）
+
 ```bash
 cd src/app
 npm install
-npm run tauri dev
-```
-
-也可以直接用浏览器跑 Vite dev server：
-
-```bash
-cd src/app
-npm run dev
-# 访问 http://localhost:5173
+npm run tauri dev          # Tauri 壳（需要 tauri-cli + Rust）
+# 或
+npm run dev                # 仅 Vite，浏览器开 http://localhost:5173
 ```
 
 ### 3. 在 UI 中

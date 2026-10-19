@@ -2,7 +2,17 @@
 //!
 //! The Tauri app spawns the Python backend as a child process and manages
 //! its lifecycle. Communication happens via HTTP localhost:8765.
+//!
+//! Two launch modes are supported:
+//! - **Bundled** (release): a PyInstaller-bundled `yuanwork-backend` binary
+//!   located under the Tauri resource directory.
+//! - **Python** (dev / debug): the project venv's Python interpreter runs
+//!   `python -m yuanwork` from the `src/backend/` directory. This avoids
+//!   needing to package Python for every development iteration.
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -12,6 +22,14 @@ use tauri::{AppHandle, Manager};
 
 const BACKEND_PORT: u16 = 8765;
 const BACKEND_HOST: &str = "127.0.0.1";
+
+/// How the backend should be launched.
+enum BackendLaunch {
+    /// PyInstaller-bundled binary (future release path).
+    Bundled(PathBuf),
+    /// Project venv Python interpreter running `python -m yuanwork`.
+    Python { executable: PathBuf, cwd: PathBuf },
+}
 
 /// Handle to the Python backend process.
 pub struct BackendHandle {
@@ -52,19 +70,36 @@ impl Drop for BackendHandle {
 
 /// Start the Python backend as a sidecar process.
 pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::error::Error>> {
-    // Determine the path to the Python backend executable
-    let backend_path = find_backend_executable(app)?;
+    let launch = find_backend_executable(app)?;
 
-    log::info!("Starting backend: {:?}", backend_path);
+    let mut cmd = match launch {
+        BackendLaunch::Bundled(path) => {
+            log::info!("Starting bundled backend binary: {:?}", path);
+            let mut c = Command::new(&path);
+            c.args(["--port", &BACKEND_PORT.to_string(), "--host", BACKEND_HOST]);
+            c
+        }
+        BackendLaunch::Python { executable, cwd } => {
+            log::info!(
+                "Starting Python backend: {:?} (cwd={:?})",
+                executable,
+                cwd
+            );
+            let mut c = Command::new(&executable);
+            c.args([
+                "-m",
+                "yuanwork",
+                "--port",
+                &BACKEND_PORT.to_string(),
+                "--host",
+                BACKEND_HOST,
+            ]);
+            c.current_dir(&cwd);
+            c
+        }
+    };
 
-    let mut cmd = Command::new(&backend_path);
-    cmd.args([
-        "--port", &BACKEND_PORT.to_string(),
-        "--host", BACKEND_HOST,
-    ]);
-
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     #[cfg(target_os = "windows")]
     {
@@ -82,84 +117,92 @@ pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::erro
     Ok(handle)
 }
 
-/// Find the Python backend executable.
-fn find_backend_executable(app: &AppHandle) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    // In production: use the bundled externalBin
-    // In development: use python -m yuanwork
-
-    // First, check if there's a bundled binary (production)
+/// Resolve the backend launch strategy: bundled binary if present, else
+/// Python interpreter in the project venv.
+fn find_backend_executable(app: &AppHandle) -> Result<BackendLaunch, Box<dyn std::error::Error>> {
+    // 1. Bundled binary (release path)
     if let Ok(resource_path) = app
         .path()
         .resolve("yuanwork-backend", tauri::path::BaseDirectory::Resource)
     {
         if resource_path.exists() {
-            return Ok(resource_path);
+            return Ok(BackendLaunch::Bundled(resource_path));
         }
     }
 
-    // Development fallback: use python -m yuanwork
-    // We need to find the python executable
-    let python = find_python()?;
-
-    // Use the project root as cwd so the backend can find its modules
-    let cwd = std::env::current_dir()?;
-    let module_path = cwd.join("src").join("backend");
-
-    Ok(python.with_arg("-m").with_arg("yuanwork").with_cwd(module_path))
+    // 2. Python interpreter in venv (dev path)
+    let executable = find_python_interpreter()?;
+    let cwd = find_backend_module_dir()?;
+    Ok(BackendLaunch::Python { executable, cwd })
 }
 
-/// Find a Python executable.
-fn find_python() -> Result<CommandWrapper, Box<dyn std::error::Error>> {
-    // Try python3, python, then python3.11/3.12
-    for cmd in &["python3", "python", "python3.11", "python3.12"] {
-        if Command::new(cmd).arg("--version").output().is_ok() {
-            return Ok(CommandWrapper::new(cmd));
+/// Find a Python interpreter: prefer project venv, fall back to PATH.
+///
+/// Walks up to 8 parent directories looking for `.venv/Scripts/python.exe`
+/// (Windows) or `.venv/bin/python` (Unix). If not found, tries `py` /
+/// `python` / `python3` on the system PATH.
+fn find_python_interpreter() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd.as_path();
+        for _ in 0..8 {
+            let cand = if cfg!(target_os = "windows") {
+                dir.join(".venv").join("Scripts").join("python.exe")
+            } else {
+                dir.join(".venv").join("bin").join("python")
+            };
+            if cand.exists() {
+                return Ok(cand);
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => break,
+            }
         }
     }
-    Err("Python not found in PATH".into())
-}
 
-/// Lightweight wrapper around Command for "python -m yuanwork".
-struct CommandWrapper {
-    cmd: String,
-    args: Vec<String>,
-}
-
-impl CommandWrapper {
-    fn new(cmd: &str) -> Self {
-        Self { cmd: cmd.to_string(), args: vec![] }
-    }
-
-    fn with_arg(mut self, arg: &str) -> Self {
-        self.args.push(arg.to_string());
-        self
-    }
-
-    fn with_cwd(self, _cwd: std::path::PathBuf) -> Self {
-        // TODO: set working directory
-        self
-    }
-
-    fn as_command(&self) -> Command {
-        let mut c = Command::new(&self.cmd);
-        for arg in &self.args {
-            c.arg(arg);
+    // Fall back to PATH. On Windows the `py` launcher is preferred because
+    // it picks a registered Python via PEP 397.
+    let names: &[&str] = if cfg!(target_os = "windows") {
+        &["py", "python", "python3"]
+    } else {
+        &["python3", "python"]
+    };
+    for name in names {
+        if std::process::Command::new(name)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(PathBuf::from(name));
         }
-        c
     }
+    Err("no Python interpreter found; create .venv at project root or install Python".into())
 }
 
-impl std::fmt::Debug for CommandWrapper {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}", self.cmd, self.args.join(" "))
+/// Locate the `src/backend/` directory by walking up from cwd.
+///
+/// This is the directory `python -m yuanwork` is invoked from so that
+/// `import yuanwork` resolves to the project's package.
+fn find_backend_module_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd.as_path();
+        for _ in 0..8 {
+            let cand = dir.join("src").join("backend");
+            if cand.join("yuanwork").exists() {
+                return Ok(cand);
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => break,
+            }
+        }
     }
+    Err("could not locate src/backend/ (run from project root or src/app/)".into())
 }
 
 /// Wait for the backend to respond to health checks.
 fn wait_for_backend_ready(url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-
     let health_url = format!("{}/api/v1/health", url);
 
     for attempt in 0..60 {
@@ -177,7 +220,8 @@ fn wait_for_backend_ready(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     Err("Backend failed to start within 30 seconds".into())
 }
 
-/// Simple HTTP GET helper (avoid pulling in reqwest just for startup check).
+/// Minimal blocking HTTP GET that returns the status line as text.
+/// Used only for the one-shot startup health probe.
 fn reqwest_get(url: &str) -> Result<String, Box<dyn std::error::Error>> {
     let parsed = url::Url::parse(url)?;
     let host = parsed.host_str().ok_or("No host")?;
@@ -215,5 +259,13 @@ mod tests {
             port: BACKEND_PORT,
         };
         assert_eq!(handle.url(), "http://127.0.0.1:8765");
+    }
+
+    #[test]
+    fn test_find_backend_module_dir_from_project_root() {
+        // Running tests from src-tauri/ should still locate src/backend/ by walking up
+        if let Ok(dir) = find_backend_module_dir() {
+            assert!(dir.join("yuanwork").exists());
+        }
     }
 }

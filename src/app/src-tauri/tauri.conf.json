@@ -37,9 +37,6 @@
     ],
     "category": "Productivity",
     "shortDescription": "Local personal work assistant",
-    "longDescription": "Wiki + memory engineering personal assistant for local document knowledge bases",
-    "externalBin": [
-      "binaries/yuanwork-backend"
-    ]
+    "longDescription": "Wiki + memory engineering personal assistant for local document knowledge bases"
   }
 }

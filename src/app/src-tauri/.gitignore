@@ -1,0 +1,8 @@
+# Build artifacts
+target/
+
+# Tauri-generated schemas (regenerated on each build)
+# Note: gen/schemas is committed in some projects for LSP support, but we
+# leave it out since regenerate-on-build is fast and the source of truth
+# is tauri.conf.json + capabilities/.
+gen/

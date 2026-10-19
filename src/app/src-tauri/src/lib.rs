@@ -53,8 +53,11 @@ pub fn run() {
             commands::delete_kb_file,
             commands::list_wiki_pages,
             commands::get_wiki_page,
+            commands::get_wiki_backlinks,
+            commands::get_wiki_graph,
             commands::search_episodic,
             commands::trigger_consolidation,
+            commands::app_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,9 +3,8 @@
 //! Each command is callable from the frontend via `tauri.invoke()`.
 //! They typically proxy HTTP requests to the Python backend.
 
-use std::process::Child;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::sidecar::BackendHandle;
 
@@ -160,6 +159,33 @@ pub async fn get_wiki_page(
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v1/wiki/pages/{}", backend.url(), page_id);
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    response.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_wiki_backlinks(
+    page_id: String,
+    backend: State<'_, BackendHandle>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/api/v1/wiki/pages/{}/backlinks",
+        backend.url(),
+        page_id
+    );
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    response.json().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_wiki_graph(
+    backend: State<'_, BackendHandle>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/wiki/graph", backend.url());
 
     let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
     response.json().await.map_err(|e| e.to_string())
