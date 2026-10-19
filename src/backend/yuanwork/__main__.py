@@ -80,9 +80,19 @@ def main() -> None:
     # Lazy import to avoid circular deps and speed up --help
     from yuanwork.api.app import create_app
     from yuanwork.config import get_settings
+    from yuanwork.privacy.network_guard import NetworkGuard
 
     settings = get_settings()
     app = create_app(settings=settings)
+
+    # Install network isolation guard at the socket layer (Stage 3).
+    # In ALLOW_ALL mode this is a no-op. In LLM_ONLY / OFFLINE, only
+    # whitelisted domains (and localhost for LLM_ONLY) can be reached.
+    guard = NetworkGuard.from_settings()
+    if guard.install():
+        print(f"   Network guard: ACTIVE ({guard.mode})")
+    else:
+        print(f"   Network guard: disabled (mode={guard.mode})")
 
     host = args.host or settings.host
     port = args.port or settings.port
