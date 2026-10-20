@@ -135,16 +135,16 @@ class LLMGateway:
         config_path = self.settings.config_dir / "models.yaml"
 
         if not config_path.exists():
+            # No config file: fall back to the built-in template so a fresh
+            # install still works with the one model whose key is set.
             logger.warning(
                 f"models.yaml not found at {config_path}. "
-                f"Using defaults. Create configs/models.yaml to customize."
+                f"Using the built-in default. Create configs/models.yaml to customize."
             )
-            self._routing = self._default_routing()
-            self._models = {}
-            return
-
-        with config_path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.safe_load(DEFAULT_MODELS_YAML) or {}
+        else:
+            with config_path.open("r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
 
         raw_models = data.get("models", {})
         self._routing = data.get("routing", self._default_routing())
@@ -173,16 +173,19 @@ class LLMGateway:
         )
 
     def _default_routing(self) -> dict[str, str]:
-        """Default task-to-model routing."""
+        """Default task-to-model routing.
+
+        Mirrors the built-in models.yaml: one model for every task.
+        """
         return {
-            "understand": "gpt-4o-mini",
-            "extract": "gpt-4o-mini",
-            "answer": "gpt-4o",
-            "conflict_check": "gpt-4o-mini",
-            "reflection": "gpt-4o-mini",
-            "wiki_compile": "gpt-4o",
-            "ner": "gpt-4o-mini",
-            "general": "gpt-4o",
+            "understand": "minimax-chat",
+            "extract": "minimax-chat",
+            "answer": "minimax-chat",
+            "conflict_check": "minimax-chat",
+            "reflection": "minimax-chat",
+            "wiki_compile": "minimax-chat",
+            "ner": "minimax-chat",
+            "general": "minimax-chat",
         }
 
     def configured_models(self) -> list[str]:
@@ -478,9 +481,13 @@ class LLMGateway:
 DEFAULT_MODELS_YAML = """\
 # YuanWork LLM Models Configuration
 # Edit this file to add your API keys and switch models.
+#
+# Only MiniMax is enabled out of the box - it is the one model whose key
+# is actually set. Uncomment another provider and set its env var to
+# route tasks to it.
 
 models:
-  # Example: MiniMax (uses Anthropic-compatible API)
+  # MiniMax (uses Anthropic-compatible API)
   minimax-chat:
     provider: anthropic
     api_base: https://api.minimaxi.com/anthropic
@@ -488,45 +495,45 @@ models:
     model_name: MiniMax-M3
 
   # Example: OpenAI
-  gpt-4o:
-    provider: openai
-    api_key_env: OPENAI_API_KEY
-    model_name: gpt-4o
-
-  gpt-4o-mini:
-    provider: openai
-    api_key_env: OPENAI_API_KEY
-    model_name: gpt-4o-mini
+  # gpt-4o:
+  #   provider: openai
+  #   api_key_env: OPENAI_API_KEY
+  #   model_name: gpt-4o
+  #
+  # gpt-4o-mini:
+  #   provider: openai
+  #   api_key_env: OPENAI_API_KEY
+  #   model_name: gpt-4o-mini
 
   # Example: Anthropic
-  claude-sonnet:
-    provider: anthropic
-    api_key_env: ANTHROPIC_API_KEY
-    model_name: claude-3-5-sonnet-latest
+  # claude-sonnet:
+  #   provider: anthropic
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   model_name: claude-3-5-sonnet-latest
 
   # Example: DeepSeek
-  deepseek-chat:
-    provider: openai
-    api_base: https://api.deepseek.com
-    api_key_env: DEEPSEEK_API_KEY
-    model_name: deepseek-chat
+  # deepseek-chat:
+  #   provider: openai
+  #   api_base: https://api.deepseek.com
+  #   api_key_env: DEEPSEEK_API_KEY
+  #   model_name: deepseek-chat
 
   # Example: Local Ollama
-  ollama-llama3:
-    provider: ollama
-    api_base: http://localhost:11434
-    model_name: llama3.1:8b
+  # ollama-llama3:
+  #   provider: ollama
+  #   api_base: http://localhost:11434
+  #   model_name: llama3.1:8b
 
 # Task routing: which model handles which task type
 routing:
-  understand: gpt-4o-mini       # Query understanding (cheap)
-  extract: gpt-4o-mini          # Information extraction (cheap)
-  answer: gpt-4o                # Final answer (powerful)
-  conflict_check: gpt-4o-mini   # Conflict detection (cheap)
-  reflection: gpt-4o-mini       # Memory reflection (cheap)
-  wiki_compile: gpt-4o          # Wiki page compilation (needs quality)
-  ner: gpt-4o-mini             # Named entity recognition (cheap)
-  general: gpt-4o               # Generic chat
+  understand: minimax-chat       # Query understanding
+  extract: minimax-chat          # Information extraction
+  answer: minimax-chat           # Final answer generation
+  conflict_check: minimax-chat   # Conflict detection
+  reflection: minimax-chat       # Memory reflection
+  wiki_compile: minimax-chat     # Wiki page compilation
+  ner: minimax-chat              # Named entity recognition
+  general: minimax-chat          # Generic chat fallback
 
 budget:
   per_session_max_tokens: 200000

@@ -180,30 +180,34 @@ curl -N -X POST http://127.0.0.1:8765/api/v1/chat/stream \
 
 ### LLM (LiteLLM + YAML)
 
+**当前默认只用 MiniMax 一个模型**（`MINIMAX_API_KEY` 是目前唯一配置了的 key），所有任务都路由到它。
+
 编辑 `src/backend/configs/models.yaml`：
 
 ```yaml
 models:
-  MiniMax-chat:
+  minimax-chat:
     provider: anthropic
-    api_key_env: MINIMAX_API_KEY
     api_base: https://api.minimaxi.com/anthropic
+    api_key_env: MINIMAX_API_KEY
     model_name: MiniMax-M3
 
-  gpt-4o-mini:
-    provider: openai
-    api_key_env: OPENAI_API_KEY
-    model_name: gpt-4o-mini
-
 routing:
-  understand: MiniMax-chat        # 廉价模型跑理解
-  answer: gpt-4o-mini             # 强模型出答案
-  conflict_check: MiniMax-chat
-  wiki_compile: gpt-4o-mini
-  reflection: MiniMax-chat
+  understand: minimax-chat       # 理解
+  extract: minimax-chat          # 抽取
+  answer: minimax-chat           # 出答案
+  conflict_check: minimax-chat   # 冲突检测
+  reflection: minimax-chat       # 记忆反思
+  wiki_compile: minimax-chat     # Wiki 页面编译
+  ner: minimax-chat              # 实体识别
+  general: minimax-chat          # 兜底
 ```
 
-支持 OpenAI / Claude / DeepSeek / 智谱 / Ollama / MiniMax 等 100+ provider。详见 [LiteLLM 文档](https://docs.litellm.ai/)。
+要换模型：取消对应 provider 的注释（`models.yaml` 里已把 OpenAI / Claude / DeepSeek / Ollama 都留成注释示例），在 `.env` 里设好对应的 `*_API_KEY`，再把 `routing` 指过去即可。**不需要改代码** —— 换 provider 只是换个 YAML。
+
+LiteLLM 支持 OpenAI / Claude / DeepSeek / 智谱 / Ollama / MiniMax 等 100+ provider，详见 [LiteLLM 文档](https://docs.litellm.ai/)。
+
+> 如果 `routing` 指向的模型没有配 key，gateway 会自动回退到第一个有 key 的模型（并在日志里提示），所以配错不会直接崩掉。
 
 ### 网络隔离模式
 

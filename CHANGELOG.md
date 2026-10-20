@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Cargo.lock` 提交（Rust 二进制项目约定）
 - 文档 / 配置：完整的 README.md / CHANGELOG.md / CONTRIBUTING.md / docs/
 
+### Changed
+
+- **LLM 配置：只启用 MiniMax 一个模型** — 目前只有 `MINIMAX_API_KEY` 是配好的，其余 provider 的 key 都没有
+  - `configs/models.yaml`：所有任务（understand / extract / answer / conflict_check / reflection / wiki_compile / ner / general）统一路由到 `minimax-chat`
+  - OpenAI / Anthropic / DeepSeek / Ollama 保留为注释示例，取消注释 + 设好对应 `*_API_KEY` + 改 `routing` 即可切换，不需要改代码
+  - `LLMGateway._default_routing()` 与内嵌的 `DEFAULT_MODELS_YAML` 同步为单模型版本
+  - 找不到 `models.yaml` 时改为回退到内嵌模板（原来回退到空模型表，只有一个 gpt-4o 的 routing，等于直接不可用）
+
 ## [0.3.0] - 2026-10-19 — Stage 3: 开源准备
 
 ### Added
