@@ -4,9 +4,10 @@
 //! They typically proxy HTTP requests to the Python backend.
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::sidecar::BackendHandle;
+use crate::sse;
 
 // ===== Chat =====
 
@@ -16,45 +17,147 @@ pub struct ChatRequest {
     pub session_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct ChatResponse {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
     pub answer: String,
+    #[serde(default)]
     pub citations: Vec<Citation>,
+    #[serde(default)]
     pub confidence: f32,
+    #[serde(default)]
     pub refused: bool,
+    #[serde(default)]
+    pub refusal_reason: Option<String>,
+    #[serde(default)]
+    pub conflicts: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub wiki_compile: Option<serde_json::Value>,
+    #[serde(default)]
+    pub trace: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Citation {
     pub index: u32,
     pub file_name: String,
+    #[serde(default)]
+    pub file_path: String,
+    #[serde(default)]
     pub page: Option<u32>,
+    #[serde(default)]
     pub slide_number: Option<u32>,
+    #[serde(default)]
+    pub section: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub chunk_id: String,
 }
 
-/// Stream a chat completion (returns chunks via Tauri events).
+/// Channel the backend's SSE events are re-emitted on, for the webview.
+pub const CHAT_EVENT_CHANNEL: &str = "chat:event";
+
+/// Stream a chat completion.
+///
+/// Reads the SSE stream from the backend's `/api/v1/chat/stream` endpoint
+/// and re-emits every event to the webview on the `chat:event` channel, so
+/// the frontend can render the answer token by token. The command resolves
+/// with the final response once the stream completes.
 #[tauri::command]
 pub async fn chat_stream(
+    app: AppHandle,
     request: ChatRequest,
     backend: State<'_, BackendHandle>,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/chat", backend.url());
+    let url = format!("{}/api/v1/chat/stream", backend.url());
 
-    let response = client
+    let mut response = client
         .post(&url)
         .json(&request)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
-    let result: ChatResponse = response
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let message = format!("backend returned HTTP {status}: {body}");
+        let _ = app.emit(
+            CHAT_EVENT_CHANNEL,
+            serde_json::json!({
+                "type": "error",
+                "data": {"error": "HTTP error", "detail": message},
+            }),
+        );
+        return Err(message);
+    }
 
-    serde_json::to_string(&result).map_err(|e| e.to_string())
+    let mut parser = sse::SseParser::new();
+    let mut final_response: Option<ChatResponse> = None;
+
+    // `Response::chunk()` needs no extra feature or dependency, unlike
+    // `bytes_stream()` which would pull in futures-util.
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        let text = String::from_utf8_lossy(&chunk).into_owned();
+        for event in parser.push(&text) {
+            handle_stream_event(&app, &event, &mut final_response);
+        }
+    }
+    // A server that closes without a final blank line would lose that frame.
+    for event in parser.finish() {
+        handle_stream_event(&app, &event, &mut final_response);
+    }
+
+    match final_response {
+        Some(result) => serde_json::to_string(&result).map_err(|e| e.to_string()),
+        None => Err("stream ended without a final response".to_string()),
+    }
+}
+
+/// Forward one backend event to the webview, and pick up the final response.
+fn handle_stream_event(
+    app: &AppHandle,
+    event: &sse::SseEvent,
+    final_response: &mut Option<ChatResponse>,
+) {
+    let data: serde_json::Value = match serde_json::from_str(&event.data) {
+        Ok(value) => value,
+        // A non-JSON payload (e.g. the `ping` keepalive) is forwarded as-is.
+        Err(_) => serde_json::Value::String(event.data.clone()),
+    };
+
+    if event.event == "done" {
+        if let Some(response) = data.get("response") {
+            if !response.is_null() {
+                match serde_json::from_value::<ChatResponse>(response.clone()) {
+                    Ok(parsed) => *final_response = Some(parsed),
+                    Err(e) => {
+                        let _ = app.emit(
+                            CHAT_EVENT_CHANNEL,
+                            serde_json::json!({
+                                "type": "error",
+                                "data": {
+                                    "error": "malformed response",
+                                    "detail": e.to_string(),
+                                },
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = app.emit(
+        CHAT_EVENT_CHANNEL,
+        serde_json::json!({
+            "type": event.event,
+            "data": data,
+        }),
+    );
 }
 
 // ===== Knowledge Base =====

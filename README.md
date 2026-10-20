@@ -6,7 +6,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status: Stage 3 done](https://img.shields.io/badge/Status-Stage%203%20done-brightgreen)]()
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)]()
-[![Tests: 122 passed](https://img.shields.io/badge/Tests-122%20passed-brightgreen)]()
+[![Tests: 137 passed](https://img.shields.io/badge/Tests-137%20passed-brightgreen)]()
 [![Tauri 2.x](https://img.shields.io/badge/Tauri-2.x-orange)]()
 
 [English](#english-summary) · [中文](#中文)
@@ -35,6 +35,7 @@ YuanWork 是一款**完全本地**的个人工作助手，专为以下场景设�
 | **本地向量库** | bge-m3 (本地嵌入) + LanceDB (嵌入式存储) |
 | **混合检索** | Tantivy BM25 (CJK + 数字) + bge-m3 dense + 元数据 + Reranker |
 | **3 步推理** | 理解 → 定位 → 抽取 → 回答（带完整 trace） |
+| **流式输出** | SSE 逐 token 推送回答，事件循环全程不阻塞（健康检查 / 其他对话不受影响） |
 | **强制引用** | 高置信答案必带原文 [n] 引用 + 页码/slide 号 |
 | **拒绝策略** | 低置信时拒绝直接回答 + 列出「最可能位置」 |
 | **冲突解决** | LLM 训练知识 vs 知识库 → KB 优先 + 显式提醒 |
@@ -139,6 +140,38 @@ npm run dev                # 仅 Vite，浏览器开 http://localhost:5173
    - 「上次我们讨论过的方案三是什么？」
    - 「总结这个产品 PPT 的核心功能」
 
+### 4. 验证流式输出
+
+```bash
+# 端到端验证：启动真实后端，只 mock LLM provider，测量每个 SSE 帧到达客户端的时刻
+./.venv/Scripts/python.exe scripts/e2e_stream_check.py
+# → 8 passed, 0 failed
+```
+
+脚本会断言「第一个 token 至少比最后一个早 300ms 到达」，因此把整段回答攒到最后一次性吐出的实现无法通过。
+
+也可以直接看后端的 SSE 流：
+
+```bash
+curl -N -X POST http://127.0.0.1:8765/api/v1/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"query": "这份合同里违约金怎么约定？"}'
+```
+
+事件序列：
+
+| 事件 | 含义 |
+|---|---|
+| `trace` | 推理步骤状态（理解 / 定位 / 抽取 / 回答 / 冲突检测） |
+| `token` | **增量文本**，逐 token 推送 |
+| `answer` | 完整回答全文（兜底用，正常情况下 `token` 已拼出全文） |
+| `citations` | 引用列表 |
+| `refusal` | 置信度不足，拒绝回答 |
+| `conflict` | LLM 与知识库冲突 |
+| `done` | 结束事件，携带完整 `ChatResponse` |
+
+`done` 一定作为终止事件发出（即使中途出错），客户端据此区分「正常结束」与「被切断」。
+
 ---
 
 ## 配置
@@ -240,7 +273,7 @@ YuanWork/
 │   │   │   ├── components/   # Sidebar, ChatWindow, WikiTree, WikiGraph, ...
 │   │   │   └── api/backend.ts
 │   │   └── src-tauri/        # Rust 壳
-│   │       └── src/{main,sidecar,commands,fs_scope,secrets}.rs
+│   │       └── src/{main,sidecar,commands,fs_scope,secrets,sse}.rs
 │   └── backend/              # Python 后端
 │       ├── pyproject.toml
 │       ├── configs/          # models.yaml
@@ -256,6 +289,8 @@ YuanWork/
 │       │   ├── wiki/         # Wiki (page_generator / linker / entity / trigger)
 │       │   └── privacy/      # network_guard / audit / redactor
 │       └── tests/            # 单元 + 集成测试
+└── scripts/                  # 端到端验证脚本
+    └── e2e_stream_check.py   # 流式输出真流式验证
 ```
 
 ---
@@ -265,7 +300,7 @@ YuanWork/
 ```bash
 cd src/backend
 PYTHONPATH=src/backend python -m pytest tests/ -q
-# → 122 passed
+# → 137 passed
 ```
 
 不依赖 LLM API key 也不下载 bge-m3 模型。覆盖：
@@ -277,6 +312,14 @@ PYTHONPATH=src/backend python -m pytest tests/ -q
 - Wiki 页面编译
 - 网络隔离（socket 层拦截）
 - 审计日志（logger + API）
+- 流式输出（gateway 不阻塞事件循环 / agent 逐 token 发事件 / SSE 帧格式 / 错误时补发 `done`）
+
+Rust 侧还有 SSE 解析器的单元测试：
+
+```bash
+cd src/app/src-tauri && cargo test
+# → 11 passed
+```
 
 ---
 
@@ -287,6 +330,7 @@ PYTHONPATH=src/backend python -m pytest tests/ -q
 | **阶段 1：核心可用** | Tauri 骨架 / 文档解析 / 嵌入检索 / 3 步推理 / 强制引用 / 拒绝 / 对话 UI | ✅ 完成 |
 | **阶段 2：差异化** | 整合层 / 冲突检测 / Reranker / 情景记忆 / Wiki 主动巡检 / 图谱视图 | ✅ 完成 |
 | **阶段 3：开源准备** | Tantivy FTS / 网络隔离 / 审计日志 / 文档 | ✅ 完成 |
+| **阶段 4：流式输出** | SSE 端到端真流式 / gateway 不阻塞事件循环 / 桌面端增量渲染 | ✅ 完成 |
 
 ---
 

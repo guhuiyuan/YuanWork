@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
@@ -16,18 +16,15 @@ _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 _jinja_env = Environment(loader=FileSystemLoader(str(_PROMPTS_DIR)), autoescape=False)
 
 
-async def generate_answer(
-    llm: LLMGateway,
+def _build_answer_task(
     query: str,
     evidence: list[dict[str, Any]],
     confidence: dict[str, Any],
-) -> str:
-    """Generate final answer with mandatory citations.
+) -> LLMTask:
+    """Render the answer prompt into an LLM task.
 
-    The prompt enforces:
-    - Citation [n] format
-    - No fabrication
-    - Refusal when evidence insufficient
+    Shared by the blocking and the streaming variant so both send the
+    exact same prompt to the model.
     """
     template = _jinja_env.get_template("answer.j2")
 
@@ -47,7 +44,7 @@ async def generate_answer(
         confidence=confidence,
     )
 
-    task = LLMTask(
+    return LLMTask(
         task_type="answer",
         messages=[
             LLMMessage(role="system", content=prompt),
@@ -57,8 +54,39 @@ async def generate_answer(
         max_tokens=2000,
     )
 
+
+async def generate_answer(
+    llm: LLMGateway,
+    query: str,
+    evidence: list[dict[str, Any]],
+    confidence: dict[str, Any],
+) -> str:
+    """Generate final answer with mandatory citations.
+
+    The prompt enforces:
+    - Citation [n] format
+    - No fabrication
+    - Refusal when evidence insufficient
+    """
+    task = _build_answer_task(query, evidence, confidence)
     response = await llm.complete(task)
     return response.content
+
+
+async def generate_answer_stream(
+    llm: LLMGateway,
+    query: str,
+    evidence: list[dict[str, Any]],
+    confidence: dict[str, Any],
+) -> AsyncIterator[str]:
+    """Generate the answer, yielding text deltas as the model produces them.
+
+    Same prompt as generate_answer(); the difference is that the caller
+    receives the text incrementally instead of waiting for the whole answer.
+    """
+    task = _build_answer_task(query, evidence, confidence)
+    async for delta in llm.stream(task):
+        yield delta
 
 
 async def generate_refusal(

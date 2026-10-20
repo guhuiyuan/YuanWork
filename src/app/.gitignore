@@ -1,0 +1,8 @@
+# Build artifacts emitted by `tsc -b` for the vite.config.ts project
+vite.config.js
+vite.config.d.ts
+*.tsbuildinfo
+
+# Tauri generated
+src-tauri/target/
+src-tauri/gen/

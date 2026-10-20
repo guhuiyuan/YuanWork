@@ -20,7 +20,11 @@ from yuanwork.memory.semantic import SemanticMemory
 from yuanwork.orchestrator.steps.understand import understand_query
 from yuanwork.orchestrator.steps.localize import localize_files
 from yuanwork.orchestrator.steps.extract import extract_evidence
-from yuanwork.orchestrator.steps.answer import generate_answer, generate_refusal
+from yuanwork.orchestrator.steps.answer import (
+    generate_answer,
+    generate_answer_stream,
+    generate_refusal,
+)
 from yuanwork.retrieval.confidence import ConfidenceScorer
 from yuanwork.retrieval.hybrid import HybridRetriever
 
@@ -184,9 +188,10 @@ class AgentLoop:
             },
         }
 
-        # Step 4
+        # Step 4 - streamed: the answer arrives token by token.
         yield {"type": "trace", "data": {"step": "answer", "status": "started"}}
-        await self._step_answer(state)
+        async for delta in self._generate_answer_tokens(state):
+            yield {"type": "token", "data": {"text": delta}}
         yield {
             "type": "trace",
             "data": {
@@ -239,7 +244,25 @@ class AgentLoop:
                     "data": {"conflicts": state.conflicts},
                 }
 
-        yield {"type": "done", "data": {"session_id": session_id}}
+        yield {
+            "type": "done",
+            "data": {
+                "session_id": session_id,
+                "response": {
+                    "session_id": session_id,
+                    "answer": state.answer,
+                    "citations": state.citations,
+                    "confidence": (
+                        state.confidence["confidence"] if state.confidence else 0.0
+                    ),
+                    "refused": state.refused,
+                    "refusal_reason": state.refusal_reason,
+                    "conflicts": state.conflicts,
+                    "wiki_compile": state.wiki_compile,
+                    "trace": state.trace,
+                },
+            },
+        }
 
     # ===== Step implementations =====
 
@@ -328,18 +351,10 @@ class AgentLoop:
         state.trace.append({"step": "wiki_compile", **result})
 
     async def _step_answer(self, state: AgentState) -> None:
-        """Step 4: Generate answer or refuse."""
+        """Step 4: Generate answer or refuse (blocking variant)."""
         # Check if we should refuse
         if state.confidence and state.confidence.get("should_refuse"):
-            state.refused = True
-            state.refusal_reason = state.confidence.get("reason", "low_confidence")
-            state.answer = await generate_refusal(state.candidates)
-            state.citations = []
-            state.trace.append({
-                "step": "answer",
-                "refused": True,
-                "reason": state.refusal_reason,
-            })
+            await self._apply_refusal(state)
             return
 
         # Generate answer
@@ -356,6 +371,67 @@ class AgentLoop:
             state.refused = True
             state.refusal_reason = f"generation_error: {e}"
             state.answer = "抱歉，生成回答时出现错误。请稍后重试。"
+            state.trace.append({"step": "answer", "error": str(e)})
+            return
+
+        # Build citations from evidence
+        state.citations = self._build_citations(state.evidence)
+
+        state.trace.append({
+            "step": "answer",
+            "refused": False,
+            "citation_count": len(state.citations),
+        })
+
+    async def _apply_refusal(self, state: AgentState) -> None:
+        """Fill the state with a refusal message (no answer is generated)."""
+        state.refused = True
+        state.refusal_reason = (
+            state.confidence.get("reason", "low_confidence")
+            if state.confidence
+            else "low_confidence"
+        )
+        state.answer = await generate_refusal(state.candidates)
+        state.citations = []
+        state.trace.append({
+            "step": "answer",
+            "refused": True,
+            "reason": state.refusal_reason,
+        })
+
+    async def _generate_answer_tokens(
+        self, state: AgentState
+    ) -> AsyncIterator[str]:
+        """Step 4 (streaming): generate the answer, yielding deltas as they arrive.
+
+        On the refusal path nothing is yielded. On the normal path every LLM
+        delta is yielded and appended to state.answer, so the caller can
+        forward it to the client immediately.
+
+        If the model fails part-way through, whatever was already generated
+        is kept and an error notice is appended, so the user does not lose
+        the text that was produced.
+        """
+        if state.confidence and state.confidence.get("should_refuse"):
+            await self._apply_refusal(state)
+            return
+
+        try:
+            async for delta in generate_answer_stream(
+                llm=self.llm,
+                query=state.query,
+                evidence=state.evidence,
+                confidence=state.confidence or {},
+            ):
+                state.answer += delta
+                yield delta
+            state.refused = False
+        except Exception as e:
+            logger.exception(f"Answer generation failed: {e}")
+            state.refused = True
+            state.refusal_reason = f"generation_error: {e}"
+            notice = "抱歉，生成回答时出现错误。请稍后重试。"
+            state.answer = f"{state.answer}\n\n{notice}" if state.answer else notice
             state.trace.append({"step": "answer", "error": str(e)})
             return
 

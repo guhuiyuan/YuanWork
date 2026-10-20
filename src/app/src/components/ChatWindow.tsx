@@ -1,6 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore, ChatMessage } from "../store";
-import { chat } from "../api/backend";
+import { chatStream, ChatResponse, ConflictInfo } from "../api/backend";
+
+/** Format the backend's conflict records into one warning string. */
+function formatConflicts(conflicts: unknown): string | undefined {
+  if (!Array.isArray(conflicts) || conflicts.length === 0) return undefined;
+  return conflicts
+    .map((c) => {
+      const info = c as ConflictInfo;
+      if (info.message) return info.message;
+      const topic = info.topic ?? "冲突";
+      return `${topic}：${info.llm_says ?? ""} / ${info.kb_says ?? ""}`;
+    })
+    .join("\n");
+}
 
 export function ChatWindow() {
   const messages = useAppStore((s) => s.messages);
@@ -12,11 +25,58 @@ export function ChatWindow() {
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // The message the stream is currently writing into, plus the token
+  // buffer that is flushed to the store on the next animation frame.
+  const streamIdRef = useRef<string | null>(null);
+  const pendingRef = useRef("");
+  const flushHandleRef = useRef<number | null>(null);
+  const gotTokensRef = useRef(false);
+  const answerTextRef = useRef("");
+  const errorNoticedRef = useRef(false);
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  const flush = useCallback(() => {
+    flushHandleRef.current = null;
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pendingRef.current = "";
+    const id = streamIdRef.current;
+    if (id) useAppStore.getState().appendToMessage(id, pending);
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushHandleRef.current !== null) return;
+    if (typeof requestAnimationFrame === "function") {
+      flushHandleRef.current = requestAnimationFrame(() => {
+        flushHandleRef.current = null;
+        flush();
+      });
+    } else {
+      flushHandleRef.current = window.setTimeout(() => {
+        flushHandleRef.current = null;
+        flush();
+      }, 50) as unknown as number;
+    }
+  }, [flush]);
+
+  // Cancel a pending flush if the component goes away mid-stream.
+  useEffect(() => {
+    return () => {
+      if (flushHandleRef.current !== null) {
+        if (typeof cancelAnimationFrame === "function") {
+          cancelAnimationFrame(flushHandleRef.current);
+        } else {
+          clearTimeout(flushHandleRef.current);
+        }
+        flushHandleRef.current = null;
+      }
+    };
+  }, []);
 
   async function handleSend() {
     const q = input.trim();
@@ -32,46 +92,117 @@ export function ChatWindow() {
     setInput("");
     setStreaming(true);
 
-    // Placeholder assistant message
+    // Placeholder assistant message - the stream writes into this one.
+    const assistantId = crypto.randomUUID();
     addMessage({
-      id: crypto.randomUUID(),
+      id: assistantId,
       role: "assistant",
       content: "",
       timestamp: Date.now(),
     });
+    streamIdRef.current = assistantId;
+    pendingRef.current = "";
+    gotTokensRef.current = false;
+    answerTextRef.current = "";
+    errorNoticedRef.current = false;
 
     try {
-      const resp = await chat({ query: q });
-      // Replace the placeholder with the final response
-      useAppStore.setState((s) => {
-        const msgs = [...s.messages];
-        const idx = msgs.length - 1;
-        if (idx >= 0) {
-          msgs[idx] = {
-            ...msgs[idx],
-            content: resp.answer,
-            citations: resp.citations,
-            confidence: resp.confidence,
-            refused: resp.refused,
-            conflict: resp.conflict ?? undefined,
-          };
+      const resp: ChatResponse = await chatStream({ query: q }, (ev) => {
+        switch (ev.type) {
+          case "token": {
+            const text = typeof ev.data.text === "string" ? ev.data.text : "";
+            if (text) {
+              gotTokensRef.current = true;
+              pendingRef.current += text;
+              scheduleFlush();
+            }
+            break;
+          }
+          case "answer": {
+            // The full text. Only used as a fallback when no token
+            // events arrived - appending it as well would duplicate it.
+            if (typeof ev.data.text === "string") {
+              answerTextRef.current = ev.data.text;
+            }
+            break;
+          }
+          case "citations": {
+            const citations = ev.data.citations as ChatMessage["citations"];
+            if (citations) {
+              useAppStore.getState().updateMessage(assistantId, { citations });
+            }
+            break;
+          }
+          case "refusal": {
+            const message =
+              typeof ev.data.message === "string" ? ev.data.message : "";
+            useAppStore.getState().updateMessage(assistantId, {
+              refused: true,
+              content: message,
+            });
+            break;
+          }
+          case "conflict": {
+            const conflict = formatConflicts(ev.data.conflicts);
+            useAppStore.getState().updateMessage(assistantId, { conflict });
+            break;
+          }
+          case "error": {
+            const detail =
+              typeof ev.data.detail === "string" ? ev.data.detail : "未知错误";
+            // Keep whatever was already streamed - losing it would be
+            // worse than showing the error next to it.
+            const current = useAppStore
+              .getState()
+              .messages.find((m) => m.id === assistantId);
+            const notice = `（请求失败：${detail}）`;
+            errorNoticedRef.current = true;
+            useAppStore.getState().updateMessage(assistantId, {
+              content: current?.content
+                ? `${current.content}\n\n${notice}`
+                : notice,
+            });
+            break;
+          }
+          default:
+            break;
         }
-        return { messages: msgs };
       });
+
+      // Make sure nothing is left in the buffer.
+      flush();
+
+      const patch: Partial<ChatMessage> = {
+        citations: resp.citations,
+        confidence: resp.confidence,
+        refused: resp.refused,
+      };
+      const conflict = formatConflicts(resp.conflicts);
+      if (conflict) patch.conflict = conflict;
+      // If no token event ever arrived, fall back to the full answer.
+      const fallback = answerTextRef.current || resp.answer;
+      if (!gotTokensRef.current && fallback) {
+        patch.content = fallback;
+      }
+      useAppStore.getState().updateMessage(assistantId, patch);
     } catch (e) {
-      useAppStore.setState((s) => {
-        const msgs = [...s.messages];
-        const idx = msgs.length - 1;
-        if (idx >= 0) {
-          msgs[idx] = {
-            ...msgs[idx],
-            content: `（请求失败：${(e as Error).message}）`,
-          };
-        }
-        return { messages: msgs };
-      });
+      flush();
+      const detail = (e as Error).message;
+      const current = useAppStore
+        .getState()
+        .messages.find((m) => m.id === assistantId);
+      // Keep whatever was already streamed - losing it would be worse
+      // than showing the error next to it. If an `error` event already
+      // reported the failure, do not repeat the notice.
+      if (!errorNoticedRef.current) {
+        const content = current?.content
+          ? `${current.content}\n\n（请求失败：${detail}）`
+          : `（请求失败：${detail}）`;
+        useAppStore.getState().updateMessage(assistantId, { content });
+      }
     } finally {
       setStreaming(false);
+      streamIdRef.current = null;
     }
   }
 

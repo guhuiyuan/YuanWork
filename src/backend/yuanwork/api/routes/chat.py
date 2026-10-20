@@ -76,8 +76,22 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
                     ErrorResponse(error="Stream failed", detail=str(e)).model_dump(),
                 ),
             }
+            # Always close the stream with a terminal event, so a client can
+            # tell "the stream ended" from "the stream was cut".
+            yield {
+                "event": "done",
+                "data": json.dumps({"session_id": session_id, "response": None}),
+            }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        headers={
+            # Proxies must not buffer, otherwise the tokens arrive in one
+            # lump at the end and the streaming is pointless.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/chat", response_model=ChatResponse)

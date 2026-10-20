@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -68,6 +69,18 @@ class LLMResponse:
     finish_reason: str
     usage: dict[str, int] = field(default_factory=dict)
     raw: Any = None
+
+
+@dataclass
+class _StreamEnd:
+    """Terminal marker pushed onto the streaming queue.
+
+    Carries the token usage reported by the provider and any exception the
+    worker thread hit, so the async side can finish the stream and log it.
+    """
+
+    usage: dict[str, int]
+    error: BaseException | None = None
 
 
 @dataclass
@@ -316,7 +329,18 @@ class LLMGateway:
                     logger.exception("Audit log write failed (non-fatal)")
 
     async def stream(self, task: LLMTask) -> AsyncIterator[str]:
-        """Stream completion tokens."""
+        """Stream completion tokens.
+
+        litellm's streaming response is a *blocking* generator. Pulling it
+        directly would hold the event loop for the whole generation, so
+        every other request (health checks, other chats) would stall until
+        the answer was finished.
+
+        Instead the generator is driven on a worker thread and its deltas
+        are handed to the event loop through an asyncio.Queue. The loop
+        stays free for the whole stream, and the consumer receives each
+        delta as soon as the provider produces it.
+        """
         alias = self.get_model_for_task(task.task_type)
         messages = [{"role": m.role, "content": m.content} for m in task.messages]
 
@@ -349,23 +373,70 @@ class LLMGateway:
         completion_tokens = 0
         error: str | None = None
         success = False
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        # Set when the consumer goes away so the worker stops pulling.
+        stop = threading.Event()
+
+        def _produce() -> None:
+            """Drive the blocking litellm generator on a worker thread."""
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            failure: BaseException | None = None
+            try:
+                response = litellm.completion(**kwargs)
+                for chunk in response:
+                    if stop.is_set():
+                        break
+                    choices = getattr(chunk, "choices", None)
+                    if choices:
+                        text = getattr(choices[0].delta, "content", None)
+                        if text:
+                            loop.call_soon_threadsafe(queue.put_nowait, text)
+                    # The final chunk carries usage info for some providers
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage:
+                        usage["prompt_tokens"] = (
+                            chunk_usage.prompt_tokens or usage["prompt_tokens"]
+                        )
+                        usage["completion_tokens"] = (
+                            chunk_usage.completion_tokens or usage["completion_tokens"]
+                        )
+                        usage["total_tokens"] = (
+                            getattr(chunk_usage, "total_tokens", 0)
+                            or usage["total_tokens"]
+                        )
+            except BaseException as exc:  # noqa: BLE001 - forwarded to the consumer
+                failure = exc
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _StreamEnd(usage, failure))
+
+        worker = threading.Thread(
+            target=_produce, name="litellm-stream", daemon=True
+        )
+        worker.start()
+
         try:
-            # Use litellm's streaming completion
-            response = await asyncio.to_thread(litellm.completion, **kwargs)
-            for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    accumulated.append(chunk.choices[0].delta.content)
-                    yield chunk.choices[0].delta.content
-                # The final chunk carries usage info for some providers
-                if getattr(chunk, "usage", None):
-                    prompt_tokens = chunk.usage.prompt_tokens or prompt_tokens
-                    completion_tokens = chunk.usage.completion_tokens or completion_tokens
-            success = True
+            while True:
+                item = await queue.get()
+                if isinstance(item, _StreamEnd):
+                    prompt_tokens = item.usage["prompt_tokens"]
+                    completion_tokens = item.usage["completion_tokens"]
+                    if item.error is not None:
+                        raise item.error
+                    success = True
+                    break
+                accumulated.append(item)
+                yield item
         except Exception as e:
             logger.exception(f"Streaming LLM call failed: {e}")
             error = repr(e)
             raise
         finally:
+            # Runs on normal completion, on error, and on early exit
+            # (client disconnect) - in the last case it also tells the
+            # worker thread to stop pulling from the provider.
+            stop.set()
             if self.audit_logger is not None:
                 try:
                     duration_ms = (time.monotonic() - start) * 1000.0

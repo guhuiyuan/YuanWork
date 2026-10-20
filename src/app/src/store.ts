@@ -16,9 +16,12 @@ export interface ChatMessage {
 export interface Citation {
   index: number;
   file_name: string;
+  file_path?: string;
   page?: number;
   slide_number?: number;
+  section?: string | null;
   text: string;
+  chunk_id?: string;
 }
 
 export interface KbFile {
@@ -88,7 +91,8 @@ interface AppState {
   messages: ChatMessage[];
   isStreaming: boolean;
   addMessage: (m: ChatMessage) => void;
-  appendToLast: (chunk: string) => void;
+  appendToMessage: (id: string, chunk: string) => void;
+  updateMessage: (id: string, patch: Partial<ChatMessage>) => void;
   setStreaming: (s: boolean) => void;
   clearMessages: () => void;
 
@@ -119,17 +123,16 @@ export const useAppStore = create<AppState>((set) => ({
   messages: [],
   isStreaming: false,
   addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
-  appendToLast: (chunk) =>
-    set((s) => {
-      const msgs = [...s.messages];
-      if (msgs.length > 0) {
-        const last = msgs[msgs.length - 1];
-        if (last.role === "assistant") {
-          msgs[msgs.length - 1] = { ...last, content: last.content + chunk };
-        }
-      }
-      return { messages: msgs };
-    }),
+  appendToMessage: (id, chunk) =>
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === id ? { ...m, content: m.content + chunk } : m
+      ),
+    })),
+  updateMessage: (id, patch) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+    })),
   setStreaming: (s) => set({ isStreaming: s }),
   clearMessages: () => set({ messages: [] }),
 

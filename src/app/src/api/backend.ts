@@ -4,6 +4,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type {
   Citation,
   KbFile,
@@ -38,19 +39,51 @@ export interface ChatRequest {
 }
 
 export interface ChatResponse {
+  session_id?: string;
   answer: string;
   citations: Citation[];
   confidence: number;
   refused: boolean;
-  conflict?: string | null;
+  refusal_reason?: string | null;
+  conflicts?: ConflictInfo[];
   wiki_compile?: {
     triggered: boolean;
     page_id?: string;
     title?: string;
     reason?: string;
     error?: string;
-  };
+  } | null;
+  trace?: Record<string, unknown>[];
 }
+
+export interface ConflictInfo {
+  type?: string;
+  topic?: string;
+  llm_says?: string;
+  kb_says?: string;
+  message?: string;
+  explanation?: string;
+}
+
+/** Event types the backend's SSE stream can emit. */
+export type StreamEventType =
+  | "trace"
+  | "token"
+  | "answer"
+  | "citations"
+  | "refusal"
+  | "conflict"
+  | "done"
+  | "error"
+  | "ping";
+
+export interface StreamEvent {
+  type: StreamEventType;
+  data: Record<string, unknown>;
+}
+
+/** Tauri channel the Rust bridge re-emits the backend's SSE events on. */
+const CHAT_EVENT_CHANNEL = "chat:event";
 
 export async function chat(req: ChatRequest): Promise<ChatResponse> {
   if (isTauri) {
@@ -61,6 +94,159 @@ export async function chat(req: ChatRequest): Promise<ChatResponse> {
     method: "POST",
     body: JSON.stringify(req),
   });
+}
+
+// ===== SSE parsing (browser mode) =====
+
+interface RawSseFrame {
+  event: string;
+  data: string;
+}
+
+/**
+ * Split off every complete frame in `buffer`.
+ *
+ * The backend uses sse-starlette, which terminates frames with CRLF
+ * (`\r\n\r\n`); LF is accepted too. Whatever follows the last complete
+ * frame is returned as `rest` so it can be prepended to the next chunk.
+ */
+function parseSseFrames(buffer: string): { frames: RawSseFrame[]; rest: string } {
+  const frames: RawSseFrame[] = [];
+  let rest = buffer;
+
+  for (;;) {
+    const crlf = rest.indexOf("\r\n\r\n");
+    const lf = rest.indexOf("\n\n");
+    let end: number;
+    if (crlf >= 0 && (lf < 0 || crlf < lf)) {
+      end = crlf + 4;
+    } else if (lf >= 0) {
+      end = lf + 2;
+    } else {
+      break;
+    }
+    const parsed = parseSseFrame(rest.slice(0, end));
+    rest = rest.slice(end);
+    if (parsed) frames.push(parsed);
+  }
+
+  return { frames, rest };
+}
+
+function parseSseFrame(frame: string): RawSseFrame | null {
+  let event = "";
+  const dataLines: string[] = [];
+
+  for (const rawLine of frame.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    // Blank line, or a comment (the server's keepalive).
+    if (!line || line.startsWith(":")) continue;
+
+    const colon = line.indexOf(":");
+    const field = colon < 0 ? line : line.slice(0, colon);
+    let value = colon < 0 ? "" : line.slice(colon + 1);
+    // Exactly one leading space after the colon is part of the framing.
+    if (value.startsWith(" ")) value = value.slice(1);
+
+    if (field === "event") event = value;
+    else if (field === "data") dataLines.push(value);
+  }
+
+  if (!event && dataLines.length === 0) return null;
+  return { event: event || "message", data: dataLines.join("\n") };
+}
+
+function toStreamEvent(frame: RawSseFrame): StreamEvent {
+  let data: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(frame.data);
+    if (parsed && typeof parsed === "object") {
+      data = parsed as Record<string, unknown>;
+    }
+  } catch {
+    data = { raw: frame.data };
+  }
+  return { type: frame.event as StreamEventType, data };
+}
+
+// ===== Chat streaming =====
+
+/**
+ * Stream a chat completion, delivering every backend event to `onEvent`
+ * as it arrives.
+ *
+ * The answer text arrives as a series of `token` events; the resolved
+ * promise carries the final response (answer, citations, confidence).
+ */
+export async function chatStream(
+  req: ChatRequest,
+  onEvent: (event: StreamEvent) => void
+): Promise<ChatResponse> {
+  if (isTauri) {
+    // The Rust command reads the backend's SSE stream and re-emits each
+    // event on this channel while it runs.
+    const unlisten = await listen<StreamEvent>(CHAT_EVENT_CHANNEL, (e) => {
+      onEvent(e.payload);
+    });
+    try {
+      const json = await invoke<string>("chat_stream", { request: req });
+      return JSON.parse(json);
+    } finally {
+      unlisten();
+    }
+  }
+
+  const resp = await fetch("http://127.0.0.1:8765/api/v1/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+  }
+  if (!resp.body) {
+    throw new Error("streaming response has no body");
+  }
+
+  const reader = resp.body.getReader();
+  // `stream: true` keeps multi-byte characters intact when a chunk
+  // boundary falls inside one.
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let finalResponse: ChatResponse | null = null;
+
+  const handle = (frames: RawSseFrame[]) => {
+    for (const frame of frames) {
+      const event = toStreamEvent(frame);
+      if (event.type === "done" && event.data.response) {
+        finalResponse = event.data.response as ChatResponse;
+      }
+      onEvent(event);
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const { frames, rest } = parseSseFrames(buffer);
+    buffer = rest;
+    handle(frames);
+  }
+
+  // Flush whatever is left, including a frame with no trailing blank line.
+  buffer += decoder.decode();
+  const tail = parseSseFrames(buffer);
+  handle(tail.frames);
+  if (tail.rest.trim()) {
+    const last = parseSseFrame(tail.rest);
+    if (last) handle([last]);
+  }
+
+  if (!finalResponse) {
+    throw new Error("stream ended without a final response");
+  }
+  return finalResponse;
 }
 
 // ===== Knowledge Base =====

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **真流式输出** — `chat_stream` 之前是「一次性拿到完整回答再返回」，名字具有误导性。现在回答逐 token 推送到客户端
+  - `LLMGateway.stream()`：litellm 的流式响应是**阻塞**生成器，直接迭代会占住事件循环整个生成过程
+    - 改为在 daemon 线程上驱动该生成器，delta 通过 `asyncio.Queue` + `loop.call_soon_threadsafe` 交回事件循环
+    - 事件循环全程可服务其他请求；客户端断开时 `stop` 事件让工作线程停止拉取
+    - 审计日志在成功 / 失败 / 提前退出三种情况下都恰好写一次
+  - `AgentLoop.stream()`：回答步骤改为 `generate_answer_stream()`，逐个 delta 发 `token` 事件
+    - `done` 事件现在携带完整 `ChatResponse`（answer / citations / confidence / conflicts / trace）
+    - 生成中途失败时保留已生成的部分文本，追加错误提示，不丢弃用户已读到的内容
+    - `AgentLoop.run()` 保留阻塞路径，行为不变
+  - `api/routes/chat.py`：出错时也发一个终止 `done` 事件，客户端据此区分「正常结束」与「被切断」；加 `Cache-Control: no-cache` + `X-Accel-Buffering: no` 防代理缓冲
+  - Rust 侧新增 `src-tauri/src/sse.rs`：零依赖增量 SSE 解析器（CRLF / LF 均可，跨 chunk 断帧，注释帧，多行 data）
+    - `chat_stream` command 改读 `/api/v1/chat/stream`，边读边用 `app.emit("chat:event", ...)` 转发给 webview
+    - 用 `reqwest::Response::chunk()` 而非 `bytes_stream()`，因此**不需要新增任何 Rust 依赖**
+  - 前端 `api/backend.ts`：`chatStream()` 统一 Tauri / 浏览器两种模式
+    - 浏览器模式用 `fetch` + `getReader()` + `TextDecoder(stream: true)` 自己解析 SSE
+    - Tauri 模式用 `listen("chat:event")` 订阅 Rust 转发的事件
+  - 前端 `store.ts`：`appendToLast` 改为 `appendToMessage(id, chunk)` —— 旧实现会往「最后一条消息」追加，流式期间若插入新消息就会写错地方；顺带删掉了这个死代码
+  - 前端 `ChatWindow.tsx`：`requestAnimationFrame` 批量 flush token 缓冲，避免每个 token 触发一次 re-render
+    - `token` 是增量文本的唯一来源，`answer` 事件只作兜底，避免重复渲染
+    - 失败时保留已流式出的文本，只在其后追加错误提示
+  - 测试：15 个后端测试（含「不阻塞事件循环」「不缓冲到末尾」两条决定性断言）+ 9 个 Rust SSE 解析器测试
+  - `scripts/e2e_stream_check.py`：端到端验证。启动真实 FastAPI 应用，只 mock `litellm.completion`，测量每个 SSE 帧到达客户端的时刻
+    - 决定性断言：第一个 token 至少比最后一个早 300ms 到达，且流式期间并发 `/health` 仍能立即返回
 - **Tauri 桌面 Debug 二进制** — Tauri 2.x 壳编译通过，产出 `D:\cargo-target\debug\yuanwork.exe` (23 MB)
   - `sidecar.rs` 重写：`BackendLaunch` 枚举支持 bundled 二进制 + Python venv 两种启动模式
   - `find_python_interpreter()` 向上爬 8 层找 `.venv/Scripts/python.exe`，fallback 到 `py` / `python` / `python3`

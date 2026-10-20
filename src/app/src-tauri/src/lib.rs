@@ -9,6 +9,7 @@ mod sidecar;
 mod commands;
 mod fs_scope;
 mod secrets;
+mod sse;
 
 use tauri::Manager;
 

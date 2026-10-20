@@ -1,8 +1,12 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Tauri expects a fixed port
-const host = process.env.TAURI_DEV_HOST;
+// Tauri expects a fixed port.
+// `process` is a Node global and @types/node is not a dependency, so read it
+// through a typed accessor instead of relying on the ambient Node types.
+const host = (
+  globalThis as { process?: { env?: Record<string, string | undefined> } }
+).process?.env?.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
   plugins: [react()],
