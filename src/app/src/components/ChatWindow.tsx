@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore, ChatMessage } from "../store";
 import { chatStream, ChatResponse, ConflictInfo } from "../api/backend";
-import { appendFailureNotice, refusalBanner, refusalContent } from "../api/streamText";
+import { appendFailureNotice, failureNotice, refusalBanner, refusalContent } from "../api/streamText";
 
 /** Format the backend's conflict records into one warning string. */
 function formatConflicts(conflicts: unknown): string | undefined {
@@ -31,6 +31,7 @@ export function ChatWindow() {
   const streamIdRef = useRef<string | null>(null);
   const pendingRef = useRef("");
   const flushHandleRef = useRef<number | null>(null);
+  const flushTimerRef = useRef<number | null>(null);
   const gotTokensRef = useRef(false);
   const answerTextRef = useRef("");
   const errorNoticedRef = useRef(false);
@@ -42,7 +43,20 @@ export function ChatWindow() {
   }, [messages]);
 
   const flush = useCallback(() => {
-    flushHandleRef.current = null;
+    // Cancel whichever handle is pending - the other one may already
+    // have fired.
+    if (flushHandleRef.current !== null) {
+      if (typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(flushHandleRef.current);
+      } else {
+        clearTimeout(flushHandleRef.current);
+      }
+      flushHandleRef.current = null;
+    }
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
     const pending = pendingRef.current;
     if (!pending) return;
     pendingRef.current = "";
@@ -51,15 +65,22 @@ export function ChatWindow() {
   }, []);
 
   const scheduleFlush = useCallback(() => {
-    if (flushHandleRef.current !== null) return;
+    if (flushHandleRef.current !== null || flushTimerRef.current !== null) return;
     if (typeof requestAnimationFrame === "function") {
       flushHandleRef.current = requestAnimationFrame(() => {
         flushHandleRef.current = null;
         flush();
       });
+      // Safety net: requestAnimationFrame does NOT fire while the tab is
+      // hidden, so without this the whole answer would sit in the buffer
+      // until the stream ends and the UI would look frozen.
+      flushTimerRef.current = window.setTimeout(() => {
+        flushTimerRef.current = null;
+        flush();
+      }, 100) as unknown as number;
     } else {
-      flushHandleRef.current = window.setTimeout(() => {
-        flushHandleRef.current = null;
+      flushTimerRef.current = window.setTimeout(() => {
+        flushTimerRef.current = null;
         flush();
       }, 50) as unknown as number;
     }
@@ -75,6 +96,10 @@ export function ChatWindow() {
           clearTimeout(flushHandleRef.current);
         }
         flushHandleRef.current = null;
+      }
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
       }
     };
   }, []);
@@ -164,7 +189,7 @@ export function ChatWindow() {
             const current = useAppStore
               .getState()
               .messages.find((m) => m.id === assistantId);
-            const notice = `（请求失败：${detail}）`;
+            const notice = failureNotice(detail);
             errorNoticedRef.current = true;
             useAppStore.getState().updateMessage(assistantId, {
               content: appendFailureNotice(current?.content ?? "", notice),
@@ -208,9 +233,13 @@ export function ChatWindow() {
       // than showing the error next to it. If an `error` event already
       // reported the failure, do not repeat the notice.
       if (!errorNoticedRef.current) {
-        const notice = `（请求失败：${detail}）`;
+        // The backend's "answer" event carries the complete text. If the
+        // stream was cut before "done", that is the only place the full
+        // answer exists - fall back to it instead of showing nothing.
+        const base = current?.content || answerTextRef.current;
+        const notice = failureNotice(detail);
         useAppStore.getState().updateMessage(assistantId, {
-          content: appendFailureNotice(current?.content ?? "", notice),
+          content: appendFailureNotice(base, notice),
         });
       }
     } finally {

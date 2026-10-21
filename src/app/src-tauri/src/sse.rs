@@ -230,6 +230,26 @@ mod tests {
     }
 
     #[test]
+    fn mixed_crlf_and_lf_terminators_split_correctly() {
+        // The browser-side parser (src/app/src/api/sse.ts) must agree with
+        // this one, otherwise the same bytes render differently in the
+        // Tauri app and in browser dev mode.
+        let mut p = SseParser::new();
+        let events = p.push("event: a
+data: 1
+
+event: b
+data: 2
+
+");
+        assert_eq!(events.len(), 2, "expected two frames, got {events:?}");
+        assert_eq!(events[0].event, "a");
+        assert_eq!(events[0].data, "1");
+        assert_eq!(events[1].event, "b");
+        assert_eq!(events[1].data, "2");
+    }
+
+    #[test]
     fn ignores_comment_lines() {
         let mut p = SseParser::new();
         let events = p.push(": keepalive\r\nevent: token\r\ndata: x\r\n\r\n");

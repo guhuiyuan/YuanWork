@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 
 import {
   appendFailureNotice,
+  failureNotice,
   isGenerationError,
   refusalBanner,
   refusalContent,
@@ -57,4 +58,33 @@ test("a refusal without a reason falls back to the low-confidence wording", () =
   const banner = refusalBanner(undefined);
   assert.match(banner.title, /置信度不足/);
   assert.ok(banner.detail.length > 0);
+});
+
+test("a known internal error is shown in Chinese", () => {
+  assert.match(
+    failureNotice("stream ended without a final response"),
+    /回答流意外中断/
+  );
+  assert.match(failureNotice("Failed to fetch"), /无法连接后端服务/);
+  assert.match(
+    failureNotice(
+      "error sending request for url (http://127.0.0.1:8765/api/v1/chat/stream): connection refused"
+    ),
+    /无法连接后端服务/
+  );
+});
+
+test("an HTTP status is kept as-is", () => {
+  assert.match(failureNotice("HTTP 500: boom"), /HTTP 500/);
+});
+
+test("an unknown reason is kept but truncated", () => {
+  const long = "x".repeat(400);
+  const out = failureNotice(long);
+  assert.ok(out.length < 200, `notice is too long: ${out.length} chars`);
+  assert.match(out, /…/);
+});
+
+test("an empty reason still produces a notice", () => {
+  assert.match(failureNotice(""), /请求失败/);
 });

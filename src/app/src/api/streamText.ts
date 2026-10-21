@@ -59,3 +59,27 @@ export function refusalBanner(reason: string | undefined): {
     detail: "下方仅供参考可能位置。",
   };
 }
+
+/**
+ * The notice shown when the request itself failed.
+ *
+ * The raw error strings are internal and English ("stream ended without
+ * a final response", a 150-character reqwest dump). Dumping them into a
+ * Chinese UI, styled like an answer, reads as if the assistant had said
+ * them. Known failures get a Chinese sentence; anything else is kept but
+ * truncated, because an unknown reason is still worth showing.
+ */
+export function failureNotice(detail: string): string {
+  const d = (detail ?? "").trim();
+  if (!d) return "（请求失败：未知错误）";
+  if (/stream ended without a final response/i.test(d)) {
+    return "（请求失败：回答流意外中断）";
+  }
+  if (/failed to fetch|connection refused|error sending request/i.test(d)) {
+    return "（请求失败：无法连接后端服务）";
+  }
+  if (/^HTTP \d+/i.test(d)) {
+    return `（请求失败：${d}）`;
+  }
+  return `（请求失败：${d.length > 120 ? d.slice(0, 120) + "…" : d}）`;
+}
