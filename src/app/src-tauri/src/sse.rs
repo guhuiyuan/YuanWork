@@ -12,9 +12,9 @@
 //!
 //! The parser is incremental: network chunks arrive at arbitrary
 //! boundaries, so a frame can be split across two `push()` calls, and a
-//! multi-byte UTF-8 character can be split across two byte chunks. Callers
-//! should decode bytes to a string with a streaming decoder before feeding
-//! them in.
+//! multi-byte UTF-8 character can be split across two byte chunks. Use
+//! [`Utf8Decoder`] to turn the raw bytes into text before feeding them
+//! to [`SseParser::push`].
 
 /// A single decoded SSE frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,80 @@ pub struct SseEvent {
     pub event: String,
     /// The `data:` field. Multiple `data:` lines are joined with `\n`.
     pub data: String,
+}
+
+/// Incremental UTF-8 decoder.
+///
+/// Network chunks can split a multi-byte character in half. Decoding each
+/// chunk on its own would turn the split character into U+FFFD, silently
+/// corrupting the text (e.g. "违约金" arriving as "��约金"). This decoder
+/// holds back an incomplete trailing character until the rest of its bytes
+/// arrive.
+#[derive(Debug, Default)]
+pub struct Utf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8Decoder {
+    /// Create an empty decoder.
+    pub fn new() -> Self {
+        Self { pending: Vec::new() }
+    }
+
+    /// Decode as much of `bytes` as possible.
+    ///
+    /// Returns the decoded text. If `bytes` ends in the middle of a
+    /// multi-byte character, that character is held back and returned by
+    /// the next call (or by [`Utf8Decoder::finish`]).
+    pub fn decode(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut out = String::new();
+
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(text) => {
+                    out.push_str(text);
+                    self.pending.clear();
+                    break;
+                }
+                Err(err) => {
+                    let valid = err.valid_up_to();
+                    // `valid_up_to` guarantees this prefix is valid UTF-8.
+                    if let Ok(prefix) = std::str::from_utf8(&self.pending[..valid]) {
+                        out.push_str(prefix);
+                    }
+                    match err.error_len() {
+                        // Incomplete trailing character: wait for more bytes.
+                        None => {
+                            self.pending.drain(..valid);
+                            break;
+                        }
+                        // Genuinely invalid bytes: one replacement char for
+                        // the offending sequence, then keep going.
+                        Some(len) => {
+                            out.push('\u{FFFD}');
+                            self.pending.drain(..valid + len);
+                        }
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Flush bytes that never formed a complete character.
+    ///
+    /// Call this once the stream ends; a truncated trailing character
+    /// becomes U+FFFD instead of being silently dropped.
+    pub fn finish(&mut self) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        let text = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        text
+    }
 }
 
 /// Incremental SSE frame parser.
@@ -75,7 +149,6 @@ fn split_frame(buffer: &str) -> Option<(String, String)> {
     let lf = buffer.find("\n\n");
 
     match (crlf, lf) {
-        (Some(c), Some(l)) if l < c => Some((buffer[..l].to_string(), buffer[l + 2..].to_string())),
         (Some(c), _) => Some((buffer[..c].to_string(), buffer[c + 4..].to_string())),
         (None, Some(l)) => Some((buffer[..l].to_string(), buffer[l + 2..].to_string())),
         (None, None) => None,
@@ -209,5 +282,64 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "ping");
         assert_eq!(events[0].data, "");
+    }
+
+    // ===== Utf8Decoder =====
+
+    #[test]
+    fn decoder_passes_plain_text_through() {
+        let mut d = Utf8Decoder::new();
+        assert_eq!(d.decode(b"hello"), "hello");
+        assert_eq!(d.decode(b" world"), " world");
+        assert_eq!(d.finish(), "");
+    }
+
+    #[test]
+    fn decoder_keeps_split_character_intact() {
+        // "违" is three bytes. Split it 2 + 1 across two chunks.
+        let text = "违约金";
+        let bytes = text.as_bytes();
+        let mut d = Utf8Decoder::new();
+        let first = d.decode(&bytes[..2]);
+        assert_eq!(first, "", "the partial character must be held back");
+        let second = d.decode(&bytes[2..]);
+        assert_eq!(format!("{first}{second}"), text);
+    }
+
+    #[test]
+    fn decoder_survives_a_split_inside_a_sse_frame() {
+        // The realistic case: a frame boundary lands inside a character.
+        let payload = "event: token\r\ndata: {\"text\":\"违约金\"}\r\n\r\n";
+        let bytes = payload.as_bytes();
+        // Cut in the middle of the first multi-byte character.
+        let cut = bytes
+            .iter()
+            .position(|b| *b == 0xE8)
+            .map(|i| i + 1)
+            .unwrap();
+        let mut decoder = Utf8Decoder::new();
+        let mut parser = SseParser::new();
+
+        let mut events = parser.push(&decoder.decode(&bytes[..cut]));
+        assert!(events.is_empty(), "the frame is not complete yet");
+        events = parser.push(&decoder.decode(&bytes[cut..]));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "token");
+        assert!(events[0].data.contains("违约金"), "got {}", events[0].data);
+    }
+
+    #[test]
+    fn decoder_replaces_invalid_bytes() {
+        let mut d = Utf8Decoder::new();
+        // 0xFF is not a valid UTF-8 byte.
+        assert_eq!(d.decode(&[0xFF, 0x41]), "\u{FFFD}A");
+    }
+
+    #[test]
+    fn decoder_flushes_a_truncated_character() {
+        let mut d = Utf8Decoder::new();
+        let bytes = "违".as_bytes();
+        assert_eq!(d.decode(&bytes[..2]), "");
+        assert_eq!(d.finish(), "\u{FFFD}");
     }
 }

@@ -59,6 +59,13 @@ pub struct Citation {
 /// Channel the backend's SSE events are re-emitted on, for the webview.
 pub const CHAT_EVENT_CHANNEL: &str = "chat:event";
 
+/// How long the backend may go without sending any bytes before the
+/// stream is considered stalled.
+///
+/// This is an *idle* timeout, not a total one: a long answer that keeps
+/// trickling tokens is fine, only a silent connection is aborted.
+pub const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Stream a chat completion.
 ///
 /// Reads the SSE stream from the backend's `/api/v1/chat/stream` endpoint
@@ -71,7 +78,13 @@ pub async fn chat_stream(
     request: ChatRequest,
     backend: State<'_, BackendHandle>,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        // Idle timeout: resets on every byte received, so a slow but
+        // progressing answer is not killed, only a stalled one is.
+        .read_timeout(STREAM_IDLE_TIMEOUT)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let url = format!("{}/api/v1/chat/stream", backend.url());
 
     let mut response = client
@@ -96,17 +109,26 @@ pub async fn chat_stream(
     }
 
     let mut parser = sse::SseParser::new();
+    let mut decoder = sse::Utf8Decoder::new();
     let mut final_response: Option<ChatResponse> = None;
 
     // `Response::chunk()` needs no extra feature or dependency, unlike
     // `bytes_stream()` which would pull in futures-util.
     while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-        let text = String::from_utf8_lossy(&chunk).into_owned();
+        // A chunk boundary can fall inside a multi-byte character, so the
+        // bytes are decoded incrementally - decoding each chunk on its own
+        // would turn the split character into U+FFFD.
+        let text = decoder.decode(&chunk);
         for event in parser.push(&text) {
             handle_stream_event(&app, &event, &mut final_response);
         }
     }
-    // A server that closes without a final blank line would lose that frame.
+    // The stream ended: flush bytes that never formed a character, then a
+    // frame that was never terminated by a blank line.
+    let tail = decoder.finish();
+    for event in parser.push(&tail) {
+        handle_stream_event(&app, &event, &mut final_response);
+    }
     for event in parser.finish() {
         handle_stream_event(&app, &event, &mut final_response);
     }
