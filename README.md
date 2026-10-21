@@ -346,7 +346,7 @@ cd src/app/src-tauri && cargo test
 
 ```bash
 cd src/app && npm test
-# → 22 passed
+# → 25 passed
 ```
 
 ---

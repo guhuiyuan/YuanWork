@@ -96,3 +96,26 @@ test("a buffer that mixes CRLF and LF frames parses both", () => {
   assert.equal(frames[0].event, "a");
   assert.equal(frames[1].event, "b");
 });
+
+test("a field without a colon is read as an empty value", () => {
+  // The SSE spec says a line without a colon is a field with an empty
+  // value. It must not be mistaken for a frame boundary.
+  const frame = parseSseFrame("event: token\r\ndata\r\n\r\n");
+  assert.ok(frame);
+  assert.equal(frame.event, "token");
+  assert.equal(frame.data, "");
+});
+
+test("an unknown field is ignored", () => {
+  const frame = parseSseFrame("event: token\r\nid: 42\r\ndata: x\r\n\r\n");
+  assert.ok(frame);
+  assert.equal(frame.event, "token");
+  assert.equal(frame.data, "x");
+});
+
+test("a frame with no event name defaults to message", () => {
+  const { frames } = parseSseFrames("data: only data\r\n\r\n");
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].event, "message");
+  assert.equal(frames[0].data, "only data");
+});
