@@ -756,3 +756,38 @@ routing:
         encoding="utf-8",
     )
     return YuanWorkSettings(config_dir=temp_dir, data_dir=temp_dir / "data")
+
+
+@pytest.mark.asyncio
+async def test_gateway_stream_closes_the_provider_response(gw, monkeypatch):
+    """The provider connection is released when the stream ends.
+
+    litellm's stream wrapper has no sync `close()` - only an async
+    `aclose()`. The HTTP response underneath it does have a sync
+    `close()`, so the gateway walks the wrapper chain to find it.
+    """
+    closed: list[str] = []
+
+    class _FakeHttpResponse:
+        def close(self):
+            closed.append("http")
+
+    class _FakeWrapper:
+        """Mimics litellm's CustomStreamWrapper: no `close` of its own."""
+
+        def __init__(self):
+            self.completion_stream = _FakeHttpResponse()
+
+        def __iter__(self):
+            yield _FakeChunk("Hi")
+            yield _FakeChunk(" there")
+
+    monkeypatch.setattr(
+        "yuanwork.llm.gateway.litellm.completion",
+        lambda **kwargs: _FakeWrapper(),
+    )
+
+    received = [d async for d in gw.stream(_task())]
+
+    assert received == ["Hi", " there"]
+    assert closed == ["http"], "the provider response was never closed"
