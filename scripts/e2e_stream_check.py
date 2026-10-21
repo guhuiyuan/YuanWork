@@ -4,10 +4,11 @@ This script starts the REAL FastAPI application, patches only
 `litellm.completion` (so the real gateway / agent / SSE code paths run),
 and measures when each SSE frame actually reaches the client.
 
-The decisive assertion is (c): the first token must arrive well before
-the last one. An implementation that buffers the whole answer and flushes
-it at the end would pass a naive "a token event exists" check but fail
-here.
+The decisive assertions are (c) and (d): the tokens must arrive spread
+out in time, at roughly the pace the provider produced them. An
+implementation that buffers the whole answer and flushes it at the end
+would pass a naive "a token event exists" check but fail here - its
+inter-token intervals would all be ~0.
 
 Usage:
     ./.venv/Scripts/python.exe scripts/e2e_stream_check.py
@@ -181,22 +182,26 @@ def _free_port(preferred: int = 8799) -> int:
     raise RuntimeError("no free port")
 
 
-def _parse_frames(raw: bytes) -> list[tuple[str, str]]:
-    """Split raw SSE bytes into (event, data) pairs."""
-    frames: list[tuple[str, str]] = []
-    for block in raw.split(b"\r\n\r\n"):
-        text = block.decode("utf-8", errors="replace").strip()
-        if not text:
-            continue
-        event = "message"
-        data_lines: list[str] = []
-        for line in text.split("\r\n"):
-            if line.startswith("event:"):
-                event = line[len("event:"):].strip()
-            elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
-        frames.append((event, "\n".join(data_lines)))
-    return frames
+def _parse_frame(block: bytes) -> tuple[str, str] | None:
+    """Parse one raw SSE block into (event, data).
+
+    Returns None for an empty block or a keepalive comment, so the caller
+    can timestamp exactly the frames it cares about.
+    """
+    text = block.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    event = "message"
+    data_lines: list[str] = []
+    for line in text.split("\r\n"):
+        if line.startswith(":"):
+            # Keepalive comment.
+            return None
+        if line.startswith("event:"):
+            event = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:"):].strip())
+    return event, "\n".join(data_lines)
 
 
 class Results:
@@ -258,7 +263,10 @@ async def run() -> int:
             return 2
 
         raw_chunks: list[bytes] = []
-        arrivals: list[float] = []
+        # (event, data, arrival_seconds). Each frame is parsed at the
+        # moment it lands, so the timestamp always belongs to the frame
+        # it was measured for - a separate list could drift out of sync.
+        frames: list[tuple[str, str, float]] = []
         health: dict[str, Any] = {}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -286,10 +294,16 @@ async def run() -> int:
                     buffer += chunk
                     # Timestamp each complete frame as it lands.
                     while b"\r\n\r\n" in buffer:
-                        frame, buffer = buffer.split(b"\r\n\r\n", 1)
-                        arrivals.append(time.monotonic() - started)
+                        block, buffer = buffer.split(b"\r\n\r\n", 1)
+                        arrival = time.monotonic() - started
+                        parsed = _parse_frame(block)
+                        if parsed is not None:
+                            frames.append((parsed[0], parsed[1], arrival))
                 if buffer.strip():
-                    arrivals.append(time.monotonic() - started)
+                    arrival = time.monotonic() - started
+                    parsed = _parse_frame(buffer)
+                    if parsed is not None:
+                        frames.append((parsed[0], parsed[1], arrival))
 
             await probe
     finally:
@@ -303,16 +317,29 @@ async def run() -> int:
         litellm.completion = original_completion
 
     raw = b"".join(raw_chunks)
-    frames = _parse_frames(raw)
-    token_frames = [(t, d) for (t, d) in frames if t == "token"]
-    token_texts = [json.loads(d).get("text") for (t, d) in token_frames]
-    done_frames = [(t, d) for (t, d) in frames if t == "done"]
+    token_frames = [(t, d, a) for (t, d, a) in frames if t == "token"]
+    token_texts = [json.loads(d).get("text") for (t, d, a) in token_frames]
+    token_arrivals = [a for (t, d, a) in token_frames]
+    done_frames = [(t, d, a) for (t, d, a) in frames if t == "done"]
+    stream_end = max((a for (_, _, a) in frames), default=0.0)
 
     print("\nTimeline (seconds since the request started):")
-    for i, (t, d) in enumerate(frames):
-        stamp = arrivals[i] if i < len(arrivals) else -1
+    for (t, d, stamp) in frames:
         preview = d[:60].replace("\n", " ")
         print(f"  {stamp:7.3f}s  {t:<9} {preview}")
+
+    print("\nToken intervals (seconds between consecutive tokens):")
+    intervals = [
+        token_arrivals[i + 1] - token_arrivals[i]
+        for i in range(len(token_arrivals) - 1)
+    ]
+    for i, gap in enumerate(intervals):
+        print(f"  token {i + 1} -> {i + 2}: {gap:.3f}s")
+    if intervals:
+        print(
+            f"  min={min(intervals):.3f}s  max={max(intervals):.3f}s  "
+            f"mean={sum(intervals) / len(intervals):.3f}s"
+        )
 
     print("\nAssertions:")
 
@@ -330,31 +357,46 @@ async def run() -> int:
         f"{token_texts}",
     )
 
-    # c. THE decisive one: first token well before the last
-    if len(arrivals) >= 2:
-        gap = arrivals[-1] - arrivals[0]
-    else:
-        gap = 0.0
+    # c. THE decisive one: the tokens are spread out in time.
+    # A buffered implementation would deliver all of them in one burst,
+    # so every interval would be ~0.
+    results.check(
+        "tokens are NOT delivered in one burst (min interval >= 50ms)",
+        bool(intervals) and min(intervals) >= 0.05,
+        f"min interval={min(intervals):.3f}s" if intervals else "no intervals",
+    )
+
+    # d. the pacing comes from the provider, not from the transport
+    results.check(
+        f"mean token interval is close to the provider's {TOKEN_DELAY}s",
+        bool(intervals) and 0.5 * TOKEN_DELAY <= sum(intervals) / len(intervals) <= 2.0 * TOKEN_DELAY,
+        f"mean={sum(intervals) / len(intervals):.3f}s" if intervals else "no intervals",
+    )
+
+    # e. the first token arrives well before the last one
+    first_last_gap = (
+        token_arrivals[-1] - token_arrivals[0] if len(token_arrivals) >= 2 else 0.0
+    )
     results.check(
         "first token arrives >=300ms before the last",
-        gap >= 0.3,
-        f"gap={gap:.3f}s",
+        first_last_gap >= 0.3,
+        f"gap={first_last_gap:.3f}s",
     )
 
-    # d. the whole stream takes at least as long as the provider took
+    # f. the whole stream takes at least as long as the provider took
     results.check(
         "stream spans >=0.5s (5 tokens x 200ms)",
-        gap >= 0.5,
-        f"gap={gap:.3f}s",
+        first_last_gap >= 0.5,
+        f"gap={first_last_gap:.3f}s",
     )
 
-    # e. CRLF frame terminators
+    # g. CRLF frame terminators
     results.check(
         "frames use CRLF terminators",
         b"event: token\r\n" in raw and b"event: done\r\n" in raw,
     )
 
-    # f. the done event carries the response
+    # h. the done event carries the response
     done_ok = False
     done_answer = None
     if done_frames:
@@ -369,16 +411,16 @@ async def run() -> int:
         f"answer={done_answer!r}",
     )
 
-    # g. the event loop stayed responsive during the stream
+    # i. the event loop stayed responsive during the stream
     health_ok = (
         health.get("status") == 200
-        and health.get("completed_at", 99) < (arrivals[-1] if arrivals else 0)
+        and health.get("completed_at", 99) < stream_end
     )
     results.check(
         "a concurrent /health was served before the stream ended",
         health_ok,
         f"health={health.get('status')} at {health.get('completed_at', -1):.3f}s, "
-        f"stream ended {arrivals[-1] if arrivals else -1:.3f}s",
+        f"stream ended {stream_end:.3f}s",
     )
 
     print(f"\n{results.passed} passed, {results.failed} failed")
