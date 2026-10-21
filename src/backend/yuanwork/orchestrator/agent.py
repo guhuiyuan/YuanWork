@@ -234,15 +234,19 @@ class AgentLoop:
                     "text": state.answer,
                 },
             }
-            yield {
-                "type": "citations",
-                "data": {"citations": state.citations},
-            }
             if state.conflicts:
                 yield {
                     "type": "conflict",
                     "data": {"conflicts": state.conflicts},
                 }
+
+        # Citations are emitted in both branches: a half-generated answer
+        # (generation error) still points at real evidence, and dropping
+        # them would leave the user with text they cannot check.
+        yield {
+            "type": "citations",
+            "data": {"citations": state.citations},
+        }
 
         yield {
             "type": "done",
@@ -372,6 +376,8 @@ class AgentLoop:
             state.refusal_reason = f"generation_error: {e}"
             state.answer = "抱歉，生成回答时出现错误。请稍后重试。"
             state.trace.append({"step": "answer", "error": str(e)})
+            # Keep the citations, same as the streaming path.
+            state.citations = self._build_citations(state.evidence)
             return
 
         # Build citations from evidence
@@ -433,6 +439,10 @@ class AgentLoop:
             notice = "抱歉，生成回答时出现错误。请稍后重试。"
             state.answer = f"{state.answer}\n\n{notice}" if state.answer else notice
             state.trace.append({"step": "answer", "error": str(e)})
+            # Keep the citations: a half-generated answer still points at
+            # real evidence, and dropping them would leave the user with
+            # text they cannot check.
+            state.citations = self._build_citations(state.evidence)
             return
 
         # Build citations from evidence

@@ -31,6 +31,16 @@ from yuanwork.config import NetworkMode, YuanWorkSettings
 logger = logging.getLogger(__name__)
 
 
+# Default per-request timeout in seconds.
+#
+# litellm's own default is 6000 seconds (~100 minutes), which means a
+# provider that stops responding leaves the request hanging for a very
+# long time. 120s is generous for a 2000-token answer and still bounds a
+# stuck call. For streaming calls this is an idle timeout: the provider
+# has to send *something* within the window, not finish within it.
+DEFAULT_REQUEST_TIMEOUT = 120.0
+
+
 # Suppress litellm's noisy logs
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
@@ -102,6 +112,10 @@ class LLMTask:
     max_tokens: int | None = None
     json_mode: bool = False
     stream: bool = False
+    # Per-request timeout in seconds. `None` uses DEFAULT_REQUEST_TIMEOUT.
+    # For a streaming call this is an *idle* timeout: the provider has to
+    # send something within this window or the request is aborted.
+    timeout: float | None = None
 
 
 class LLMGateway:
@@ -267,6 +281,8 @@ class LLMGateway:
             "messages": messages,
             "temperature": task.temperature,
             "stream": False,
+            # Without this litellm waits 6000 seconds by default.
+            "timeout": task.timeout or DEFAULT_REQUEST_TIMEOUT,
         })
 
         if task.max_tokens:
@@ -352,6 +368,10 @@ class LLMGateway:
             "messages": messages,
             "temperature": task.temperature,
             "stream": True,
+            # Without this litellm waits 6000 seconds by default. For a
+            # streaming call it is an idle timeout: the provider has to
+            # send something within the window.
+            "timeout": task.timeout or DEFAULT_REQUEST_TIMEOUT,
         })
 
         if task.max_tokens:
@@ -382,20 +402,40 @@ class LLMGateway:
         # Set when the consumer goes away so the worker stops pulling.
         stop = threading.Event()
 
+        def _put(item: Any) -> None:
+            """Hand an item to the event loop from the worker thread.
+
+            The loop may already be closed if the process is tearing down;
+            in that case the item is simply dropped instead of raising
+            RuntimeError inside the worker thread.
+            """
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+            except RuntimeError:
+                pass
+
         def _produce() -> None:
             """Drive the blocking litellm generator on a worker thread."""
             usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             failure: BaseException | None = None
+            response: Any = None
             try:
                 response = litellm.completion(**kwargs)
-                for chunk in response:
-                    if stop.is_set():
+                # An explicit iterator, so `stop` is checked BEFORE the
+                # next chunk is pulled. A plain `for` pulls first and then
+                # runs the body, which would fetch one extra chunk from the
+                # provider after the client disconnected.
+                chunks = iter(response)
+                while not stop.is_set():
+                    try:
+                        chunk = next(chunks)
+                    except StopIteration:
                         break
                     choices = getattr(chunk, "choices", None)
                     if choices:
                         text = getattr(choices[0].delta, "content", None)
                         if text:
-                            loop.call_soon_threadsafe(queue.put_nowait, text)
+                            _put(text)
                     # The final chunk carries usage info for some providers
                     chunk_usage = getattr(chunk, "usage", None)
                     if chunk_usage:
@@ -412,7 +452,15 @@ class LLMGateway:
             except BaseException as exc:  # noqa: BLE001 - forwarded to the consumer
                 failure = exc
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, _StreamEnd(usage, failure))
+                # Return the connection to the provider's pool instead of
+                # leaving it dangling until the garbage collector runs.
+                close = getattr(response, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - best effort cleanup
+                        pass
+                _put(_StreamEnd(usage, failure))
 
         worker = threading.Thread(
             target=_produce, name="litellm-stream", daemon=True

@@ -50,6 +50,21 @@ class _FakeChunk:
         self.usage = usage
 
 
+class _FakeMessage:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _FakeNonStreamResponse:
+    """Mimics a non-streaming litellm response."""
+
+    def __init__(self, content: str = "ok"):
+        self.choices = [
+            type("Choice", (), {"message": _FakeMessage(content), "finish_reason": "stop"})()
+        ]
+        self.usage = _FakeUsage()
+
+
 def _fake_stream(deltas: list[str], delay: float = 0.0):
     """A blocking generator that yields one chunk per delta."""
 
@@ -175,11 +190,21 @@ async def test_gateway_stream_does_not_buffer_until_the_end(gw, monkeypatch):
         arrival_at.append(time.monotonic())
 
     assert len(arrival_at) == 5
-    # The last delta must have been delivered before the provider was done
-    # producing it - i.e. the consumer is not waiting for the end.
-    assert arrival_at[-1] < produced_at[-1] + 0.02, (
-        "deltas were buffered and flushed at the end "
-        f"(arrival={arrival_at[-1] - start:.3f}s, produced={produced_at[-1] - start:.3f}s)"
+    # The decisive check: the FIRST delta has to be delivered while the
+    # provider is still producing the remaining four. A buffered
+    # implementation would deliver all five only after produced_at[-1],
+    # so this comparison is what separates a real stream from a fake one.
+    assert arrival_at[0] < produced_at[-1] - 0.01, (
+        "the first delta was not delivered until the provider was done - "
+        "the stream was buffered "
+        f"(first arrival={arrival_at[0] - start:.3f}s, "
+        f"last produced={produced_at[-1] - start:.3f}s)"
+    )
+    # And the deltas must arrive spread out, not all in one burst.
+    gaps = [arrival_at[i + 1] - arrival_at[i] for i in range(len(arrival_at) - 1)]
+    assert max(gaps) > 0.005, (
+        f"all deltas arrived at once (gaps={['%.4f' % g for g in gaps]}) - "
+        "the stream was flushed in one lump"
     )
 
 
@@ -253,15 +278,91 @@ async def test_gateway_stream_audit_written_on_error(gw, monkeypatch, temp_dir: 
     assert entries[0]["success"] is False
 
 
+# ===== Timeouts =====
+
+
+@pytest.mark.asyncio
+async def test_gateway_stream_passes_a_bounded_timeout(gw, monkeypatch):
+    """litellm's own default is 6000s - the gateway must not inherit it.
+
+    Without an explicit timeout a provider that stops answering leaves
+    the request hanging for well over an hour.
+    """
+    from yuanwork.llm.gateway import DEFAULT_REQUEST_TIMEOUT
+
+    seen: dict[str, Any] = {}
+
+    def _completion(**kwargs):
+        seen.update(kwargs)
+        return _fake_stream(["ok"])
+
+    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _completion)
+
+    async for _ in gw.stream(_task()):
+        pass
+
+    assert seen["timeout"] == DEFAULT_REQUEST_TIMEOUT
+    assert seen["timeout"] < 6000
+
+
+@pytest.mark.asyncio
+async def test_gateway_task_timeout_overrides_the_default(gw, monkeypatch):
+    """A per-task timeout wins over the gateway default."""
+    from yuanwork.llm.gateway import LLMMessage, LLMTask
+
+    seen: dict[str, Any] = {}
+
+    def _completion(**kwargs):
+        seen.update(kwargs)
+        return _fake_stream(["ok"])
+
+    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _completion)
+
+    task = LLMTask(
+        task_type="answer",
+        messages=[LLMMessage(role="user", content="hi")],
+        timeout=15.0,
+    )
+    async for _ in gw.stream(task):
+        pass
+
+    assert seen["timeout"] == 15.0
+
+
+@pytest.mark.asyncio
+async def test_gateway_complete_passes_a_bounded_timeout(gw, monkeypatch):
+    """The blocking path is bounded too - it is the one the /chat route uses."""
+    from yuanwork.llm.gateway import DEFAULT_REQUEST_TIMEOUT
+
+    seen: dict[str, Any] = {}
+
+    def _completion(**kwargs):
+        seen.update(kwargs)
+        return _FakeNonStreamResponse("done")
+
+    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _completion)
+
+    await gw.complete(_task())
+
+    assert seen["timeout"] == DEFAULT_REQUEST_TIMEOUT
+    assert seen["timeout"] < 6000
+
+
 # ===== AgentLoop.stream() =====
 
 
 class _StubGateway:
     """A gateway that streams a fixed list of deltas."""
 
-    def __init__(self, deltas: list[str], fail_with: Exception | None = None):
+    def __init__(
+        self,
+        deltas: list[str],
+        fail_with: Exception | None = None,
+        fail_complete_with: Exception | None = None,
+    ):
         self.deltas = deltas
         self.fail_with = fail_with
+        self.fail_complete_with = fail_complete_with
         self.stream_calls = 0
         self.complete_calls = 0
 
@@ -276,6 +377,8 @@ class _StubGateway:
         self.complete_calls += 1
         from yuanwork.llm.gateway import LLMResponse
 
+        if self.fail_complete_with is not None:
+            raise self.fail_complete_with
         return LLMResponse(
             content="".join(self.deltas), model="stub", finish_reason="stop"
         )
@@ -441,6 +544,93 @@ async def test_agent_stream_error_keeps_partial_text(monkeypatch, temp_dir: Path
     assert response["refused"] is True
     assert "partial text" in response["answer"]
     assert "生成回答时出现错误" in response["answer"]
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_error_keeps_citations(monkeypatch, temp_dir: Path):
+    """A half-generated answer still points at the evidence it used.
+
+    Dropping the citations would leave the user with text they cannot
+    check, which is exactly what the citation policy forbids.
+    """
+    gateway = _StubGateway(["partial text"], fail_with=RuntimeError("boom"))
+    agent = _agent(gateway, temp_dir)
+    _patch_steps(agent, monkeypatch, EVIDENCE, CONFIDENCE)
+
+    events = [e async for e in agent.stream(query="q", session_id="s1")]
+
+    citations = [e for e in events if e["type"] == "citations"]
+    assert len(citations) == 1
+    assert len(citations[0]["data"]["citations"]) == 1
+    assert citations[0]["data"]["citations"][0]["file_name"] == "contract.pdf"
+
+    done = [e for e in events if e["type"] == "done"][0]
+    assert len(done["data"]["response"]["citations"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_refusal_still_emits_citations_event(
+    monkeypatch, temp_dir: Path
+):
+    """The `citations` event is emitted in the refused branch as well.
+
+    A client that only listens for `citations` would otherwise show no
+    sources at all on the refusal path.
+    """
+    gateway = _StubGateway(["unused"])
+    agent = _agent(gateway, temp_dir)
+    _patch_steps(
+        agent,
+        monkeypatch,
+        EVIDENCE,
+        {"confidence": 0.1, "should_refuse": True, "reason": "no_results"},
+    )
+
+    events = [e async for e in agent.stream(query="q", session_id="s1")]
+
+    types = [e["type"] for e in events]
+    assert "refusal" in types
+    assert "citations" in types
+    assert types.index("refusal") < types.index("citations") < types.index("done")
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_generation_error_is_a_refusal_with_a_reason(
+    monkeypatch, temp_dir: Path
+):
+    """A model failure is reported as a refusal whose reason says so.
+
+    The frontend tells "confidence too low" and "the model broke" apart
+    by this reason, so it has to survive into the event.
+    """
+    gateway = _StubGateway(["partial"], fail_with=RuntimeError("boom"))
+    agent = _agent(gateway, temp_dir)
+    _patch_steps(agent, monkeypatch, EVIDENCE, CONFIDENCE)
+
+    events = [e async for e in agent.stream(query="q", session_id="s1")]
+
+    refusals = [e for e in events if e["type"] == "refusal"]
+    assert len(refusals) == 1
+    reason = refusals[0]["data"]["reason"]
+    assert isinstance(reason, str)
+    assert reason.startswith("generation_error")
+    # The message keeps the text produced before the failure.
+    assert "partial" in refusals[0]["data"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_agent_run_error_keeps_citations(monkeypatch, temp_dir: Path):
+    """The blocking path keeps the citations too, not just the streaming one."""
+    gateway = _StubGateway([], fail_complete_with=RuntimeError("boom"))
+    agent = _agent(gateway, temp_dir)
+    _patch_steps(agent, monkeypatch, EVIDENCE, CONFIDENCE)
+
+    result = await agent.run(query="q", session_id="s1")
+
+    assert result["refused"] is True
+    assert str(result["refusal_reason"]).startswith("generation_error")
+    assert len(result["citations"]) == 1
+    assert result["citations"][0]["file_name"] == "contract.pdf"
 
 
 @pytest.mark.asyncio
