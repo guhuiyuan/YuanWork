@@ -29,9 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 前端 `ChatWindow.tsx`：`requestAnimationFrame` 批量 flush token 缓冲，避免每个 token 触发一次 re-render
     - `token` 是增量文本的唯一来源，`answer` 事件只作兜底，避免重复渲染
     - 失败时保留已流式出的文本，只在其后追加错误提示
-  - 测试：15 个后端测试（含「不阻塞事件循环」「不缓冲到末尾」两条决定性断言）+ 9 个 Rust SSE 解析器测试
+  - 测试：22 个后端测试（含「不阻塞事件循环」「不缓冲到末尾」两条决定性断言）+ 16 个 Rust 测试（SSE 解析 + UTF-8 增量解码）+ 18 个前端测试
   - `scripts/e2e_stream_check.py`：端到端验证。启动真实 FastAPI 应用，只 mock `litellm.completion`，测量每个 SSE 帧到达客户端的时刻
-    - 决定性断言：第一个 token 至少比最后一个早 300ms 到达，且流式期间并发 `/health` 仍能立即返回
+    - 决定性断言：相邻 token 的到达间隔 ≥50ms 且平均间隔与 provider 产出节奏同量级，且流式期间并发 `/health` 仍能立即返回
 - **Tauri 桌面 Debug 二进制** — Tauri 2.x 壳编译通过，产出 `D:\cargo-target\debug\yuanwork.exe` (23 MB)
   - `sidecar.rs` 重写：`BackendLaunch` 枚举支持 bundled 二进制 + Python venv 两种启动模式
   - `find_python_interpreter()` 向上爬 8 层找 `.venv/Scripts/python.exe`，fallback 到 `py` / `python` / `python3`
@@ -50,6 +50,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - OpenAI / Anthropic / DeepSeek / Ollama 保留为注释示例，取消注释 + 设好对应 `*_API_KEY` + 改 `routing` 即可切换，不需要改代码
   - `LLMGateway._default_routing()` 与内嵌的 `DEFAULT_MODELS_YAML` 同步为单模型版本
   - 找不到 `models.yaml` 时改为回退到内嵌模板（原来回退到空模型表，只有一个 gpt-4o 的 routing，等于直接不可用）
+- **超时统一收敛到 120 秒** — litellm 自带默认超时是 6000 秒（约 100 分钟），provider 一旦不回就会一直挂着
+  - `LLMTask.timeout` 字段 + `DEFAULT_REQUEST_TIMEOUT = 120.0`，`complete()` 与 `stream()` 都把它传给 litellm
+  - 流式调用下这是**空闲超时**：provider 只要在窗口内吐过东西就算数，长回答不会被误杀
+  - Rust 侧 `reqwest::ClientBuilder::read_timeout(120s)`，浏览器侧 `AbortController` + 120s 空闲定时器（每收到一段字节就重置）
+- **release 打包命令固化** — `build.bat`（项目根目录）：`npm run build` → touch `src-tauri/src/lib.rs` → `cargo build --release --features custom-protocol`
+  - 不带 `--features custom-protocol` 编出来的 exe 不内嵌前端资源，启动后去 `localhost:5173` 找页面而白屏
+  - touch 是必须的：`tauri-build` 不会为 `dist/` 生成 `rerun-if-changed`，cargo 察觉不到前端变了
+
+### Fixed
+
+- **Rust 侧 UTF-8 字符被切坏**（`src-tauri/src/sse.rs`） — `reqwest` 的 chunk 边界可能落在多字节字符中间，之前的实现逐 chunk `from_utf8`，切到中间的汉字会变成 U+FFFD
+  - 新增 `Utf8Decoder`：增量解码，保留未完成的尾部字节等下一块，非法字节替换为 U+FFFD，流结束时 flush
+- **生成出错时引用被丢弃**（`agent.py`） — 回答生成到一半失败时，流式路径和阻塞路径都会丢掉 citations，用户拿到一段无法核对的文字
+  - 两条路径都在异常分支里重新 `_build_citations(state.evidence)`；`citations` SSE 事件改为在拒绝 / 正常两个分支都发
+- **拒绝横幅文案张冠李戴**（`ChatWindow.tsx`） — 生成出错时后端发的是 `refusal` 事件（`reason` 为 `generation_error: ...`），前端却一律渲染成「⚠️ 置信度不足，已拒绝直接回答」
+  - `ChatMessage` 增加 `refusalReason`；新增 `api/streamText.ts` 的 `refusalBanner()` 区分「生成回答时出错」与「置信度不足」
+- **失败提示插到了已流式文本前面** — 失败提示现在追加在已生成文本之后（`appendFailureNotice`），不会让人误以为请求在一开始就失败了
+- **`refusal` 事件重复追加文本** — 拒绝消息本身就包含已流式出的部分，改为**替换**而非追加
+- **后端测试断言太弱** — 「不缓冲到末尾」原来断言 `arrival[-1] < produced[-1] + 0.02`，缓冲实现也能通过；改为断言**第一个** delta 在 provider 产出完之前就已送达，且相邻 delta 到达间隔不塌缩
 
 ## [0.3.0] - 2026-10-19 — Stage 3: 开源准备
 

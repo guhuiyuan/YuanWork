@@ -6,7 +6,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status: Stage 3 done](https://img.shields.io/badge/Status-Stage%203%20done-brightgreen)]()
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)]()
-[![Tests: 137 passed](https://img.shields.io/badge/Tests-137%20passed-brightgreen)]()
+[![Tests: 144 passed](https://img.shields.io/badge/Tests-144%20passed-brightgreen)]()
 [![Tauri 2.x](https://img.shields.io/badge/Tauri-2.x-orange)]()
 
 [English](#english-summary) · [中文](#中文)
@@ -112,6 +112,18 @@ cd "$(dirname "$0")" && ./D:/cargo-target/debug/yuanwork.exe   # bash
 - `CARGO_TARGET_DIR` 推荐设到非 C: 盘（首次编译约 5-10 GB）
 - 项目 venv 在 `.venv/`（Sidecar 启动 Python 走 venv）
 
+**编译 release 二进制时必须带 `--features custom-protocol`**：
+
+```bash
+# 项目根目录（Windows）
+./build.bat                       # = npm run build + cargo build --release --features custom-protocol
+# 或手动
+cd src/app && npm run build
+cd src-tauri && cargo build --release --features custom-protocol
+```
+
+> ⚠️ 不带 `--features custom-protocol` 编出来的 exe **不会内嵌前端资源**，启动后会去 `http://localhost:5173` 找页面而白屏。`build.bat` 已经把这个 flag 写死了。
+
 Sidecar 启动链路：
 
 1. Tauri shell 在项目根目录启动（`run.bat` 自动 `cd`）
@@ -120,6 +132,8 @@ Sidecar 启动链路：
 4. spawn `python -m yuanwork --port 8765 --host 127.0.0.1`
 5. 等待 `/api/v1/health` 返回 200（最长 30 秒）
 6. 打开 WebView 显示前端
+
+> 前端资源改动后必须重新 `npm run build` **并重新编译 Rust**：`tauri-build` 不会为 `dist/` 生成 `rerun-if-changed`，cargo 察觉不到前端变了。`build.bat` 里的 touch `src/app/src-tauri/src/lib.rs` 就是为了强制重编。
 
 #### 2.2 开发模式（Vite HMR + 浏览器）
 
@@ -145,10 +159,10 @@ npm run dev                # 仅 Vite，浏览器开 http://localhost:5173
 ```bash
 # 端到端验证：启动真实后端，只 mock LLM provider，测量每个 SSE 帧到达客户端的时刻
 ./.venv/Scripts/python.exe scripts/e2e_stream_check.py
-# → 8 passed, 0 failed
+# → 10 passed, 0 failed
 ```
 
-脚本会断言「第一个 token 至少比最后一个早 300ms 到达」，因此把整段回答攒到最后一次性吐出的实现无法通过。
+脚本会断言**相邻两个 token 的到达间隔 ≥50ms**、且平均间隔与 provider 的产出节奏（200ms）同量级。把整段回答攒到最后一次性吐出的实现所有间隔都会是 0，无法通过。
 
 也可以直接看后端的 SSE 流：
 
@@ -166,11 +180,13 @@ curl -N -X POST http://127.0.0.1:8765/api/v1/chat/stream \
 | `token` | **增量文本**，逐 token 推送 |
 | `answer` | 完整回答全文（兜底用，正常情况下 `token` 已拼出全文） |
 | `citations` | 引用列表 |
-| `refusal` | 置信度不足，拒绝回答 |
+| `refusal` | 拒绝回答（`reason` 区分「置信度不足」与「生成出错」） |
 | `conflict` | LLM 与知识库冲突 |
 | `done` | 结束事件，携带完整 `ChatResponse` |
 
 `done` 一定作为终止事件发出（即使中途出错），客户端据此区分「正常结束」与「被切断」。
+
+**超时**：litellm 自带的默认超时是 6000 秒（约 100 分钟），provider 一旦不回就会一直挂着。YuanWork 把它压到 **120 秒**（`yuanwork/llm/gateway.py` 的 `DEFAULT_REQUEST_TIMEOUT`），流式调用下这是**空闲超时**——provider 只要在窗口内吐过东西就算数，长回答不会被误杀。桌面端 Rust 侧同样有 120 秒的 `read_timeout`，浏览器侧有 120 秒的 `AbortController` 空闲定时器，三处一致。
 
 ---
 
@@ -304,7 +320,7 @@ YuanWork/
 ```bash
 cd src/backend
 PYTHONPATH=src/backend python -m pytest tests/ -q
-# → 137 passed
+# → 144 passed
 ```
 
 不依赖 LLM API key 也不下载 bge-m3 模型。覆盖：
@@ -316,13 +332,20 @@ PYTHONPATH=src/backend python -m pytest tests/ -q
 - Wiki 页面编译
 - 网络隔离（socket 层拦截）
 - 审计日志（logger + API）
-- 流式输出（gateway 不阻塞事件循环 / agent 逐 token 发事件 / SSE 帧格式 / 错误时补发 `done`）
+- 流式输出（gateway 不阻塞事件循环 / agent 逐 token 发事件 / SSE 帧格式 / 错误时补发 `done` / 引用在出错路径上不丢 / 超时确实传给 provider）
 
-Rust 侧还有 SSE 解析器的单元测试：
+Rust 侧还有 SSE 解析器和 UTF-8 增量解码的单元测试：
 
 ```bash
 cd src/app/src-tauri && cargo test
-# → 11 passed
+# → 16 passed
+```
+
+前端纯函数（SSE 解析、文本拼接）用 Node 内置 test runner 测，零额外依赖：
+
+```bash
+cd src/app && npm test
+# → 18 passed
 ```
 
 ---

@@ -132,7 +132,7 @@ confidence = 0.4*(top1/max) + 0.3*(top1-top2) + 0.2*LLM自评 + 0.1*(evidence_co
 - **协议**：HTTP localhost + SSE 流式（不用 stdio，不用 Tauri IPC 跨语言）
 - **关键 API**：
   ```
-  POST /chat/stream           (SSE: trace, token, citations, conflict, done)
+  POST /chat/stream           (SSE: trace, token, answer, citations, refusal, conflict, done)
   POST /ingest/dir, /ingest/file
   GET  /kb/files, DELETE /kb/files/{doc_id}
   GET  /memory/{episodic,profile,conflicts}
