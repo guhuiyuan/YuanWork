@@ -16,7 +16,7 @@ if not "%1"=="" if exist "%~1" set "EXE=%~1"
 
 if not exist "%EXE%" (
     echo yuanwork.exe not found: %EXE%
-    echo Build first: cargo build --release ^(in src/app/src-tauri/^)
+    echo Build first: build.bat   ^(from the project root^)
     exit /b 1
 )
 
