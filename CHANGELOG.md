@@ -69,6 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **失败提示插到了已流式文本前面** — 失败提示现在追加在已生成文本之后（`appendFailureNotice`），不会让人误以为请求在一开始就失败了
 - **`refusal` 事件重复追加文本** — 拒绝消息本身就包含已流式出的部分，改为**替换**而非追加
 - **后端测试断言太弱** — 「不缓冲到末尾」原来断言 `arrival[-1] < produced[-1] + 0.02`，缓冲实现也能通过；改为断言**第一个** delta 在 provider 产出完之前就已送达，且相邻 delta 到达间隔不塌缩
+- **引用的页码 / slide 号 / 章节一直是空的** — chunk 的定位元数据有两种形状，入库后和检索后不一样：
+  - chunker 产出的是嵌套形状 `{"meta": {"page": 12}}`；检索返回的是扁平的 LanceDB 行 `{"page": 12}`
+  - 入库侧 `semantic.add_chunks` 读的是扁平 key（`chunk.get("page")`），在嵌套形状上永远是 `None` → 数据库里 page 列全空
+  - 消费侧（`agent._build_citations`、`answer._build_answer_task`、`wiki/page_generator`）读的是嵌套 `meta`，在检索行上永远是 `None`
+  - 后果：prompt 第 3 条要求模型写「第 N 页」「Slide N」，但页码根本没进 prompt；UI 里「第 N 页」「Slide N」是死代码，引用只能定位到文件
+  - 修复：新增 `yuanwork/utils/chunk_meta.py` 的 `chunk_meta()`，两种形状都能读；入库侧改为从嵌套 meta 取值（section 列存 heading）；三处消费侧统一走 `chunk_meta()`
+  - ⚠️ **已建的知识库需要重新索引**才会带上页码（旧的行里 page 就是 null）；重新入库即可，代码不用改
 
 ## [0.3.0] - 2026-10-19 — Stage 3: 开源准备
 

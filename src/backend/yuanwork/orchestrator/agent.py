@@ -27,6 +27,7 @@ from yuanwork.orchestrator.steps.answer import (
 )
 from yuanwork.retrieval.confidence import ConfidenceScorer
 from yuanwork.retrieval.hybrid import HybridRetriever
+from yuanwork.utils.chunk_meta import chunk_meta
 
 if TYPE_CHECKING:
     from yuanwork.consolidation.engine import ConsolidationEngine
@@ -455,10 +456,16 @@ class AgentLoop:
         })
 
     def _build_citations(self, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Convert evidence chunks into citation objects."""
+        """Convert evidence chunks into citation objects.
+
+        The evidence comes from the retriever, so its location fields are
+        flat columns (``page``, ``slide_number``, ``section``) rather
+        than the nested ``meta`` dict the chunker produces - `chunk_meta`
+        reads whichever shape it is given.
+        """
         citations = []
         for idx, chunk in enumerate(evidence, start=1):
-            meta = chunk.get("meta", {}) or {}
+            meta = chunk_meta(chunk)
             citation = {
                 "index": idx,
                 "file_name": chunk.get("file_name", ""),

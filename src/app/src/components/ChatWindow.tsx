@@ -320,6 +320,7 @@ function Message({ msg }: { msg: ChatMessage }) {
                   📄 {c.file_name}
                   {c.page != null && ` · 第 ${c.page} 页`}
                   {c.slide_number != null && ` · Slide ${c.slide_number}`}
+                  {c.section ? ` · ${c.section}` : ""}
                 </div>
                 <div className="citation__text">「{c.text}」</div>
               </div>

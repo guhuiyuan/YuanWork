@@ -25,6 +25,8 @@ from typing import Any
 
 import numpy as np
 
+from yuanwork.utils.chunk_meta import chunk_meta
+
 logger = logging.getLogger(__name__)
 
 
@@ -453,6 +455,11 @@ class SemanticMemory:
             while len(vec) < 1024:
                 vec.append(0.0)
 
+            # The chunker keeps the parser's metadata nested under "meta",
+            # so the location has to be read from there - reading the flat
+            # "page" key would store a null for every PDF and PPTX.
+            meta = chunk_meta(chunk)
+
             record = {
                 "id": chunk["id"],
                 "doc_id": chunk["doc_id"],
@@ -462,9 +469,11 @@ class SemanticMemory:
                 "file_name": chunk.get("file_name", ""),
                 "file_path": chunk.get("file_path", ""),
                 "file_type": chunk.get("file_type", "unknown"),
-                "page": chunk.get("page"),
-                "slide_number": chunk.get("slide_number"),
-                "section": chunk.get("section"),
+                "page": meta.get("page"),
+                "slide_number": meta.get("slide_number"),
+                # The DOCX / Markdown parsers call the heading "heading";
+                # the column is named "section".
+                "section": meta.get("heading") or meta.get("section"),
                 "content_type": chunk.get("content_type", "text"),
                 "token_count": chunk.get("token_count", len(chunk["text"]) // 4),
                 "modified_at": chunk.get("modified_at", now),

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment
 from yuanwork.llm.gateway import LLMGateway, LLMMessage, LLMTask
+from yuanwork.utils.chunk_meta import chunk_meta
 
 if TYPE_CHECKING:
     from yuanwork.db.sqlite import SQLiteStore
@@ -212,7 +213,7 @@ class WikiPageGenerator:
             "",
         ]
         for i, chunk in enumerate(chunks, 1):
-            meta = chunk.get("meta", {}) or {}
+            meta = chunk_meta(chunk)
             location = ""
             if meta.get("slide_number"):
                 location = f"（Slide {meta['slide_number']}）"
@@ -230,7 +231,7 @@ class WikiPageGenerator:
         """Format chunks for LLM prompt."""
         lines = []
         for i, chunk in enumerate(chunks, 1):
-            meta = chunk.get("meta", {}) or {}
+            meta = chunk_meta(chunk)
             location = ""
             if meta.get("slide_number"):
                 location = f" (Slide {meta['slide_number']})"

@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 
 from yuanwork.llm.gateway import LLMGateway, LLMMessage, LLMTask
+from yuanwork.utils.chunk_meta import chunk_meta
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,11 @@ def _build_answer_task(
     # Format evidence for prompt
     formatted_evidence = []
     for chunk in evidence:
-        meta = chunk.get("meta", {})
+        # The evidence comes from the retriever, where the location fields
+        # are flat columns. The prompt demands "第 N 页" / "Slide N"
+        # citations, so the page number has to actually reach the model -
+        # reading the nested "meta" dict alone would silently drop it.
+        meta = chunk_meta(chunk)
         formatted_evidence.append({
             "file_name": chunk.get("file_name", "unknown"),
             "meta": meta,
@@ -97,7 +102,7 @@ async def generate_refusal(
 
     formatted = []
     for c in candidates[:5]:
-        meta = c.get("meta", {})
+        meta = chunk_meta(c)
         formatted.append({
             "file_name": c.get("file_name", "unknown"),
             "meta": meta,

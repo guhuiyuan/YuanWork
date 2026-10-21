@@ -6,7 +6,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status: Stage 3 done](https://img.shields.io/badge/Status-Stage%203%20done-brightgreen)]()
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)]()
-[![Tests: 144 passed](https://img.shields.io/badge/Tests-144%20passed-brightgreen)]()
+[![Tests: 156 passed](https://img.shields.io/badge/Tests-156%20passed-brightgreen)]()
 [![Tauri 2.x](https://img.shields.io/badge/Tauri-2.x-orange)]()
 
 [English](#english-summary) · [中文](#中文)
@@ -320,7 +320,7 @@ YuanWork/
 ```bash
 cd src/backend
 PYTHONPATH=src/backend python -m pytest tests/ -q
-# → 144 passed
+# → 156 passed
 ```
 
 不依赖 LLM API key 也不下载 bge-m3 模型。覆盖：
@@ -333,6 +333,7 @@ PYTHONPATH=src/backend python -m pytest tests/ -q
 - 网络隔离（socket 层拦截）
 - 审计日志（logger + API）
 - 流式输出（gateway 不阻塞事件循环 / agent 逐 token 发事件 / SSE 帧格式 / 错误时补发 `done` / 引用在出错路径上不丢 / 超时确实传给 provider）
+- 引用定位（页码 / slide 号 / 章节在入库、检索、引用、prompt 四处都不丢）
 
 Rust 侧还有 SSE 解析器和 UTF-8 增量解码的单元测试：
 
