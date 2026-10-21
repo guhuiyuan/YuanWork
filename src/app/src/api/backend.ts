@@ -17,12 +17,30 @@ import type {
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/**
+ * The port the Python backend listens on.
+ *
+ * The desktop app never uses this: it talks to the backend through the
+ * Rust commands, which know the port the sidecar was started on
+ * (`YUANWORK_PORT`, default 8765). This only matters for browser dev
+ * mode, where you can point it elsewhere with `?port=8770` in the URL
+ * - handy when another project already holds 8765.
+ */
+const BACKEND_PORT = (() => {
+  if (typeof window === "undefined") return 8765;
+  const fromUrl = new URLSearchParams(window.location.search).get("port");
+  const port = Number(fromUrl);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : 8765;
+})();
+
+const BACKEND_BASE = `http://127.0.0.1:${BACKEND_PORT}`;
+
 async function callBackend<T>(path: string, init?: RequestInit): Promise<T> {
   if (isTauri) {
     // Use Tauri HTTP plugin in production; for now we proxy through Rust commands
     throw new Error("Direct HTTP from webview is not configured. Use invoke().");
   }
-  const resp = await fetch(`http://127.0.0.1:8765/api/v1${path}`, {
+  const resp = await fetch(`${BACKEND_BASE}/api/v1${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
@@ -154,7 +172,7 @@ export async function chatStream(
   let resp: Response;
   try {
     armIdleTimer();
-    resp = await fetch("http://127.0.0.1:8765/api/v1/chat/stream", {
+    resp = await fetch(`${BACKEND_BASE}/api/v1/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),

@@ -23,6 +23,21 @@ use tauri::{AppHandle, Manager};
 const BACKEND_PORT: u16 = 8765;
 const BACKEND_HOST: &str = "127.0.0.1";
 
+/// The port the backend should listen on.
+///
+/// Defaults to 8765. Override it with the `YUANWORK_PORT` environment
+/// variable - the same name the Python backend already reads - so the
+/// desktop app can run next to another instance instead of failing to
+/// bind the port.
+fn backend_port() -> u16 {
+    std::env::var("YUANWORK_PORT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|p| *p > 0)
+        .unwrap_or(BACKEND_PORT)
+}
+
 /// How the backend should be launched.
 enum BackendLaunch {
     /// PyInstaller-bundled binary (future release path).
@@ -41,7 +56,7 @@ impl BackendHandle {
     pub fn new(child: Child) -> Self {
         Self {
             child: Mutex::new(Some(child)),
-            port: BACKEND_PORT,
+            port: backend_port(),
         }
     }
 
@@ -71,26 +86,28 @@ impl Drop for BackendHandle {
 /// Start the Python backend as a sidecar process.
 pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::error::Error>> {
     let launch = find_backend_executable(app)?;
+    let port = backend_port();
 
     let mut cmd = match launch {
         BackendLaunch::Bundled(path) => {
             log::info!("Starting bundled backend binary: {:?}", path);
             let mut c = Command::new(&path);
-            c.args(["--port", &BACKEND_PORT.to_string(), "--host", BACKEND_HOST]);
+            c.args(["--port", &port.to_string(), "--host", BACKEND_HOST]);
             c
         }
         BackendLaunch::Python { executable, cwd } => {
             log::info!(
-                "Starting Python backend: {:?} (cwd={:?})",
+                "Starting Python backend: {:?} (cwd={:?}) on port {}",
                 executable,
-                cwd
+                cwd,
+                port
             );
             let mut c = Command::new(&executable);
             c.args([
                 "-m",
                 "yuanwork",
                 "--port",
-                &BACKEND_PORT.to_string(),
+                &port.to_string(),
                 "--host",
                 BACKEND_HOST,
             ]);
@@ -259,6 +276,12 @@ mod tests {
             port: BACKEND_PORT,
         };
         assert_eq!(handle.url(), "http://127.0.0.1:8765");
+    }
+
+    #[test]
+    fn test_backend_port_falls_back_to_the_default() {
+        // No YUANWORK_PORT in the test environment -> the default.
+        assert_eq!(backend_port(), BACKEND_PORT);
     }
 
     #[test]
