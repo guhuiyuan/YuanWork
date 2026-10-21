@@ -5,6 +5,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { parseSseFrame, parseSseFrames, type RawSseFrame } from "./sse";
 import type {
   Citation,
   KbFile,
@@ -85,76 +86,16 @@ export interface StreamEvent {
 /** Tauri channel the Rust bridge re-emits the backend's SSE events on. */
 const CHAT_EVENT_CHANNEL = "chat:event";
 
-export async function chat(req: ChatRequest): Promise<ChatResponse> {
-  if (isTauri) {
-    const json = await invoke<string>("chat_stream", { request: req });
-    return JSON.parse(json);
-  }
-  return callBackend<ChatResponse>("/chat", {
-    method: "POST",
-    body: JSON.stringify(req),
-  });
-}
+/**
+ * How long the backend may go without sending any bytes before the stream
+ * is considered stalled.
+ *
+ * This is an *idle* timeout, not a total one: a long answer that keeps
+ * trickling tokens is fine, only a silent connection is aborted.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 120_000;
 
 // ===== SSE parsing (browser mode) =====
-
-interface RawSseFrame {
-  event: string;
-  data: string;
-}
-
-/**
- * Split off every complete frame in `buffer`.
- *
- * The backend uses sse-starlette, which terminates frames with CRLF
- * (`\r\n\r\n`); LF is accepted too. Whatever follows the last complete
- * frame is returned as `rest` so it can be prepended to the next chunk.
- */
-function parseSseFrames(buffer: string): { frames: RawSseFrame[]; rest: string } {
-  const frames: RawSseFrame[] = [];
-  let rest = buffer;
-
-  for (;;) {
-    const crlf = rest.indexOf("\r\n\r\n");
-    const lf = rest.indexOf("\n\n");
-    let end: number;
-    if (crlf >= 0 && (lf < 0 || crlf < lf)) {
-      end = crlf + 4;
-    } else if (lf >= 0) {
-      end = lf + 2;
-    } else {
-      break;
-    }
-    const parsed = parseSseFrame(rest.slice(0, end));
-    rest = rest.slice(end);
-    if (parsed) frames.push(parsed);
-  }
-
-  return { frames, rest };
-}
-
-function parseSseFrame(frame: string): RawSseFrame | null {
-  let event = "";
-  const dataLines: string[] = [];
-
-  for (const rawLine of frame.split("\n")) {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    // Blank line, or a comment (the server's keepalive).
-    if (!line || line.startsWith(":")) continue;
-
-    const colon = line.indexOf(":");
-    const field = colon < 0 ? line : line.slice(0, colon);
-    let value = colon < 0 ? "" : line.slice(colon + 1);
-    // Exactly one leading space after the colon is part of the framing.
-    if (value.startsWith(" ")) value = value.slice(1);
-
-    if (field === "event") event = value;
-    else if (field === "data") dataLines.push(value);
-  }
-
-  if (!event && dataLines.length === 0) return null;
-  return { event: event || "message", data: dataLines.join("\n") };
-}
 
 function toStreamEvent(frame: RawSseFrame): StreamEvent {
   let data: Record<string, unknown> = {};
@@ -196,11 +137,32 @@ export async function chatStream(
     }
   }
 
-  const resp = await fetch("http://127.0.0.1:8765/api/v1/chat/stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
+  // The idle timeout aborts the request if the backend goes silent. The
+  // timer is reset every time bytes arrive, so a long but progressing
+  // answer is never cut short.
+  const controller = new AbortController();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armIdleTimer = () => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      controller.abort(
+        new Error(`stream stalled for ${STREAM_IDLE_TIMEOUT_MS}ms`)
+      );
+    }, STREAM_IDLE_TIMEOUT_MS);
+  };
+
+  let resp: Response;
+  try {
+    armIdleTimer();
+    resp = await fetch("http://127.0.0.1:8765/api/v1/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal: controller.signal,
+    });
+  } finally {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+  }
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
   }
@@ -225,13 +187,18 @@ export async function chatStream(
     }
   };
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const { frames, rest } = parseSseFrames(buffer);
-    buffer = rest;
-    handle(frames);
+  try {
+    for (;;) {
+      armIdleTimer();
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const { frames, rest } = parseSseFrames(buffer);
+      buffer = rest;
+      handle(frames);
+    }
+  } finally {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
   }
 
   // Flush whatever is left, including a frame with no trailing blank line.

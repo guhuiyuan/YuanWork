@@ -9,6 +9,8 @@ export interface ChatMessage {
   citations?: Citation[];
   confidence?: number;
   refused?: boolean;
+  /** Why the answer was refused - "low_confidence" or "generation_error: ..." */
+  refusalReason?: string;
   conflict?: string;
   timestamp: number;
 }

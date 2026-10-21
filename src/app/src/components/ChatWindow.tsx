@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore, ChatMessage } from "../store";
 import { chatStream, ChatResponse, ConflictInfo } from "../api/backend";
+import { appendFailureNotice, refusalBanner, refusalContent } from "../api/streamText";
 
 /** Format the backend's conflict records into one warning string. */
 function formatConflicts(conflicts: unknown): string | undefined {
@@ -136,9 +137,16 @@ export function ChatWindow() {
           case "refusal": {
             const message =
               typeof ev.data.message === "string" ? ev.data.message : "";
+            const reason =
+              typeof ev.data.reason === "string" ? ev.data.reason : undefined;
+            // The refusal message already contains everything that was
+            // streamed, so the pending buffer is flushed first and then
+            // REPLACED. Appending would duplicate the tail.
+            flush();
             useAppStore.getState().updateMessage(assistantId, {
               refused: true,
-              content: message,
+              refusalReason: reason,
+              content: refusalContent(message),
             });
             break;
           }
@@ -150,17 +158,16 @@ export function ChatWindow() {
           case "error": {
             const detail =
               typeof ev.data.detail === "string" ? ev.data.detail : "未知错误";
-            // Keep whatever was already streamed - losing it would be
-            // worse than showing the error next to it.
+            // Flush first, otherwise the notice would be inserted in
+            // front of the text that was already streamed.
+            flush();
             const current = useAppStore
               .getState()
               .messages.find((m) => m.id === assistantId);
             const notice = `（请求失败：${detail}）`;
             errorNoticedRef.current = true;
             useAppStore.getState().updateMessage(assistantId, {
-              content: current?.content
-                ? `${current.content}\n\n${notice}`
-                : notice,
+              content: appendFailureNotice(current?.content ?? "", notice),
             });
             break;
           }
@@ -177,6 +184,12 @@ export function ChatWindow() {
         confidence: resp.confidence,
         refused: resp.refused,
       };
+      // The reason tells the banner apart: a deliberate refusal
+      // ("low_confidence") and a model failure ("generation_error: ...")
+      // look identical in the response body.
+      if (resp.refusal_reason) {
+        patch.refusalReason = resp.refusal_reason;
+      }
       const conflict = formatConflicts(resp.conflicts);
       if (conflict) patch.conflict = conflict;
       // If no token event ever arrived, fall back to the full answer.
@@ -195,10 +208,10 @@ export function ChatWindow() {
       // than showing the error next to it. If an `error` event already
       // reported the failure, do not repeat the notice.
       if (!errorNoticedRef.current) {
-        const content = current?.content
-          ? `${current.content}\n\n（请求失败：${detail}）`
-          : `（请求失败：${detail}）`;
-        useAppStore.getState().updateMessage(assistantId, { content });
+        const notice = `（请求失败：${detail}）`;
+        useAppStore.getState().updateMessage(assistantId, {
+          content: appendFailureNotice(current?.content ?? "", notice),
+        });
       }
     } finally {
       setStreaming(false);
@@ -277,12 +290,13 @@ function Message({ msg }: { msg: ChatMessage }) {
   }
 
   // Assistant message
+  const banner = msg.refused ? refusalBanner(msg.refusalReason) : null;
   return (
     <div className="msg msg--assistant">
-      {msg.refused && (
+      {banner && (
         <div className="msg__refusal">
-          <strong>⚠️ 置信度不足，已拒绝直接回答</strong>
-          <div>下方仅供参考可能位置。</div>
+          <strong>{banner.title}</strong>
+          <div>{banner.detail}</div>
         </div>
       )}
 
