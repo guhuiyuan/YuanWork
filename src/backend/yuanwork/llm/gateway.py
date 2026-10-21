@@ -391,11 +391,6 @@ class LLMGateway:
         prompt_summary = "\n".join(
             f"[{m.role}] {m.content[:200]}" for m in task.messages
         )[:200]
-        accumulated: list[str] = []
-        prompt_tokens = 0
-        completion_tokens = 0
-        error: str | None = None
-        success = False
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -414,17 +409,46 @@ class LLMGateway:
             except RuntimeError:
                 pass
 
+        def _close_provider_stream(response: Any) -> None:
+            """Release the provider connection.
+
+            litellm's stream wrapper has no sync ``close()`` - only an
+            async ``aclose()``. The HTTP response underneath it does have
+            a sync ``close()``, so walk the wrapper chain until one is
+            found. Without this the connection stays dangling until the
+            garbage collector runs.
+            """
+            target = response
+            # wrapper -> wrapper -> httpx response
+            for _ in range(4):
+                close = getattr(target, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - best effort cleanup
+                        pass
+                    return
+                target = getattr(target, "completion_stream", None)
+                if target is None:
+                    return
+
         def _produce() -> None:
             """Drive the blocking litellm generator on a worker thread."""
             usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             failure: BaseException | None = None
             response: Any = None
+            # The text is accumulated here, on the worker, so the audit
+            # entry can be written from this thread - see the finally
+            # block below.
+            produced: list[str] = []
             try:
                 response = litellm.completion(**kwargs)
                 # An explicit iterator, so `stop` is checked BEFORE the
                 # next chunk is pulled. A plain `for` pulls first and then
                 # runs the body, which would fetch one extra chunk from the
-                # provider after the client disconnected.
+                # provider after the client disconnected. (A chunk that was
+                # already in flight is still processed - it is dropped by
+                # the queue, since nobody reads it any more.)
                 chunks = iter(response)
                 while not stop.is_set():
                     try:
@@ -435,6 +459,7 @@ class LLMGateway:
                     if choices:
                         text = getattr(choices[0].delta, "content", None)
                         if text:
+                            produced.append(text)
                             _put(text)
                     # The final chunk carries usage info for some providers
                     chunk_usage = getattr(chunk, "usage", None)
@@ -454,12 +479,28 @@ class LLMGateway:
             finally:
                 # Return the connection to the provider's pool instead of
                 # leaving it dangling until the garbage collector runs.
-                close = getattr(response, "close", None)
-                if callable(close):
+                _close_provider_stream(response)
+                # The audit entry is written HERE, on the worker, not in
+                # the consumer's finally block. An async generator's
+                # finally only runs when the generator is exhausted or
+                # closed; a consumer that walks away without closing it
+                # would leave this LLM call un-audited.
+                if self.audit_logger is not None:
                     try:
-                        close()
-                    except Exception:  # noqa: BLE001 - best effort cleanup
-                        pass
+                        duration_ms = (time.monotonic() - start) * 1000.0
+                        self.audit_logger.log_llm_call(
+                            model=alias,
+                            task_type=task.task_type,
+                            prompt_summary=f"#{qhash} {prompt_summary}",
+                            response_summary="".join(produced)[:200],
+                            prompt_tokens=usage["prompt_tokens"],
+                            completion_tokens=usage["completion_tokens"],
+                            duration_ms=duration_ms,
+                            success=failure is None,
+                            error=repr(failure) if failure is not None else None,
+                        )
+                    except Exception:
+                        logger.exception("Audit log write failed (non-fatal)")
                 _put(_StreamEnd(usage, failure))
 
         worker = threading.Thread(
@@ -471,39 +512,20 @@ class LLMGateway:
             while True:
                 item = await queue.get()
                 if isinstance(item, _StreamEnd):
-                    prompt_tokens = item.usage["prompt_tokens"]
-                    completion_tokens = item.usage["completion_tokens"]
                     if item.error is not None:
                         raise item.error
-                    success = True
                     break
-                accumulated.append(item)
                 yield item
         except Exception as e:
             logger.exception(f"Streaming LLM call failed: {e}")
-            error = repr(e)
             raise
         finally:
             # Runs on normal completion, on error, and on early exit
             # (client disconnect) - in the last case it also tells the
             # worker thread to stop pulling from the provider.
+            # The audit entry is written by the worker thread, so it does
+            # not depend on this block running.
             stop.set()
-            if self.audit_logger is not None:
-                try:
-                    duration_ms = (time.monotonic() - start) * 1000.0
-                    self.audit_logger.log_llm_call(
-                        model=alias,
-                        task_type=task.task_type,
-                        prompt_summary=f"#{qhash} {prompt_summary}",
-                        response_summary="".join(accumulated)[:200],
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        duration_ms=duration_ms,
-                        success=success,
-                        error=error,
-                    )
-                except Exception:
-                    logger.exception("Audit log write failed (non-fatal)")
 
     async def chat(
         self,

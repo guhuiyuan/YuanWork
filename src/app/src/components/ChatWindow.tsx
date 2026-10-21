@@ -225,7 +225,21 @@ export function ChatWindow() {
       useAppStore.getState().updateMessage(assistantId, patch);
     } catch (e) {
       flush();
-      const detail = (e as Error).message;
+      // Tauri rejects an `Err(String)` command with the bare string, not
+      // an Error - so `e.message` would be undefined and the user would
+      // see "（请求失败：undefined）". Handle both shapes.
+      const detail =
+        e instanceof Error
+          ? e.message
+          : typeof e === "string"
+            ? e
+            : (() => {
+                try {
+                  return JSON.stringify(e);
+                } catch {
+                  return String(e);
+                }
+              })();
       const current = useAppStore
         .getState()
         .messages.find((m) => m.id === assistantId);

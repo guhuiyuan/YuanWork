@@ -69,13 +69,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **失败提示插到了已流式文本前面** — 失败提示现在追加在已生成文本之后（`appendFailureNotice`），不会让人误以为请求在一开始就失败了
 - **`refusal` 事件重复追加文本** — 拒绝消息本身就包含已流式出的部分，改为**替换**而非追加
 - **后端测试断言太弱** — 「不缓冲到末尾」原来断言 `arrival[-1] < produced[-1] + 0.02`，缓冲实现也能通过；改为断言**第一个** delta 在 provider 产出完之前就已送达，且相邻 delta 到达间隔不塌缩
-- **引用的页码 / slide 号 / 章节一直是空的** — chunk 的定位元数据有两种形状，入库后和检索后不一样：
-  - chunker 产出的是嵌套形状 `{"meta": {"page": 12}}`；检索返回的是扁平的 LanceDB 行 `{"page": 12}`
+- **引用的页码 / slide 号 / 章节一直是空的** — chunk 的定位元数据有两种形状，入库后和检索后不一样：  - chunker 产出的是嵌套形状 `{"meta": {"page": 12}}`；检索返回的是扁平的 LanceDB 行 `{"page": 12}`
   - 入库侧 `semantic.add_chunks` 读的是扁平 key（`chunk.get("page")`），在嵌套形状上永远是 `None` → 数据库里 page 列全空
   - 消费侧（`agent._build_citations`、`answer._build_answer_task`、`wiki/page_generator`）读的是嵌套 `meta`，在检索行上永远是 `None`
   - 后果：prompt 第 3 条要求模型写「第 N 页」「Slide N」，但页码根本没进 prompt；UI 里「第 N 页」「Slide N」是死代码，引用只能定位到文件
   - 修复：新增 `yuanwork/utils/chunk_meta.py` 的 `chunk_meta()`，两种形状都能读；入库侧改为从嵌套 meta 取值（section 列存 heading）；三处消费侧统一走 `chunk_meta()`
   - ⚠️ **已建的知识库需要重新索引**才会带上页码（旧的行里 page 就是 null）；重新入库即可，代码不用改
+- **冲突检测把「知识库里提到冲突」当成了冲突** — 启发式扫描的是 `答案 + 证据原文`，而知识库里本来就该出现「过时」「冲突」这些词（一篇讲冲突解决机制的合同就会命中），于是 LLM 检测器判 consistent 也被启发式覆盖成 conflict，凭空造出一条冲突记录。
+  - 改为**只扫答案**，且标记词收敛为 answer.j2 真正要求模型加的那几个（⚠️ / 通用知识与知识库存在分歧 / outdated / 过时 / 已弃用 / deprecated）
+  - 回归验证：改回旧写法，`test_a_kb_document_that_mentions_a_conflict_is_not_a_conflict` 立刻失败
+- **模型返回空回答被当成成功** — provider 什么都不吐时，`refused=False` + 空 answer + 满屏引用，用户只看到一个空白气泡。流式与阻塞两条路径都改为抛 `模型返回了空回答`，走生成错误分支（保留引用 + 错误提示）
+- **Tauri 命令失败时前端显示「（请求失败：undefined）」** — `Err(String)` 在 Tauri v2 里是**裸字符串** reject，不是 Error，`(e as Error).message` 取不到。前端改成同时处理 Error / 字符串 / 其他值
+- **流式审计可能不写** — 审计写在异步生成器的 finally 里，消费方中途放弃且不关闭生成器时永远不会执行。改到**工作线程**里写：只要 provider 调过就一定有一条记录，且仍恰好一条
+- **provider 连接没被真正释放** — `CustomStreamWrapper` 只有异步的 `aclose()`，没有同步 `close()`，原来的 `getattr(response, "close", None)` 永远是 None。改为沿包装链往下找底层 httpx 响应的同步 `close()`
 
 ## [0.3.0] - 2026-10-19 — Stage 3: 开源准备
 

@@ -6,7 +6,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status: Stage 3 done](https://img.shields.io/badge/Status-Stage%203%20done-brightgreen)]()
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)]()
-[![Tests: 156 passed](https://img.shields.io/badge/Tests-156%20passed-brightgreen)]()
+[![Tests: 161 passed](https://img.shields.io/badge/Tests-161%20passed-brightgreen)]()
 [![Tauri 2.x](https://img.shields.io/badge/Tauri-2.x-orange)]()
 
 [English](#english-summary) · [中文](#中文)
@@ -320,7 +320,7 @@ YuanWork/
 ```bash
 cd src/backend
 PYTHONPATH=src/backend python -m pytest tests/ -q
-# → 156 passed
+# → 161 passed
 ```
 
 不依赖 LLM API key 也不下载 bge-m3 模型。覆盖：
@@ -339,14 +339,14 @@ Rust 侧还有 SSE 解析器和 UTF-8 增量解码的单元测试：
 
 ```bash
 cd src/app/src-tauri && cargo test
-# → 16 passed
+# → 17 passed
 ```
 
 前端纯函数（SSE 解析、文本拼接）用 Node 内置 test runner 测，零额外依赖：
 
 ```bash
 cd src/app && npm test
-# → 18 passed
+# → 22 passed
 ```
 
 ---

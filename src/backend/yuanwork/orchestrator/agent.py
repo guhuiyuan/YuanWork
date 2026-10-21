@@ -370,6 +370,10 @@ class AgentLoop:
                 evidence=state.evidence,
                 confidence=state.confidence or {},
             )
+            # An empty completion is not an answer - see the streaming
+            # path for the same check.
+            if not (state.answer or "").strip():
+                raise RuntimeError("模型返回了空回答")
             state.refused = False
         except Exception as e:
             logger.exception(f"Answer generation failed: {e}")
@@ -432,6 +436,11 @@ class AgentLoop:
             ):
                 state.answer += delta
                 yield delta
+            # An empty completion is not an answer. Reporting it as a
+            # success would hand the user a blank bubble with citations
+            # attached and no explanation of what went wrong.
+            if not state.answer.strip():
+                raise RuntimeError("模型返回了空回答")
             state.refused = False
         except Exception as e:
             logger.exception(f"Answer generation failed: {e}")
@@ -519,19 +528,28 @@ class AgentLoop:
         claims = detection.get("conflict_claims") or []
         explanation = detection.get("explanation", "")
 
-        # Heuristic: scan the answer (and source file names) for known
-        # conflict markers. This catches the case where the LLM already
-        # noticed an issue while answering (per answer.j2 instruction) and
-        # added a warning, but the separate detector returned "consistent"
-        # because the answer text follows the KB wording.
+        # Heuristic: scan the ANSWER for the conflict markers the answer
+        # prompt asks the model to add. This catches the case where the
+        # LLM already noticed an issue while answering (per answer.j2
+        # instruction) and added a warning, but the separate detector
+        # returned "consistent" because the answer text follows the KB
+        # wording.
+        #
+        # Only the answer is scanned, never the evidence: the knowledge
+        # base is supposed to *contain* the words "过时" / "冲突" - that
+        # is what a conflict looks like - so scanning it would invent a
+        # conflict out of every document that merely discusses one, and
+        # would override the detector's own "consistent" verdict.
         answer_text = state.answer or ""
-        source_text = " ".join(
-            (c.get("file_name", "") + " " + (c.get("text") or "")[:300])
-            for c in state.evidence[:3]
-        )
-        combined = answer_text + " " + source_text
-        markers = ["outdated", "过时", "已弃用", "deprecated", "已过时", "⚠️", "冲突", "分歧"]
-        heuristic_hit = next((m for m in markers if m.lower() in combined.lower()), None)
+        markers = [
+            "⚠️",
+            "通用知识与知识库存在分歧",
+            "outdated",
+            "过时",
+            "已弃用",
+            "deprecated",
+        ]
+        heuristic_hit = next((m for m in markers if m.lower() in answer_text.lower()), None)
 
         state.trace.append({
             "step": "check_conflicts",
