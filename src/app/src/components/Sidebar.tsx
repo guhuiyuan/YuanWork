@@ -1,40 +1,39 @@
 import { useEffect, useState } from "react";
 import { useAppStore } from "../store";
-import { listKbFiles, listWikiPages, pickFolder, ingestDirectory } from "../api/backend";
+import { listKbFiles, listWikiPages, deleteKbFile } from "../api/backend";
+import { useIngest } from "../hooks/useIngest";
+import { KbFileRow } from "./KbFileRow";
 
 export function Sidebar() {
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
   const kbFiles = useAppStore((s) => s.kbFiles);
   const setKbFiles = useAppStore((s) => s.setKbFiles);
+  const setKbLoaded = useAppStore((s) => s.setKbLoaded);
   const wikiPages = useAppStore((s) => s.wikiPages);
   const setWikiPages = useAppStore((s) => s.setWikiPages);
   const currentFolder = useAppStore((s) => s.currentFolder);
   const setCurrentFolder = useAppStore((s) => s.setCurrentFolder);
-  const [ingesting, setIngesting] = useState(false);
-  const [ingestMsg, setIngestMsg] = useState<string | null>(null);
+  const showToast = useAppStore((s) => s.showToast);
+  const { ingesting, message, folder, pickAndIngest, refreshFiles } = useIngest();
 
   // Load files on mount
   useEffect(() => {
-    listKbFiles().then(setKbFiles).catch(() => {});
+    listKbFiles()
+      .then(setKbFiles)
+      .catch(() => {})
+      .finally(() => setKbLoaded(true));
     listWikiPages().then(setWikiPages).catch(() => {});
-  }, [setKbFiles, setWikiPages]);
+  }, [setKbFiles, setKbLoaded, setWikiPages]);
 
-  async function handlePickAndIngest() {
-    const folder = await pickFolder();
-    if (!folder) return;
-    setCurrentFolder(folder);
-    setIngesting(true);
-    setIngestMsg("正在索引…");
+  async function handleDelete(docId: string, fileName: string) {
     try {
-      const result = await ingestDirectory(folder, true);
-      setIngestMsg(result);
-      const files = await listKbFiles();
+      await deleteKbFile(docId);
+      const files = await refreshFiles();
       setKbFiles(files);
+      showToast(`已从知识库移除「${fileName}」（文件仍在磁盘上）`, "success");
     } catch (e) {
-      setIngestMsg(`失败：${(e as Error).message}`);
-    } finally {
-      setIngesting(false);
+      showToast(`移除失败：${(e as Error).message}`, "error");
     }
   }
 
@@ -68,21 +67,21 @@ export function Sidebar() {
 
       <div className="panel-header" style={{ borderTop: "1px solid var(--border)" }}>
         <span>知识库</span>
-        <button className="btn btn--primary" onClick={handlePickAndIngest} disabled={ingesting}>
+        <button className="btn btn--primary" onClick={pickAndIngest} disabled={ingesting}>
           {ingesting ? "索引中…" : "+ 添加"}
         </button>
       </div>
 
       <div className="panel-body">
-        {currentFolder && (
-          <div className="kb-folder" title={currentFolder}>
-            📁 {currentFolder.split(/[\\/]/).pop()}
+        {(currentFolder || folder) && (
+          <div className="kb-folder" title={folder ?? currentFolder ?? ""}>
+            📁 {(folder ?? currentFolder ?? "").split(/[\\/]/).pop()}
           </div>
         )}
 
-        {ingestMsg && <div className="ingest-msg">{ingestMsg}</div>}
+        {message && <div className="ingest-msg">{message}</div>}
 
-        {kbFiles.length === 0 && !currentFolder && (
+        {kbFiles.length === 0 && !currentFolder && !ingesting && (
           <div className="empty-state">
             <div>暂无文件</div>
             <div style={{ fontSize: 12 }}>点击「+ 添加」选择本地文件夹</div>
@@ -90,29 +89,17 @@ export function Sidebar() {
         )}
 
         {kbFiles.map((f) => (
-          <div key={f.doc_id} className="kb-file" title={f.file_path}>
-            <span className="kb-file__icon">{iconForType(f.file_type)}</span>
-            <span className="kb-file__name">{f.file_name}</span>
-            <span className="kb-file__count">{f.chunk_count}</span>
-          </div>
+          <KbFileRow
+            key={f.doc_id}
+            file={f}
+            onDelete={() => handleDelete(f.doc_id, f.file_name)}
+          />
         ))}
       </div>
 
       <style>{sidebarStyles}</style>
     </>
   );
-}
-
-function iconForType(t: string): string {
-  const m: Record<string, string> = {
-    pdf: "📕",
-    docx: "📘",
-    pptx: "📙",
-    xlsx: "📗",
-    md: "📝",
-    txt: "📄",
-  };
-  return m[t] ?? "📄";
 }
 
 const sidebarStyles = `
@@ -148,25 +135,5 @@ const sidebarStyles = `
     font-size: 12px;
     color: var(--text-secondary);
     padding: 6px 0;
-  }
-  .kb-file {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 8px;
-    border-radius: 4px;
-    font-size: 12px;
-  }
-  .kb-file:hover { background: var(--bg-tertiary); }
-  .kb-file__icon { flex-shrink: 0; }
-  .kb-file__name {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .kb-file__count {
-    color: var(--text-tertiary);
-    font-size: 11px;
   }
 `;

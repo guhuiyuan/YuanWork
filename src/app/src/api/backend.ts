@@ -243,17 +243,50 @@ export async function pickFolder(): Promise<string | null> {
   return null; // Browser fallback - user must enter manually
 }
 
+export interface IngestJob {
+  job_id: string;
+  files_queued: number;
+  estimated_seconds: number;
+}
+
+export interface IngestStatus {
+  job_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  progress: number;
+  current_file: string | null;
+  files_done: number;
+  files_total: number;
+  error: string | null;
+}
+
+/**
+ * Start indexing a directory.
+ *
+ * Indexing runs in the background - the returned job has to be polled
+ * with `getIngestStatus` before the file list is complete.
+ */
 export async function ingestDirectory(
   path: string,
   recursive = true
-): Promise<string> {
+): Promise<IngestJob> {
   if (isTauri) {
-    return invoke<string>("ingest_directory", { path, recursive });
+    const json = await invoke<string>("ingest_directory", { path, recursive });
+    return JSON.parse(json) as IngestJob;
   }
-  return callBackend<string>("/ingest/dir", {
+  return callBackend<IngestJob>("/ingest/dir", {
     method: "POST",
     body: JSON.stringify({ path, recursive, force: false }),
   });
+}
+
+/** Poll an ingestion job. */
+export async function getIngestStatus(jobId: string): Promise<IngestStatus> {
+  if (isTauri) {
+    return invoke<IngestStatus>("get_ingest_status", { jobId });
+  }
+  return callBackend<IngestStatus>(
+    `/ingest/status/${encodeURIComponent(jobId)}`
+  );
 }
 
 export async function listKbFiles(): Promise<KbFile[]> {
@@ -264,11 +297,17 @@ export async function listKbFiles(): Promise<KbFile[]> {
   return body.files ?? [];
 }
 
+/**
+ * Remove a document from the knowledge base.
+ *
+ * Only the index is touched - the file itself stays where it is on
+ * disk.
+ */
 export async function deleteKbFile(docId: string): Promise<void> {
   if (isTauri) {
     return invoke<void>("delete_kb_file", { docId });
   }
-  await callBackend(`/kb/files/${docId}`, { method: "DELETE" });
+  await callBackend(`/kb/files/${encodeURIComponent(docId)}`, { method: "DELETE" });
 }
 
 // ===== Wiki =====

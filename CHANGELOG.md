@@ -42,6 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 工具链：Rust 1.99.1 (stable-msvc) → `D:\cargo-target`，避免 C: 盘空间不足
   - `Cargo.lock` 提交（Rust 二进制项目约定）
 - 文档 / 配置：完整的 README.md / CHANGELOG.md / CONTRIBUTING.md / docs/
+- **首次启动引导** — 新装的用户看到的是一张欢迎页，而不是空荡荡的侧边栏：
+  - 卡片式说明这个应用做什么、索引什么、数据怎么保管
+  - 一个显眼的「选择工作目录」按钮，走的是原来的选目录 + 索引流程
+  - 「稍后再说」可以跳过；跳过与否记在 localStorage，下次启动不再打扰
+  - 判定逻辑抽成纯函数 `shouldShowOnboarding()`：知识库非空、或已经
+    引导过、或者文件列表还没加载完（避免每次启动闪一下），都不显示
+- **侧边栏可以逐个删除文件** — 每行悬停出现 ✕，点开是行内确认（不用
+  `confirm()`，那会卡住 webview），文案写明「文件仍在磁盘上」：只从索引
+  里移除，不动用户自己的文件。删完弹一条 toast
+- **索引进度可见** — 新增 `GET /ingest/status/{job_id}` 的 Rust 桥接
+  （`get_ingest_status`），前端轮询到 job 完成才刷新文件列表
 
 ### Changed
 
@@ -60,6 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **索引完文件列表还是空的** — `/ingest/dir` 是异步任务（返回 job_id 后
+  台跑），前端却在请求返回后立刻拉文件列表，那时候索引还没开始。现在
+  轮询 job 状态直到 completed，再刷新列表，并显示「正在索引…（3/12）」
+- **`delete_kb_file` 不看 HTTP 状态** — 后端返回 404 时 Rust 侧照样返回
+  Ok，文件却还留在列表里，看着像删除失败。现在非 2xx 直接报错
+- **`ingest_directory` 不看 HTTP 状态** — 路径不存在时后端返回 404，前端
+  拿到的却是「成功」的响应体
 - **Rust 侧 UTF-8 字符被切坏**（`src-tauri/src/sse.rs`） — `reqwest` 的 chunk 边界可能落在多字节字符中间，之前的实现逐 chunk `from_utf8`，切到中间的汉字会变成 U+FFFD
   - 新增 `Utf8Decoder`：增量解码，保留未完成的尾部字节等下一块，非法字节替换为 U+FFFD，流结束时 flush
 - **生成出错时引用被丢弃**（`agent.py`） — 回答生成到一半失败时，流式路径和阻塞路径都会丢掉 citations，用户拿到一段无法核对的文字

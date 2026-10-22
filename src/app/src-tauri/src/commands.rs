@@ -206,7 +206,39 @@ pub async fn ingest_directory(
         .await
         .map_err(|e| e.to_string())?;
 
-    response.text().await.map_err(|e| e.to_string())
+    // The endpoint kicks off a background job, so a non-2xx status means
+    // the request itself was rejected (bad path, not a directory).
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {text}"));
+    }
+    Ok(text)
+}
+
+/// Poll the progress of an ingestion job.
+///
+/// Indexing runs in the background, so the file list only fills up once
+/// the job reports "completed".
+#[tauri::command]
+pub async fn get_ingest_status(
+    job_id: String,
+    backend: State<'_, BackendHandle>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/api/v1/ingest/status/{}",
+        backend.url(),
+        urlencoding::encode(&job_id)
+    );
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    Ok(body)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -243,8 +275,19 @@ pub async fn delete_kb_file(
     backend: State<'_, BackendHandle>,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/kb/files/{}", backend.url(), doc_id);
-    client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    let url = format!(
+        "{}/api/v1/kb/files/{}",
+        backend.url(),
+        urlencoding::encode(&doc_id)
+    );
+    let response = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    // Without checking the status a 404 would look like a success, and
+    // the file would stubbornly stay in the list.
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {status}: {body}"));
+    }
     Ok(())
 }
 

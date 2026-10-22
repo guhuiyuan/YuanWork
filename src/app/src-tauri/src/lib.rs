@@ -46,6 +46,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::chat_stream,
             commands::ingest_directory,
+            commands::get_ingest_status,
             commands::pick_folder,
             commands::kill_backend,
             commands::get_api_key,

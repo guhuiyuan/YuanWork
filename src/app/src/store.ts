@@ -2,6 +2,14 @@ import { create } from "zustand";
 
 export type View = "chat" | "wiki" | "graph";
 
+export type ToastKind = "info" | "error" | "success";
+
+export interface Toast {
+  id: number;
+  text: string;
+  kind: ToastKind;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -100,8 +108,16 @@ interface AppState {
 
   kbFiles: KbFile[];
   setKbFiles: (f: KbFile[]) => void;
+  /** True once the file list has been fetched - avoids a "no files yet" flash. */
+  kbLoaded: boolean;
+  setKbLoaded: (v: boolean) => void;
   currentFolder: string | null;
   setCurrentFolder: (f: string | null) => void;
+
+  /** Transient message shown to the user (e.g. "已从知识库移除 X"). */
+  toast: Toast | null;
+  showToast: (text: string, kind?: ToastKind) => void;
+  dismissToast: () => void;
 
   wikiPages: WikiPage[];
   setWikiPages: (p: WikiPage[]) => void;
@@ -140,8 +156,15 @@ export const useAppStore = create<AppState>((set) => ({
 
   kbFiles: [],
   setKbFiles: (f) => set({ kbFiles: f }),
+  kbLoaded: false,
+  setKbLoaded: (v) => set({ kbLoaded: v }),
   currentFolder: null,
   setCurrentFolder: (f) => set({ currentFolder: f }),
+
+  toast: null,
+  showToast: (text, kind = "info") =>
+    set({ toast: { id: Date.now(), text, kind } }),
+  dismissToast: () => set({ toast: null }),
 
   wikiPages: [],
   setWikiPages: (p) => set({ wikiPages: p }),
