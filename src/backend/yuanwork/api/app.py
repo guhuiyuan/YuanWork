@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
@@ -37,6 +38,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _dotenv_candidates() -> list[Path]:
+    """Places a .env file may live, most specific first.
+
+    The project layout is ``<root>/src/backend/yuanwork/...`` and the
+    .env lives at ``<root>/.env``. The desktop app starts the backend
+    with cwd = ``src/backend``, so a cwd-relative lookup alone would miss
+    the file and the LLM key would never reach os.environ.
+    """
+    candidates = [Path.cwd() / ".env"]
+    package_root = Path(__file__).resolve().parent.parent
+    for parent in package_root.parents[:6]:
+        candidates.append(parent / ".env")
+    return candidates
+
+
 def _load_dotenv_into_environ() -> None:
     """Best-effort load of .env into os.environ.
 
@@ -48,20 +64,14 @@ def _load_dotenv_into_environ() -> None:
     """
     import os
 
-    from pathlib import Path
-
     try:
         from dotenv import dotenv_values
     except ImportError:
         # python-dotenv not installed; nothing to do
         return
 
-    candidates = [
-        Path.cwd() / ".env",
-        Path(__file__).resolve().parent.parent.parent.parent / ".env",
-    ]
     loaded = 0
-    for path in candidates:
+    for path in _dotenv_candidates():
         if not path.is_file():
             continue
         for key, value in dotenv_values(path).items():

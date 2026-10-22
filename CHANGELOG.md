@@ -81,6 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **模型返回空回答被当成成功** — provider 什么都不吐时，`refused=False` + 空 answer + 满屏引用，用户只看到一个空白气泡。流式与阻塞两条路径都改为抛 `模型返回了空回答`，走生成错误分支（保留引用 + 错误提示）
 - **Tauri 命令失败时前端显示「（请求失败：undefined）」** — `Err(String)` 在 Tauri v2 里是**裸字符串** reject，不是 Error，`(e as Error).message` 取不到。前端改成同时处理 Error / 字符串 / 其他值
 - **流式审计可能不写** — 审计写在异步生成器的 finally 里，消费方中途放弃且不关闭生成器时永远不会执行。改到**工作线程**里写：只要 provider 调过就一定有一条记录，且仍恰好一条
+- **桌面端根本起不来：启动探测的状态码解析写错了** — `reqwest_get()` 返回 HTTP 状态行 `"HTTP/1.1 200 OK"`，而调用方拿它 `starts_with("200")` 比较，**永远不成立**。于是探测循环空转 60 次、30 秒后 panic："Backend failed to start within 30 seconds"。后端其实早就起来了，只是没人认出它。
+  - 抽出 `parse_status_code()`，取状态行第二个字段（状态码），并补了 5 个单测覆盖 200 / 404 / 500 / 空响应 / 垃圾响应
+- **桌面端找不到 .env，LLM 密钥没进 os.environ** — sidecar 的 cwd 是 `src/backend`，而 `.env` 在项目根目录。原来的两个候选路径（`cwd/.env` 与 `src/.env`）都不存在，密钥永远加载不上 → 聊天一律报缺少凭据。
+  - 改为从包目录向上最多找 6 层，新增 `_dotenv_candidates()` 便于测试
+- **桌面端的知识库是空的** — sidecar 的 cwd 是 `src/backend`，后端默认 `data_dir` 落到 `~/.yuanwork`，而不是项目的 `data/`。现在 sidecar 会给子进程设 `YUANWORK_DATA_DIR=<项目根>/data`（除非用户自己设过）
+- **拒绝消息里混进了模板标题** — `refusal.j2` 第一行 `# Refusal Response Template` 是 Markdown 标题而不是 Jinja 注释，渲染出来用户会看到这行字。改成 Jinja 注释
 - **provider 连接没被真正释放** — `CustomStreamWrapper` 只有异步的 `aclose()`，没有同步 `close()`，原来的 `getattr(response, "close", None)` 永远是 None。改为沿包装链往下找底层 httpx 响应的同步 `close()`
 
 ## [0.3.0] - 2026-10-19 — Stage 3: 开源准备

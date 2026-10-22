@@ -112,6 +112,19 @@ pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::erro
                 BACKEND_HOST,
             ]);
             c.current_dir(&cwd);
+            // The backend's cwd is src/backend, so its default data
+            // directory would be ~/.yuanwork - an empty knowledge base,
+            // not the project's data/. Point it at the project's data
+            // directory unless the user set one themselves.
+            if std::env::var_os("YUANWORK_DATA_DIR").is_none() {
+                if let Some(project_root) = project_root_of(&cwd) {
+                    let data_dir = project_root.join("data");
+                    if data_dir.is_dir() {
+                        c.env("YUANWORK_DATA_DIR", &data_dir);
+                        log::info!("Backend data dir: {}", data_dir.display());
+                    }
+                }
+            }
             c
         }
     };
@@ -218,13 +231,20 @@ fn find_backend_module_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Err("could not locate src/backend/ (run from project root or src/app/)".into())
 }
 
+/// The project root, given the backend module directory.
+///
+/// The layout is `<root>/src/backend`, so the root is two levels up.
+fn project_root_of(backend_dir: &std::path::Path) -> Option<PathBuf> {
+    backend_dir.parent()?.parent().map(|p| p.to_path_buf())
+}
+
 /// Wait for the backend to respond to health checks.
 fn wait_for_backend_ready(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let health_url = format!("{}/api/v1/health", url);
 
     for attempt in 0..60 {
         match reqwest_get(&health_url) {
-            Ok(response) if response.starts_with("200") => {
+            Ok(code) if code == "200" => {
                 log::info!("Backend ready after {} attempts", attempt);
                 return Ok(());
             }
@@ -237,7 +257,7 @@ fn wait_for_backend_ready(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     Err("Backend failed to start within 30 seconds".into())
 }
 
-/// Minimal blocking HTTP GET that returns the status line as text.
+/// Minimal blocking HTTP GET that returns the HTTP status code.
 /// Used only for the one-shot startup health probe.
 fn reqwest_get(url: &str) -> Result<String, Box<dyn std::error::Error>> {
     let parsed = url::Url::parse(url)?;
@@ -254,7 +274,20 @@ fn reqwest_get(url: &str) -> Result<String, Box<dyn std::error::Error>> {
 
     let mut response = String::new();
     std::io::Read::read_to_string(&mut stream, &mut response)?;
-    Ok(response.lines().next().unwrap_or("").to_string())
+    Ok(parse_status_code(&response).to_string())
+}
+
+/// Pull the status code out of an HTTP response.
+///
+/// The status line looks like `HTTP/1.1 200 OK`, so the code is the
+/// second whitespace-separated field - comparing the whole line to
+/// "200" (or checking that it *starts with* "200") never matches.
+fn parse_status_code(response: &str) -> &str {
+    response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("")
 }
 
 /// Backend health status (for Tauri commands).
@@ -282,6 +315,17 @@ mod tests {
     fn test_backend_port_falls_back_to_the_default() {
         // No YUANWORK_PORT in the test environment -> the default.
         assert_eq!(backend_port(), BACKEND_PORT);
+    }
+
+    #[test]
+    fn test_parse_status_code() {
+        // The status line is "HTTP/1.1 200 OK" - the code is the second
+        // field, not the start of the line.
+        assert_eq!(parse_status_code("HTTP/1.1 200 OK\r\n\r\nbody"), "200");
+        assert_eq!(parse_status_code("HTTP/1.1 404 Not Found\r\n"), "404");
+        assert_eq!(parse_status_code("HTTP/1.1 500 Internal Server Error"), "500");
+        assert_eq!(parse_status_code(""), "");
+        assert_eq!(parse_status_code("garbage"), "");
     }
 
     #[test]

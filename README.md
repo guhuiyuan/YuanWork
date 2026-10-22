@@ -129,9 +129,23 @@ Sidecar 启动链路：
 1. Tauri shell 在项目根目录启动（`run.bat` 自动 `cd`）
 2. `find_python_interpreter()` 向上爬树找 `.venv/Scripts/python.exe`
 3. `find_backend_module_dir()` 向上爬树找 `src/backend/`
-4. spawn `python -m yuanwork --port 8765 --host 127.0.0.1`
+4. spawn `python -m yuanwork --port <端口> --host 127.0.0.1`
+   - 端口取自 `YUANWORK_PORT` 环境变量，默认 **8765**
+   - 子进程的 `YUANWORK_DATA_DIR` 指向项目的 `data/`（除非你自己设过），
+     否则后端会落到 `~/.yuanwork`，看到一个空知识库
 5. 等待 `/api/v1/health` 返回 200（最长 30 秒）
 6. 打开 WebView 显示前端
+
+**端口冲突怎么办**：8765 被别的应用占着时，换一个端口启动即可：
+
+```bash
+# Windows
+set YUANWORK_PORT=8770 && run.bat
+# bash
+YUANWORK_PORT=8770 ./run.bat
+```
+
+浏览器开发模式同理，用 URL 参数覆盖：`http://localhost:5173/?port=8770`。
 
 > 前端资源改动后必须重新 `npm run build` **并重新编译 Rust**：`tauri-build` 不会为 `dist/` 生成 `rerun-if-changed`，cargo 察觉不到前端变了。`build.bat` 里的 touch `src/app/src-tauri/src/lib.rs` 就是为了强制重编。
 
