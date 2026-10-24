@@ -11,7 +11,7 @@ import { markOnboarded } from "../api/firstRun";
  * of leaving the user staring at an empty sidebar.
  */
 export function Onboarding() {
-  const { ingesting, message, pickAndIngest } = useIngest();
+  const { ingesting, message, pickAndIngest, cancel } = useIngest();
   const setView = useAppStore((s) => s.setView);
   const showToast = useAppStore((s) => s.showToast);
 
@@ -70,9 +70,15 @@ export function Onboarding() {
           >
             {ingesting ? "索引中…" : "选择工作目录"}
           </button>
-          <button className="btn onboard__skip" onClick={handleSkip} disabled={ingesting}>
-            稍后再说
-          </button>
+          {ingesting ? (
+            <button className="btn onboard__skip" onClick={cancel}>
+              取消
+            </button>
+          ) : (
+            <button className="btn onboard__skip" onClick={handleSkip}>
+              稍后再说
+            </button>
+          )}
         </div>
 
         {message && <div className="onboard__status">{message}</div>}

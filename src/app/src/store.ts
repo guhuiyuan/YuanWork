@@ -111,8 +111,28 @@ interface AppState {
   /** True once the file list has been fetched - avoids a "no files yet" flash. */
   kbLoaded: boolean;
   setKbLoaded: (v: boolean) => void;
+  /** Set when the file list could not be fetched at all (backend down). */
+  kbError: string | null;
+  setKbError: (e: string | null) => void;
   currentFolder: string | null;
   setCurrentFolder: (f: string | null) => void;
+
+  /** The folder currently being indexed, and how it is going. */
+  ingesting: boolean;
+  ingestMessage: string | null;
+  ingestFolder: string | null;
+  setIngestState: (s: {
+    ingesting: boolean;
+    message?: string | null;
+    folder?: string | null;
+  }) => void;
+  /**
+   * Bumped by `cancelIngest`. The poll loop compares it with the value
+   * it started with, so a cancel reaches whichever component started
+   * the job - the state is shared, so the cancel signal has to be too.
+   */
+  ingestToken: number;
+  cancelIngest: () => void;
 
   /** Transient message shown to the user (e.g. "已从知识库移除 X"). */
   toast: Toast | null;
@@ -158,8 +178,22 @@ export const useAppStore = create<AppState>((set) => ({
   setKbFiles: (f) => set({ kbFiles: f }),
   kbLoaded: false,
   setKbLoaded: (v) => set({ kbLoaded: v }),
+  kbError: null,
+  setKbError: (e) => set({ kbError: e }),
   currentFolder: null,
   setCurrentFolder: (f) => set({ currentFolder: f }),
+
+  ingesting: false,
+  ingestMessage: null,
+  ingestFolder: null,
+  setIngestState: ({ ingesting, message, folder }) =>
+    set((s) => ({
+      ingesting,
+      ingestMessage: message === undefined ? s.ingestMessage : message,
+      ingestFolder: folder === undefined ? s.ingestFolder : folder,
+    })),
+  ingestToken: 0,
+  cancelIngest: () => set((s) => ({ ingestToken: s.ingestToken + 1 })),
 
   toast: null,
   showToast: (text, kind = "info") =>

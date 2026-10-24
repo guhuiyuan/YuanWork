@@ -51,7 +51,11 @@ async def ingest_directory(
         "progress": 0.0,
         "current_file": None,
         "files_done": 0,
+        # Corrected to the number of *supported* files once the job
+        # starts - the queue count includes files nobody can index.
         "files_total": len(files),
+        "indexed": 0,
+        "errors": 0,
         "created_at": datetime.now().isoformat(),
         "error": None,
     }
@@ -142,11 +146,32 @@ async def _run_ingest_job(app, job_id: str, path, recursive: bool, force: bool) 
 
     try:
         pipeline = IngestionPipeline.from_app(app)
-        await pipeline.ingest_directory(
+
+        # Report the real number of files that will actually be indexed
+        # before the first one is parsed. Counting every file in the
+        # directory would show a denominator that never matches.
+        try:
+            _jobs[job_id]["files_total"] = len(
+                pipeline.supported_files(path, recursive=recursive)
+            )
+        except Exception:  # noqa: BLE001 - the count is a nicety, not a requirement
+            pass
+
+        result = await pipeline.ingest_directory(
             path, recursive=recursive, force=force, on_progress=_on_progress
         )
 
-        _jobs[job_id]["status"] = "completed"
+        indexed = result.get("indexed", 0)
+        errors = result.get("errors", 0)
+        _jobs[job_id]["indexed"] = indexed
+        _jobs[job_id]["errors"] = errors
+
+        if errors and not indexed:
+            # Every file failed to parse - that is not a successful run.
+            _jobs[job_id]["status"] = "failed"
+            _jobs[job_id]["error"] = f"{errors} 个文件都没能解析"
+        else:
+            _jobs[job_id]["status"] = "completed"
         _jobs[job_id]["progress"] = 1.0
         _jobs[job_id]["current_file"] = None
     except Exception as e:

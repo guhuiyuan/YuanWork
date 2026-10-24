@@ -167,3 +167,109 @@ class _FakeParser:
                 meta={},
             )
         ]
+
+
+def test_supported_files_counts_only_what_can_be_indexed(tmp_path: Path):
+    """The progress denominator must not count files nobody can index."""
+    from yuanwork.ingestion.pipeline import IngestionPipeline
+
+    (tmp_path / "a.md").write_text("# a", encoding="utf-8")
+    (tmp_path / "b.md").write_text("# b", encoding="utf-8")
+    (tmp_path / "c.exe").write_text("binary", encoding="utf-8")
+
+    pipeline = IngestionPipeline.__new__(IngestionPipeline)
+    pipeline.dispatcher = _FakeDispatcher(["md"])
+
+    files = pipeline.supported_files(tmp_path)
+
+    assert len(files) == 2
+    assert all(f.suffix == ".md" for f in files)
+
+
+@pytest.mark.asyncio
+async def test_the_job_reports_the_supported_count_up_front(monkeypatch, tmp_path: Path):
+    """files_total is corrected before the first file is parsed."""
+    from yuanwork.api.routes import ingest as ingest_routes
+
+    (tmp_path / "a.md").write_text("# a", encoding="utf-8")
+    (tmp_path / "b.md").write_text("# b", encoding="utf-8")
+    (tmp_path / "c.exe").write_text("binary", encoding="utf-8")
+
+    job_id = "count-job"
+    ingest_routes._jobs[job_id] = {
+        "status": "pending",
+        "progress": 0.0,
+        "current_file": None,
+        "files_done": 0,
+        "files_total": 3,  # the queue count: every file in the directory
+        "indexed": 0,
+        "errors": 0,
+        "created_at": "2026-01-01T00:00:00",
+        "error": None,
+    }
+
+    seen_totals: list[int] = []
+
+    class _FakePipeline:
+        def __init__(self):
+            self.dispatcher = _FakeDispatcher(["md"])
+
+        def supported_files(self, dir_path, recursive=True):
+            return [f for f in sorted(tmp_path.iterdir()) if f.suffix == ".md"]
+
+        async def ingest_directory(self, dir_path, recursive=True, force=False, on_progress=None):
+            seen_totals.append(ingest_routes._jobs[job_id]["files_total"])
+            return {"indexed": 2, "skipped": 0, "errors": 0, "files": []}
+
+    monkeypatch.setattr(
+        "yuanwork.ingestion.pipeline.IngestionPipeline.from_app",
+        classmethod(lambda cls, app: _FakePipeline()),
+    )
+
+    await ingest_routes._run_ingest_job(None, job_id, tmp_path, True, False)
+
+    # The count was already corrected when the pipeline started.
+    assert seen_totals == [2]
+    assert ingest_routes._jobs[job_id]["files_total"] == 2
+    assert ingest_routes._jobs[job_id]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_run_where_every_file_failed_is_not_reported_as_completed(
+    monkeypatch, tmp_path: Path
+):
+    """Files that could not be parsed must not look like a success."""
+    from yuanwork.api.routes import ingest as ingest_routes
+
+    job_id = "fail-job"
+    ingest_routes._jobs[job_id] = {
+        "status": "pending",
+        "progress": 0.0,
+        "current_file": None,
+        "files_done": 0,
+        "files_total": 1,
+        "indexed": 0,
+        "errors": 0,
+        "created_at": "2026-01-01T00:00:00",
+        "error": None,
+    }
+
+    class _FakePipeline:
+        def __init__(self):
+            self.dispatcher = _FakeDispatcher(["md"])
+
+        def supported_files(self, dir_path, recursive=True):
+            return []
+
+        async def ingest_directory(self, dir_path, recursive=True, force=False, on_progress=None):
+            return {"indexed": 0, "skipped": 0, "errors": 3, "files": []}
+
+    monkeypatch.setattr(
+        "yuanwork.ingestion.pipeline.IngestionPipeline.from_app",
+        classmethod(lambda cls, app: _FakePipeline()),
+    )
+
+    await ingest_routes._run_ingest_job(None, job_id, tmp_path, True, False)
+
+    assert ingest_routes._jobs[job_id]["status"] == "failed"
+    assert ingest_routes._jobs[job_id]["error"]

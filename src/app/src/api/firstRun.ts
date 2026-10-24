@@ -29,16 +29,18 @@ export function markOnboarded(): void {
 /**
  * Whether the welcome screen should be shown.
  *
- * Three conditions, all of them needed:
+ * Four conditions, all of them needed:
  * - the file list has actually been fetched (otherwise an empty list
  *   would flash the welcome screen on every launch),
- * - the knowledge base is empty,
+ * - the knowledge base really is empty - a failed fetch is not an empty
+ *   knowledge base, and the welcome screen would be a lie,
  * - and the user has never been through the setup.
  */
 export function shouldShowOnboarding(
   kbLoaded: boolean,
   fileCount: number,
-  onboarded: boolean
+  onboarded: boolean,
+  loadError: string | null = null
 ): boolean {
-  return kbLoaded && fileCount === 0 && !onboarded;
+  return kbLoaded && !loadError && fileCount === 0 && !onboarded;
 }

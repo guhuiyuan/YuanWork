@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useAppStore } from "../store";
 import { listKbFiles, listWikiPages, deleteKbFile } from "../api/backend";
 import { useIngest } from "../hooks/useIngest";
+import { markOnboarded } from "../api/firstRun";
 import { KbFileRow } from "./KbFileRow";
 
 export function Sidebar() {
@@ -10,21 +11,32 @@ export function Sidebar() {
   const kbFiles = useAppStore((s) => s.kbFiles);
   const setKbFiles = useAppStore((s) => s.setKbFiles);
   const setKbLoaded = useAppStore((s) => s.setKbLoaded);
+  const setKbError = useAppStore((s) => s.setKbError);
   const wikiPages = useAppStore((s) => s.wikiPages);
   const setWikiPages = useAppStore((s) => s.setWikiPages);
   const currentFolder = useAppStore((s) => s.currentFolder);
-  const setCurrentFolder = useAppStore((s) => s.setCurrentFolder);
   const showToast = useAppStore((s) => s.showToast);
   const { ingesting, message, folder, pickAndIngest, refreshFiles } = useIngest();
 
   // Load files on mount
   useEffect(() => {
     listKbFiles()
-      .then(setKbFiles)
-      .catch(() => {})
+      .then((files) => {
+        setKbFiles(files);
+        // A knowledge base that already has files means the setup
+        // happened - maybe in an earlier version. Without this, deleting
+        // the last file would pop the welcome screen over the live chat.
+        if (files.length > 0) markOnboarded();
+      })
+      .catch((e) => {
+        // The backend is unreachable. This is NOT an empty knowledge
+        // base, and showing the welcome screen would be a lie.
+        setKbError((e as Error).message);
+        showToast(`无法读取知识库：${(e as Error).message}`, "error");
+      })
       .finally(() => setKbLoaded(true));
     listWikiPages().then(setWikiPages).catch(() => {});
-  }, [setKbFiles, setKbLoaded, setWikiPages]);
+  }, [setKbFiles, setKbError, setKbLoaded, setWikiPages, showToast]);
 
   async function handleDelete(docId: string, fileName: string) {
     try {

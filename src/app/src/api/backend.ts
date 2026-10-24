@@ -240,7 +240,14 @@ export async function pickFolder(): Promise<string | null> {
   if (isTauri) {
     return invoke<string | null>("pick_folder");
   }
-  return null; // Browser fallback - user must enter manually
+  // Browser dev mode has no native folder picker. Returning null here
+  // would make "选择工作目录" a dead end with no feedback at all, so
+  // ask for the path instead.
+  const path = window.prompt(
+    "浏览器开发模式没有原生目录选择器。\n请输入要索引的文件夹完整路径：",
+    "D:\\"
+  );
+  return path && path.trim() ? path.trim() : null;
 }
 
 export interface IngestJob {
@@ -284,9 +291,22 @@ export async function getIngestStatus(jobId: string): Promise<IngestStatus> {
   if (isTauri) {
     return invoke<IngestStatus>("get_ingest_status", { jobId });
   }
-  return callBackend<IngestStatus>(
-    `/ingest/status/${encodeURIComponent(jobId)}`
-  );
+  // Browser mode: the poll runs in a loop, so a hung request must not
+  // be able to block it forever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const resp = await fetch(
+      `${BACKEND_BASE}/api/v1/ingest/status/${encodeURIComponent(jobId)}`,
+      { signal: controller.signal }
+    );
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+    }
+    return (await resp.json()) as IngestStatus;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function listKbFiles(): Promise<KbFile[]> {

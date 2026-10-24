@@ -14,6 +14,7 @@ export function App() {
   const view = useAppStore((s) => s.view);
   const kbFiles = useAppStore((s) => s.kbFiles);
   const kbLoaded = useAppStore((s) => s.kbLoaded);
+  const kbError = useAppStore((s) => s.kbError);
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
 
@@ -23,7 +24,8 @@ export function App() {
   const needsSetup = shouldShowOnboarding(
     kbLoaded,
     kbFiles.length,
-    hasOnboarded()
+    hasOnboarded(),
+    kbError
   );
 
   // Auto-dismiss the toast.

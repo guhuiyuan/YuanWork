@@ -150,14 +150,7 @@ class IngestionPipeline:
         if not dir_path.exists() or not dir_path.is_dir():
             return {"status": "error", "error": "Directory not found"}
 
-        supported = self.dispatcher.supported_extensions()
-        files = []
-        if recursive:
-            files = [f for f in dir_path.rglob("*") if f.is_file()]
-        else:
-            files = [f for f in dir_path.glob("*") if f.is_file()]
-
-        files = [f for f in files if f.suffix.lower().lstrip(".") in supported]
+        files = self.supported_files(dir_path, recursive)
 
         results = {"indexed": 0, "skipped": 0, "errors": 0, "files": []}
         total = len(files)
@@ -180,6 +173,21 @@ class IngestionPipeline:
                     logger.exception("Ingest progress callback failed")
 
         return results
+
+    def supported_files(self, dir_path: Path, recursive: bool = True) -> list[Path]:
+        """The files in a directory that this pipeline would actually index.
+
+        Exposed so callers can report the real total up front instead of
+        guessing from every file in the directory - the count of
+        unsupported files would otherwise make the progress bar lie.
+        """
+        dir_path = Path(dir_path)
+        supported = self.dispatcher.supported_extensions()
+        if recursive:
+            files = [f for f in dir_path.rglob("*") if f.is_file()]
+        else:
+            files = [f for f in dir_path.glob("*") if f.is_file()]
+        return [f for f in files if f.suffix.lower().lstrip(".") in supported]
 
     def _hash_file(self, file_path: Path) -> str:
         """Compute SHA256 hash of file contents."""

@@ -225,7 +225,12 @@ pub async fn get_ingest_status(
     job_id: String,
     backend: State<'_, BackendHandle>,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    // A timeout here matters: the frontend polls this in a loop, and a
+    // hung request would block the loop forever.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let url = format!(
         "{}/api/v1/ingest/status/{}",
         backend.url(),
@@ -258,7 +263,14 @@ pub async fn list_kb_files(
     let url = format!("{}/api/v1/kb/files", backend.url());
 
     let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    // Without checking the status a backend error would come back as an
+    // empty list - which the UI would read as "the knowledge base is
+    // empty" rather than "something went wrong".
+    let status = response.status();
     let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body}"));
+    }
     let files = body["files"].as_array().cloned().unwrap_or_default();
 
     let parsed: Vec<KbFile> = files

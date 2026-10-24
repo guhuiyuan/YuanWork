@@ -29,3 +29,9 @@ test("an empty knowledge base after setup means no welcome screen", () => {
   // The user removed every file on purpose - do not drag them back.
   assert.equal(shouldShowOnboarding(true, 0, true), false);
 });
+
+test("a failed fetch is not an empty knowledge base", () => {
+  // The backend is down. Showing the welcome screen would claim the
+  // knowledge base is empty when it is merely unreachable.
+  assert.equal(shouldShowOnboarding(true, 0, false, "HTTP 500"), false);
+});
