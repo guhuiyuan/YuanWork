@@ -18,7 +18,6 @@ export function Onboarding() {
   async function handlePick() {
     const ok = await pickAndIngest();
     if (ok) {
-      markOnboarded();
       setView("chat");
     }
   }

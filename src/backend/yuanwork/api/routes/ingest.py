@@ -127,12 +127,28 @@ async def _run_ingest_job(app, job_id: str, path, recursive: bool, force: bool) 
     from yuanwork.ingestion.pipeline import IngestionPipeline
 
     _jobs[job_id]["status"] = "running"
+
+    def _on_progress(done: int, total: int, current: str) -> None:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job["files_done"] = done
+        # The queue counted every file in the directory, but the pipeline
+        # only processes the supported ones - so the real total is
+        # reported here.
+        job["files_total"] = total
+        job["current_file"] = current
+        job["progress"] = (done / total) if total else 1.0
+
     try:
         pipeline = IngestionPipeline.from_app(app)
-        await pipeline.ingest_directory(path, recursive=recursive, force=force)
+        await pipeline.ingest_directory(
+            path, recursive=recursive, force=force, on_progress=_on_progress
+        )
 
         _jobs[job_id]["status"] = "completed"
         _jobs[job_id]["progress"] = 1.0
+        _jobs[job_id]["current_file"] = None
     except Exception as e:
         logger.exception(f"Ingest job {job_id} failed")
         _jobs[job_id]["status"] = "failed"
@@ -150,6 +166,7 @@ async def _run_ingest_file_job(app, job_id: str, path) -> None:
 
         _jobs[job_id]["status"] = "completed"
         _jobs[job_id]["progress"] = 1.0
+        _jobs[job_id]["files_done"] = 1
     except Exception as e:
         logger.exception(f"Ingest job {job_id} failed")
         _jobs[job_id]["status"] = "failed"

@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   轮询 job 状态直到 completed，再刷新列表，并显示「正在索引…（3/12）」
 - **`delete_kb_file` 不看 HTTP 状态** — 后端返回 404 时 Rust 侧照样返回
   Ok，文件却还留在列表里，看着像删除失败。现在非 2xx 直接报错
+- **索引进度一直是「（0/12）」** — 后端从来没更新过 `files_done`，进度条看着像坏了。
+  - `IngestionPipeline.ingest_directory()` 新增可选的 `on_progress(done, total, path)`
+    回调，每处理完一个文件调一次；路由把它接到 job 状态上
+  - 顺带修了 `files_total`：入队时数的是目录里**所有**文件，pipeline 只处理受
+    支持的类型，所以总数经常对不上；现在用 pipeline 报的真实数量
 - **`ingest_directory` 不看 HTTP 状态** — 路径不存在时后端返回 404，前端
   拿到的却是「成功」的响应体
 - **Rust 侧 UTF-8 字符被切坏**（`src-tauri/src/sse.rs`） — `reqwest` 的 chunk 边界可能落在多字节字符中间，之前的实现逐 chunk `from_utf8`，切到中间的汉字会变成 U+FFFD

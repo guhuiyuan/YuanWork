@@ -6,6 +6,7 @@ import {
   listKbFiles,
   pickFolder,
 } from "../api/backend";
+import { markOnboarded } from "../api/firstRun";
 
 /** How long to wait between status polls. */
 const POLL_INTERVAL_MS = 700;
@@ -59,6 +60,10 @@ export function useIngest() {
     setState({ ingesting: true, message: "正在准备…", folder });
     try {
       const job = await ingestDirectory(folder, true);
+      // The user has made the setup decision - whichever button they
+      // pressed to get here. The welcome screen must not come back on
+      // the next launch.
+      markOnboarded();
       const total = job.files_queued ?? 0;
       setState({
         ingesting: true,

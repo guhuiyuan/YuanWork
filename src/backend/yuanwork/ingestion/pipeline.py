@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from yuanwork.ingestion.chunker.structural_chunker import StructuralChunker
 from yuanwork.ingestion.parser.dispatcher import ParserDispatcher
@@ -138,8 +138,14 @@ class IngestionPipeline:
         dir_path: Path,
         recursive: bool = True,
         force: bool = False,
+        on_progress: Callable[[int, int, str], None] | None = None,
     ) -> dict:
-        """Ingest all supported files in a directory."""
+        """Ingest all supported files in a directory.
+
+        `on_progress(done, total, current_path)` is called after every
+        file, so a caller can show live progress instead of a spinner
+        that never moves.
+        """
         dir_path = Path(dir_path)
         if not dir_path.exists() or not dir_path.is_dir():
             return {"status": "error", "error": "Directory not found"}
@@ -154,8 +160,9 @@ class IngestionPipeline:
         files = [f for f in files if f.suffix.lower().lstrip(".") in supported]
 
         results = {"indexed": 0, "skipped": 0, "errors": 0, "files": []}
+        total = len(files)
 
-        for file_path in files:
+        for done, file_path in enumerate(files, start=1):
             result = await self.ingest_file(file_path, force=force)
             results["files"].append({"path": str(file_path), **result})
 
@@ -165,6 +172,12 @@ class IngestionPipeline:
                 results["skipped"] += 1
             else:
                 results["errors"] += 1
+
+            if on_progress is not None:
+                try:
+                    on_progress(done, total, str(file_path))
+                except Exception:  # noqa: BLE001 - progress must never break the ingest
+                    logger.exception("Ingest progress callback failed")
 
         return results
 
