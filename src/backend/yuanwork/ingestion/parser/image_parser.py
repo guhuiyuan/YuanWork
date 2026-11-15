@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from yuanwork.ingestion.parser.base import BaseParser, RawBlock
+from yuanwork.utils.anchor import make_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,9 @@ class ImageParser(BaseParser):
             ]
 
         detections, _timing = result
+        # An image without a single recognisable line comes back with
+        # nothing at all - not with an empty list. It is not an error.
+        detections = detections or []
         lines: list[str] = []
         boxes: list[dict[str, Any]] = []
         for det in detections:
@@ -172,6 +176,9 @@ class ImageParser(BaseParser):
                         "confidence": box["confidence"],
                         "box": box["box"],
                         "file_name": file_path.name,
+                        # An image has no pages, but it has lines: the OCR
+                        # line is the position inside the picture.
+                        "anchor": make_anchor("page", page=1, line=i + 1),
                     },
                 )
             )

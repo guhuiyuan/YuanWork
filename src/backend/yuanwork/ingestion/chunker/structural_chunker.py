@@ -78,9 +78,45 @@ class StructuralChunker:
                     if last_sep > start + self.MAX_CHARS // 2:
                         end = last_sep + len(sep)
                         break
-            chunks.append(text[start:end].strip())
+            piece = text[start:end].strip()
+            if piece:
+                chunks.append(piece)
             if end >= len(text):
                 break
             start = end - self.OVERLAP_CHARS
 
-        return [c for c in chunks if len(c) >= self.MIN_CHARS]
+        return self._merge_short_chunks(chunks)
+
+    def _merge_short_chunks(self, chunks: list[str]) -> list[str]:
+        """Fold a chunk that is too short into its neighbour.
+
+        Dropping it would lose content: the tail of a document is often
+        a short sentence, and a citation has to be able to point at it.
+        A short chunk is therefore merged into the chunk before it, or -
+        when that one is full - into the chunk after it.
+        """
+        merged: list[str] = []
+
+        for chunk in chunks:
+            if not merged:
+                merged.append(chunk)
+                continue
+
+            previous = merged[-1]
+
+            if len(chunk) < self.MIN_CHARS:
+                if len(previous) + 1 + len(chunk) <= self.MAX_CHARS:
+                    merged[-1] = f"{previous} {chunk}"
+                    continue
+                # The previous chunk is full: keep this one on its own and
+                # let the next chunk fold into it.
+                merged.append(chunk)
+                continue
+
+            if len(previous) < self.MIN_CHARS and len(previous) + 1 + len(chunk) <= self.MAX_CHARS:
+                merged[-1] = f"{previous} {chunk}"
+                continue
+
+            merged.append(chunk)
+
+        return merged

@@ -40,6 +40,9 @@ class WikiGraph:
                 "type": "page",
                 "category": page["category"],
                 "weight": page.get("version", 1),
+                # The key points are what the page says - the graph
+                # view shows them without opening the page.
+                "key_points": page.get("key_points", []),
             })
 
         # Get all wiki links (page-to-page)

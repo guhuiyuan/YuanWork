@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment
 from yuanwork.llm.gateway import LLMGateway, LLMMessage, LLMTask
-from yuanwork.utils.chunk_meta import chunk_meta
+from yuanwork.utils.chunk_meta import chunk_location, chunk_meta
+from yuanwork.wiki.linker import WikiLinker
 
 if TYPE_CHECKING:
     from yuanwork.db.sqlite import SQLiteStore
@@ -22,24 +23,193 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def slugify(text: str) -> str:
+    """A URL-safe identifier for a title.
+
+    The automatic trigger and the manual compile have to agree on it -
+    otherwise a manual compile writes a second page instead of updating
+    the one that is there.
+    """
+    slug = re.sub(r"[^\w\s-]", "", text.lower())
+    slug = re.sub(r"[-\s]+", "-", slug).strip("-")
+    return slug[:64] or "untitled"
+
+
+def split_paragraphs(markdown: str) -> list[str]:
+    """The blocks of a page.
+
+    A heading and the text under it belong together - the user edits
+    the text, not the heading above it. Text without a heading is cut
+    into paragraphs.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    has_heading = False
+
+    for line in (markdown or "").splitlines():
+        if _is_heading(line):
+            if current and "\n".join(current).strip():
+                blocks.append("\n".join(current).strip())
+            current = [line]
+            has_heading = True
+            continue
+        if not current:
+            current = [line]
+            continue
+        if not line.strip() and not has_heading:
+            # A break between two paragraphs of plain text.
+            blocks.append("\n".join(current).strip())
+            current = []
+            has_heading = False
+            continue
+        current.append(line)
+
+    if current and "\n".join(current).strip():
+        blocks.append("\n".join(current).strip())
+    return [block for block in blocks if block]
+
+
+def _is_heading(line: str) -> bool:
+    """Whether a line is a markdown heading."""
+    return bool(re.match(r"^#{1,6}\s+\S", line))
+
+
+def render_blocks(blocks: list[dict[str, Any]]) -> str:
+    """The text of a page, from its blocks."""
+    return "\n\n".join(block.get("text", "") for block in blocks)
+
+
+def merge_blocks(
+    existing: list[dict[str, Any]], new_texts: list[str]
+) -> list[dict[str, Any]]:
+    """The blocks of a page after a recompile (ADR-037).
+
+    The user's own paragraphs stay where they are; the model's
+    paragraphs are the new ones. A page the user never touched is
+    simply the new compilation.
+    """
+    if not any(block.get("owner") == "user" for block in existing):
+        return [{"text": text, "owner": "model"} for text in new_texts]
+
+    merged: list[dict[str, Any]] = []
+    for index, block in enumerate(existing):
+        if block.get("owner") == "user":
+            # The user's paragraph is theirs - it stays, and the
+            # model's new text for that place is dropped.
+            merged.append(
+                {
+                    "id": block.get("id"),
+                    "text": block.get("text", ""),
+                    "owner": "user",
+                    "conclusion_id": block.get("conclusion_id"),
+                }
+            )
+        elif index < len(new_texts):
+            merged.append({"text": new_texts[index], "owner": "model"})
+    # Whatever the new compilation has beyond the old page goes to the
+    # end - a section the old page did not have.
+    for text in new_texts[len(existing):]:
+        merged.append({"text": text, "owner": "model"})
+    return merged
+
+
+def extract_summary(markdown: str) -> str:
+    """The summary of a page - the 摘要 section, or the first lines."""
+    match = re.search(
+        r"##\s*摘要\s*\n+(.*?)(?=\n##|\Z)",
+        markdown,
+        re.DOTALL,
+    )
+    if match:
+        summary = match.group(1).strip()
+        return summary[:300]
+    # Fallback: first 200 chars after title
+    lines = markdown.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("# "):
+            return " ".join(lines[i + 1 : i + 5])[:200]
+    return markdown[:200]
+
+
+def extract_key_points(markdown: str) -> list[str]:
+    """The key points of a page.
+
+    They are the bullets of the 要点 section. A model that wrote them
+    somewhere else still has them - the first bullets of the page are
+    its points.
+    """
+    points = _bullets_of_section(markdown, ("要点", "关键要点", "核心要点"))
+    if not points:
+        points = _bullets(markdown)
+    return [point for point in points if point][:10]
+
+
+def extract_tags(markdown: str) -> list[str]:
+    """The tags of a page - the 标签 line in its header."""
+    match = re.search(r"标签[：:]\s*([^\n]+)", markdown)
+    if match:
+        tags_str = match.group(1)
+        tags = [t.strip() for t in re.split(r"[,，、]", tags_str) if t.strip()]
+        return tags[:10]
+    return []
+
+
+def _bullets_of_section(markdown: str, names: tuple[str, ...]) -> list[str]:
+    """The bullets of the first section that is there."""
+    for name in names:
+        match = re.search(
+            r"##\s*" + re.escape(name) + r"\s*\n+(.*?)(?=\n##|\Z)",
+            markdown,
+            re.DOTALL,
+        )
+        if not match:
+            continue
+        bullets = _bullets(match.group(1))
+        if bullets:
+            return bullets
+        # The section is there but its points are not bullets - take
+        # its lines instead.
+        lines = [
+            line.strip()
+            for line in match.group(1).splitlines()
+            if line.strip() and not line.strip().startswith(("#", ">", "-", "*"))
+        ]
+        if lines:
+            return lines
+    return []
+
+
+def _bullets(text: str) -> list[str]:
+    """The list items of a text."""
+    points: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(("- ", "* ", "+ ")):
+            points.append(line[2:].strip())
+        elif re.match(r"^\d+[.)]\s", line):
+            points.append(re.sub(r"^\d+[.)]\s*", "", line).strip())
+    return points
+
+
 WIKI_PAGE_PROMPT = """\
 你是一个 Wiki 页面生成助手。把以下相关的文档片段编译成结构化的 Wiki 页面。
 
 ## 要求
 
-1. **结构化**：使用 Markdown 标题（##、###）组织内容
-2. **保留来源**：每个事实后用 [[来源:文件名 页码/slide]] 标注
+1. **四个部分**：标题、摘要、要点、出处 —— 一个不少，顺序照下面的格式
+2. **保留来源**：每条要点后用 [[来源:文件名 页码/slide]] 标注
 3. **生成摘要**：200 字以内的概述（用于列表展示）
 4. **提取分类**：从 [project|concept|person|contract|law|general] 中选一个
 5. **生成标签**：3-5 个关键词标签
-6. **双向链接**：在文末列出"相关页面/概念"（如 [[概念名]]）
+6. **要点是列表**：每条一行，以 "- " 开头，一条一个事实
 
 ## 输出格式（Markdown）
 
 ```markdown
 # {{标题}}
 
-> 来源：{{doc1, doc2, ...}}（共 N 个片段）
 > 分类：{{category}}
 > 标签：{{tag1, tag2, tag3}}
 > 最后更新：{{date_placeholder}}
@@ -47,17 +217,10 @@ WIKI_PAGE_PROMPT = """\
 ## 摘要
 {{200 字以内}}
 
-## 核心内容
-
-### {{子章节 1}}
-{{内容}} [[来源:文件名 页码/slide]]
-
-### {{子章节 2}}
-{{内容}} [[来源:文件名 页码/slide]]
-
-## 相关页面/概念
-- [[概念名 1]]
-- [[概念名 2]]
+## 要点
+- {{要点 1}} [[来源:文件名 页码/slide]]
+- {{要点 2}} [[来源:文件名 页码/slide]]
+- {{要点 3}} [[来源:文件名 页码/slide]]
 
 ## 出处
 [1] 《文件 1》第 N 页
@@ -82,6 +245,7 @@ class WikiPageGenerator:
     ):
         self.sqlite = sqlite_store
         self.llm = llm_gateway
+        self.linker = WikiLinker(sqlite_store)
 
     async def compile_page(
         self,
@@ -122,8 +286,16 @@ class WikiPageGenerator:
             "{date_placeholder}", datetime.now().strftime("%Y-%m-%d")
         )
 
-        # Extract summary, tags from generated markdown
+        # The page is made of blocks, one paragraph each. A recompile
+        # replaces the model's blocks and leaves the user's own alone
+        # (AC-F-027).
+        blocks = await self._merge_blocks(page_id, split_paragraphs(markdown))
+        markdown = render_blocks(blocks)
+
+        # Extract the four parts of the page from the page as it now
+        # stands - the user may have changed it.
         summary = self._extract_summary(markdown)
+        key_points = self._extract_key_points(markdown)
         tags = self._extract_tags_from_md(markdown)
 
         # Get source doc IDs
@@ -131,27 +303,30 @@ class WikiPageGenerator:
         source_chunk_ids = [c.get("id", "") for c in chunks if c.get("id")]
 
         # Save to SQLite
+        await self.sqlite.replace_page_blocks(page_id, blocks)
         await self.sqlite.upsert_wiki_page(
             page_id=page_id,
             title=title,
             markdown=markdown,
             summary=summary,
+            key_points=key_points,
             source_chunk_ids=source_chunk_ids,
             source_doc_ids=source_doc_ids,
             category=category,
             tags=tags,
+            user_edited=any(b.get("owner") == "user" for b in blocks),
         )
 
-        # Establish bidirectional links: page → chunks (derived_from)
+        # Establish the links (AC-F-014): the page points at the
+        # documents it was compiled from, at the slices it was compiled
+        # from, and at the pages it mentions.
         for chunk_id in source_chunk_ids:
             if chunk_id:
-                await self.sqlite.add_wiki_link(
-                    source_id=page_id,
-                    source_type="page",
-                    target_id=chunk_id,
-                    target_type="chunk",
-                    link_type="derived_from",
-                )
+                await self.linker.link_page_to_chunk(page_id, chunk_id)
+        for doc_id in source_doc_ids:
+            if doc_id:
+                await self.linker.link_page_to_doc(page_id, doc_id)
+        await self.linker.auto_link_page(page_id, markdown)
 
         logger.info(f"Compiled Wiki page: {page_id} ({len(chunks)} chunks)")
 
@@ -160,11 +335,24 @@ class WikiPageGenerator:
             "title": title,
             "markdown": markdown,
             "summary": summary,
+            "key_points": key_points,
             "category": category,
             "tags": tags,
             "source_doc_ids": source_doc_ids,
             "source_chunk_ids": source_chunk_ids,
         }
+
+    async def _merge_blocks(
+        self, page_id: str, new_blocks: list[str]
+    ) -> list[dict[str, Any]]:
+        """The blocks of the page after a recompile.
+
+        The user's own paragraphs stay where they are; the model's
+        paragraphs are the new ones (AC-F-027). A page the user never
+        touched is simply the new compilation.
+        """
+        existing = await self.sqlite.list_page_blocks(page_id)
+        return merge_blocks(existing, new_blocks)
 
     async def _generate_with_llm(self, title: str, chunks_text: str) -> str:
         """Generate Markdown using LLM."""
@@ -199,7 +387,11 @@ class WikiPageGenerator:
     def _fallback_compile(
         self, title: str, chunks: list[dict[str, Any]]
     ) -> str:
-        """Simple fallback compilation without LLM."""
+        """Simple fallback compilation without LLM.
+
+        The page still has the four parts - a page without key points
+        is not a page the reader can use.
+        """
         lines = [
             f"# {title}",
             "",
@@ -209,21 +401,24 @@ class WikiPageGenerator:
             "## 摘要",
             f"本页基于 {len(chunks)} 个文档片段自动汇编。",
             "",
-            "## 核心内容",
+            "## 要点",
             "",
         ]
-        for i, chunk in enumerate(chunks, 1):
-            meta = chunk_meta(chunk)
-            location = ""
-            if meta.get("slide_number"):
-                location = f"（Slide {meta['slide_number']}）"
-            elif meta.get("page"):
-                location = f"（第 {meta['page']} 页）"
+        for chunk in chunks:
+            where = chunk_location(chunk)
+            text = chunk.get("text", "")[:200].strip()
+            marker = (
+                f" [[来源:{chunk.get('file_name', 'unknown')} {where}]]"
+                if where
+                else ""
+            )
+            lines.append(f"- {text}{marker}".rstrip())
 
-            text = chunk.get("text", "")[:500]
-            lines.append(f"### {chunk.get('file_name', 'unknown')} {location}")
-            lines.append(text)
-            lines.append("")
+        lines += ["", "## 出处", ""]
+        for i, chunk in enumerate(chunks, 1):
+            where = chunk_location(chunk)
+            location = f" {where}" if where else ""
+            lines.append(f"[{i}] 《{chunk.get('file_name', 'unknown')}》{location}")
 
         return "\n".join(lines)
 
@@ -231,12 +426,8 @@ class WikiPageGenerator:
         """Format chunks for LLM prompt."""
         lines = []
         for i, chunk in enumerate(chunks, 1):
-            meta = chunk_meta(chunk)
-            location = ""
-            if meta.get("slide_number"):
-                location = f" (Slide {meta['slide_number']})"
-            elif meta.get("page"):
-                location = f" (第 {meta['page']} 页)"
+            where = chunk_location(chunk)
+            location = f" ({where})" if where else ""
 
             lines.append(f"--- 片段 {i} ---")
             lines.append(f"来源：《{chunk.get('file_name', 'unknown')}》{location}")
@@ -247,34 +438,16 @@ class WikiPageGenerator:
 
     def _extract_summary(self, markdown: str) -> str:
         """Extract the summary section from generated markdown."""
-        match = re.search(
-            r"##\s*摘要\s*\n+(.*?)(?=\n##|\Z)",
-            markdown,
-            re.DOTALL,
-        )
-        if match:
-            summary = match.group(1).strip()
-            return summary[:300]
-        # Fallback: first 200 chars after title
-        lines = markdown.split("\n")
-        for i, line in enumerate(lines):
-            if line.startswith("# "):
-                return " ".join(lines[i + 1 : i + 5])[:200]
-        return markdown[:200]
+        return extract_summary(markdown)
+
+    def _extract_key_points(self, markdown: str) -> list[str]:
+        """The key points of the page."""
+        return extract_key_points(markdown)
 
     def _extract_tags_from_md(self, markdown: str) -> list[str]:
         """Extract tags from the markdown frontmatter-like header."""
-        # Look for "标签：tag1, tag2, tag3" pattern
-        match = re.search(r"标签[：:]\s*([^\n]+)", markdown)
-        if match:
-            tags_str = match.group(1)
-            tags = [t.strip() for t in re.split(r"[,，、]", tags_str) if t.strip()]
-            return tags[:10]
-        return []
+        return extract_tags(markdown)
 
     def _slugify(self, text: str) -> str:
         """Generate a URL-safe slug from text."""
-        # Simple Chinese-aware slugifier
-        slug = re.sub(r"[^\w\s-]", "", text.lower())
-        slug = re.sub(r"[-\s]+", "-", slug).strip("-")
-        return slug[:64] or "untitled"
+        return slugify(text)

@@ -10,11 +10,24 @@ from typing import AsyncIterator
 from fastapi import APIRouter, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
+from yuanwork.api.errors import classify_exception, error_payload
 from yuanwork.api.schemas import ChatRequest, ChatResponse, ErrorResponse
+from yuanwork.privacy.redactor import Redactor
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _build_redactor(request: Request) -> Redactor:
+    """The redactor for this request, built from the settings.
+
+    Masking happens on the way *to* the model: the user still reads their
+    own phone number in the citation, but the model never sees it.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    enabled = bool(getattr(settings, "enable_redaction", True))
+    return Redactor(enabled=enabled)
 
 
 @router.post("/chat/stream")
@@ -36,18 +49,23 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
         try:
             from yuanwork.orchestrator.agent import AgentLoop
             from yuanwork.api.deps import (
-                get_consolidation_engine,
-                get_episodic_memory,
                 get_llm_gateway,
                 get_semantic_memory,
-                get_wiki_compile_trigger,
+                optional_sqlite_store,
+                optional_consolidation_engine,
+                optional_episodic_memory,
+                optional_episodic_recorder,
+                optional_wiki_compile_trigger,
             )
 
             semantic = get_semantic_memory()
-            episodic = get_episodic_memory()
+            # The memory engineering layer can be switched off - a chat
+            # that does not use it still works.
+            episodic = optional_episodic_memory()
             llm = get_llm_gateway()
-            consolidation = get_consolidation_engine()
-            wiki_trigger = get_wiki_compile_trigger()
+            consolidation = optional_consolidation_engine()
+            wiki_trigger = optional_wiki_compile_trigger()
+            recorder = optional_episodic_recorder()
 
             agent = AgentLoop(
                 llm_gateway=llm,
@@ -55,6 +73,10 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
                 episodic_memory=episodic,
                 consolidation_engine=consolidation,
                 wiki_compile_trigger=wiki_trigger,
+                redactor=_build_redactor(request),
+                episodic_recorder=recorder,
+                # The core layer is searched first (ADR-034).
+                sqlite_store=optional_sqlite_store(),
             )
 
             async for event in agent.stream(
@@ -70,10 +92,17 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
 
         except Exception as e:
             logger.exception(f"Chat stream failed: {e}")
+            # The user gets a readable message; the exception text stays
+            # in the log.
+            payload = error_payload(classify_exception(e))
             yield {
                 "event": "error",
                 "data": json.dumps(
-                    ErrorResponse(error="Stream failed", detail=str(e)).model_dump(),
+                    ErrorResponse(
+                        error=payload["error"],
+                        detail=payload["error"],
+                        code=payload["code"],
+                    ).model_dump(),
                 ),
             }
             # Always close the stream with a terminal event, so a client can
@@ -102,18 +131,23 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
     try:
         from yuanwork.orchestrator.agent import AgentLoop
         from yuanwork.api.deps import (
-            get_consolidation_engine,
-            get_episodic_memory,
             get_llm_gateway,
             get_semantic_memory,
-            get_wiki_compile_trigger,
+            optional_sqlite_store,
+            optional_consolidation_engine,
+            optional_episodic_memory,
+            optional_episodic_recorder,
+            optional_wiki_compile_trigger,
         )
 
         semantic = get_semantic_memory()
-        episodic = get_episodic_memory()
+        # The memory engineering layer can be switched off - a chat that
+        # does not use it still works.
+        episodic = optional_episodic_memory()
         llm = get_llm_gateway()
-        consolidation = get_consolidation_engine()
-        wiki_trigger = get_wiki_compile_trigger()
+        consolidation = optional_consolidation_engine()
+        wiki_trigger = optional_wiki_compile_trigger()
+        recorder = optional_episodic_recorder()
 
         agent = AgentLoop(
             llm_gateway=llm,
@@ -121,6 +155,10 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             episodic_memory=episodic,
             consolidation_engine=consolidation,
             wiki_compile_trigger=wiki_trigger,
+            redactor=_build_redactor(request),
+            episodic_recorder=recorder,
+            # The core layer is searched first (ADR-034).
+            sqlite_store=optional_sqlite_store(),
         )
 
         result = await agent.run(
@@ -139,16 +177,35 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             refusal_reason=result.get("refusal_reason"),
             conflicts=result.get("conflicts", []),
             wiki_compile=result.get("wiki_compile"),
+            terms=result.get("terms", []),
             trace=result.get("trace", []),
         )
 
     except Exception as e:
         logger.exception(f"Chat failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # The exception text stays in the log; the client gets a code and
+        # a message it can show.
+        raise HTTPException(
+            status_code=500,
+            detail=error_payload(classify_exception(e)),
+        ) from e
 
 
 @router.post("/chat/cancel/{session_id}")
 async def cancel_chat(session_id: str, request: Request) -> dict:
-    """Cancel an ongoing chat generation."""
-    # TODO: implement cancellation registry
-    return {"cancelled": session_id, "note": "Cancellation not yet implemented"}
+    """Cancel an ongoing chat generation.
+
+    The run stops between the steps and between the tokens, so the
+    backend stops pulling from the model. What was already generated
+    stays - the user asked to stop, not to throw the answer away.
+    """
+    from yuanwork.orchestrator import cancel
+
+    stopped = cancel.cancel(session_id)
+    return {
+        "cancelled": stopped,
+        "session_id": session_id,
+        "note": (
+            "已停止生成" if stopped else "这个会话没有正在进行的生成"
+        ),
+    }

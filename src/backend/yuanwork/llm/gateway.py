@@ -27,6 +27,7 @@ import litellm
 import yaml
 
 from yuanwork.config import NetworkMode, YuanWorkSettings
+from yuanwork.privacy.audit import classify_error
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ class LLMTask:
         "extract",        # Information extraction
         "answer",         # Final answer generation
         "conflict_check", # Conflict detection
+        "evidence_gate",  # Is the evidence enough to answer?
         "reflection",     # Memory reflection
         "wiki_compile",   # Wiki page compilation
         "ner",            # Named entity recognition
@@ -300,15 +302,14 @@ class LLMGateway:
                 )
                 kwargs["model"] = "ollama/llama3.1:8b"
 
-        # Audit-logging state
+        # Audit-logging state. The log keeps the hash and the length of
+        # the prompt - never its text.
         start = time.monotonic()
         qhash = _query_hash(task.messages)
-        prompt_summary = "\n".join(
-            f"[{m.role}] {m.content[:200]}" for m in task.messages
-        )[:200]
+        prompt_length = sum(len(m.content) for m in task.messages)
         response_content: str | None = None
         usage: dict[str, int] = {}
-        error: str | None = None
+        error: BaseException | None = None
         try:
             response = await asyncio.to_thread(litellm.completion, **kwargs)
             content = response.choices[0].message.content
@@ -327,7 +328,7 @@ class LLMGateway:
             )
         except Exception as e:
             logger.exception(f"LLM call failed for model {alias}: {e}")
-            error = repr(e)
+            error = e
             raise
         finally:
             if self.audit_logger is not None:
@@ -336,13 +337,13 @@ class LLMGateway:
                     self.audit_logger.log_llm_call(
                         model=alias,
                         task_type=task.task_type,
-                        prompt_summary=f"#{qhash} {prompt_summary}",
-                        response_summary=(response_content or "")[:200],
+                        prompt_hash=qhash,
+                        prompt_length=prompt_length,
                         prompt_tokens=usage.get("prompt_tokens", 0),
                         completion_tokens=usage.get("completion_tokens", 0),
                         duration_ms=duration_ms,
                         success=error is None,
-                        error=error,
+                        error_kind=classify_error(error),
                     )
                 except Exception:
                     logger.exception("Audit log write failed (non-fatal)")
@@ -385,12 +386,11 @@ class LLMGateway:
             if not model_str.startswith("ollama/") and not model_str.startswith("local/"):
                 kwargs["model"] = "ollama/llama3.1:8b"
 
-        # Audit-logging state
+        # Audit-logging state. The log keeps the hash and the length of
+        # the prompt - never its text.
         start = time.monotonic()
         qhash = _query_hash(task.messages)
-        prompt_summary = "\n".join(
-            f"[{m.role}] {m.content[:200]}" for m in task.messages
-        )[:200]
+        prompt_length = sum(len(m.content) for m in task.messages)
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -491,13 +491,13 @@ class LLMGateway:
                         self.audit_logger.log_llm_call(
                             model=alias,
                             task_type=task.task_type,
-                            prompt_summary=f"#{qhash} {prompt_summary}",
-                            response_summary="".join(produced)[:200],
+                            prompt_hash=qhash,
+                            prompt_length=prompt_length,
                             prompt_tokens=usage["prompt_tokens"],
                             completion_tokens=usage["completion_tokens"],
                             duration_ms=duration_ms,
                             success=failure is None,
-                            error=repr(failure) if failure is not None else None,
+                            error_kind=classify_error(failure),
                         )
                     except Exception:
                         logger.exception("Audit log write failed (non-fatal)")

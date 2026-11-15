@@ -26,8 +26,8 @@ def test_audit_logger_writes_jsonl(audit_log_path: Path):
     al.log_llm_call(
         model="gpt-4o",
         task_type="answer",
-        prompt_summary="What is 2+2?",
-        response_summary="4",
+        prompt_hash="abc1234567890123",
+        prompt_length=11,
         prompt_tokens=10,
         completion_tokens=1,
         duration_ms=420.0,
@@ -52,11 +52,12 @@ def test_audit_logger_truncates_long_summaries(audit_log_path: Path):
     long = "x" * 1000
     al.log_llm_call(
         model="m", task_type="general",
-        prompt_summary=long, response_summary=long,
+        prompt_hash="abc1234567890123", prompt_length=len(long),
     )
     entry = al.read_all()[0]
-    assert len(entry["prompt_summary"]) == 200
-    assert len(entry["response_summary"]) == 200
+    # the length is kept, the text is not
+    assert entry["prompt_length"] == len(long)
+    assert long not in json.dumps(entry, ensure_ascii=False)
 
 
 def test_audit_logger_records_failure(audit_log_path: Path):
@@ -66,12 +67,12 @@ def test_audit_logger_records_failure(audit_log_path: Path):
     al = AuditLogger(audit_log_path)
     al.log_llm_call(
         model="gpt-4o", task_type="answer",
-        prompt_summary="x", response_summary="",
-        success=False, error="rate limit exceeded",
+        prompt_hash="abc1234567890123",
+        success=False, error_kind="rate_limit",
     )
     entry = al.read_all()[0]
     assert entry["success"] is False
-    assert entry["error"] == "rate limit exceeded"
+    assert entry["error_kind"] == "rate_limit"
 
 
 def test_audit_logger_clear(audit_log_path: Path):
@@ -79,7 +80,7 @@ def test_audit_logger_clear(audit_log_path: Path):
     from yuanwork.privacy.audit import AuditLogger
 
     al = AuditLogger(audit_log_path)
-    al.log_llm_call(model="m", task_type="general", prompt_summary="x", response_summary="y")
+    al.log_llm_call(model="m", task_type="general", prompt_hash="abc1234567890123")
     assert audit_log_path.exists()
     al.clear()
     assert not audit_log_path.exists()
@@ -106,7 +107,7 @@ def test_audit_logger_creates_parent_dirs(tmp_path: Path):
 
     nested = tmp_path / "deep" / "nest" / "audit.jsonl"
     al = AuditLogger(nested)
-    al.log_llm_call(model="m", task_type="t", prompt_summary="x", response_summary="y")
+    al.log_llm_call(model="m", task_type="t", prompt_hash="abc1234567890123")
     assert nested.exists()
 
 
@@ -225,8 +226,10 @@ async def test_llm_call_is_audited(gw_with_audit, monkeypatch):
     assert e["prompt_tokens"] == 12
     assert e["completion_tokens"] == 4
     assert e["duration_ms"] >= 0
-    # Prompt summary should start with the 16-char query hash
-    assert e["prompt_summary"].startswith("#") and len(e["prompt_summary"]) >= 17
+    # The entry keeps the 16-char query hash, not the prompt
+    assert len(e["prompt_hash"]) == 16
+    assert "prompt_summary" not in e
+    assert "question" not in json.dumps(e, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -254,7 +257,9 @@ async def test_llm_call_audits_failure(gw_with_audit, monkeypatch):
     entries = audit.read_all()
     assert len(entries) == 1
     assert entries[0]["success"] is False
-    assert "upstream 503" in entries[0]["error"]
+    # the failure is recorded as a kind, not as its text
+    assert entries[0]["error_kind"] == "unknown"
+    assert "upstream 503" not in json.dumps(entries[0], ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -315,7 +320,7 @@ def test_audit_route_list_returns_entries(temp_dir: Path):
     for i in range(3):
         al.log_llm_call(
             model="gpt-4o", task_type="general",
-            prompt_summary=f"call {i}", response_summary="ok",
+            prompt_hash=f"{i:016d}",
             prompt_tokens=10, completion_tokens=2,
         )
     app = _make_minimal_app_with_audit(al)
@@ -326,7 +331,7 @@ def test_audit_route_list_returns_entries(temp_dir: Path):
     assert data["total"] == 3
     assert data["count"] == 3
     # Newest first: call 2 first
-    assert "call 2" in data["entries"][0]["prompt_summary"]
+    assert data["entries"][0]["prompt_hash"] == "0000000000000002"
 
 
 def test_audit_route_list_respects_limit(temp_dir: Path):
@@ -337,7 +342,7 @@ def test_audit_route_list_respects_limit(temp_dir: Path):
     al = AuditLogger(temp_dir / "audit.jsonl")
     for i in range(5):
         al.log_llm_call(model="m", task_type="t",
-                        prompt_summary=str(i), response_summary="r")
+                        prompt_hash=f"{i:016d}")
     app = _make_minimal_app_with_audit(al)
     client = TestClient(app)
     resp = client.get("/api/v1/audit?limit=2")
@@ -353,13 +358,13 @@ def test_audit_route_stats_aggregates(temp_dir: Path):
 
     al = AuditLogger(temp_dir / "audit.jsonl")
     # Mix of models and tasks
-    al.log_llm_call(model="gpt-4o", task_type="answer", prompt_summary="x", response_summary="y",
+    al.log_llm_call(model="gpt-4o", task_type="answer", prompt_hash="abc1234567890123",
                     prompt_tokens=100, completion_tokens=20, success=True)
-    al.log_llm_call(model="gpt-4o", task_type="understand", prompt_summary="x", response_summary="y",
+    al.log_llm_call(model="gpt-4o", task_type="understand", prompt_hash="abc1234567890123",
                     prompt_tokens=50, completion_tokens=10, success=True)
-    al.log_llm_call(model="claude", task_type="answer", prompt_summary="x", response_summary="y",
+    al.log_llm_call(model="claude", task_type="answer", prompt_hash="abc1234567890123",
                     prompt_tokens=80, completion_tokens=15, success=False,
-                    error="rate limit")
+                    error_kind="rate_limit")
     al.log_data_access("read", "kb/foo.pdf")  # not llm_call — should not count
 
     app = _make_minimal_app_with_audit(al)
@@ -381,8 +386,8 @@ def test_audit_route_clear(temp_dir: Path):
     from yuanwork.privacy.audit import AuditLogger
 
     al = AuditLogger(temp_dir / "audit.jsonl")
-    al.log_llm_call(model="m", task_type="t", prompt_summary="x", response_summary="y")
-    al.log_llm_call(model="m", task_type="t", prompt_summary="x", response_summary="y")
+    al.log_llm_call(model="m", task_type="t", prompt_hash="abc1234567890123")
+    al.log_llm_call(model="m", task_type="t", prompt_hash="abc1234567890123")
     app = _make_minimal_app_with_audit(al)
     client = TestClient(app)
     resp = client.delete("/api/v1/audit")

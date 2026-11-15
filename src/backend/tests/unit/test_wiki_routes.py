@@ -16,14 +16,18 @@ def _wiki_routes() -> list[str]:
 
 
 def test_routes_register_in_correct_order():
-    """The `/backlinks` sub-route MUST come before the catch-all
-    `/wiki/pages/{page_id:path}` route. Otherwise the `:path` converter
-    greedily matches `/backlinks` into page_id, breaking the backlinks
-    endpoint for any page whose id contains a slash (e.g. `auto/foo`).
+    """The `/backlinks`, `/conclusions` and `/blocks` sub-routes MUST
+    come before the catch-all `/wiki/pages/{page_id:path}` route.
+    Otherwise the `:path` converter greedily matches `/backlinks` into
+    page_id, breaking the backlinks endpoint for any page whose id
+    contains a slash (e.g. `auto/foo`).
     """
     assert _wiki_routes() == [
         "/wiki/pages",
         "/wiki/pages/{page_id:path}/backlinks",
+        "/wiki/pages/{page_id:path}/conclusions",
+        "/wiki/pages/{page_id:path}/blocks",
+        "/wiki/pages/{page_id:path}",
         "/wiki/pages/{page_id:path}",
         "/wiki/graph",
         "/wiki/compile/{topic:path}",

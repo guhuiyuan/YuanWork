@@ -165,9 +165,16 @@ EVIDENCE = [
         "file_path": "/kb/contract.pdf",
         "text": "违约金为每日万分之三。",
         "meta": {"page": 3},
-    }
+    },
+    {
+        "id": "c2",
+        "file_name": "contract.pdf",
+        "file_path": "/kb/contract.pdf",
+        "text": "逾期超过三十日的，按日万分之五计算。",
+        "meta": {"page": 4},
+    },
 ]
-CONFIDENCE = {"confidence": 0.9, "should_refuse": False, "reason": None}
+CONFIDENCE = {"confidence": 0.9}
 
 
 def _patch_steps(agent, monkeypatch, evidence, confidence):
@@ -208,10 +215,10 @@ async def test_an_empty_answer_is_a_generation_error(monkeypatch, temp_dir: Path
     done = [e for e in events if e["type"] == "done"][0]
     response = done["data"]["response"]
     assert response["refused"] is True
-    assert str(response["refusal_reason"]).startswith("generation_error")
-    assert "生成回答时出现错误" in response["answer"]
+    assert str(response["refusal_reason"]) == "model_unavailable"
+    assert "模型暂时不可用" in response["answer"]
     # The citations survive - the user can still see what was searched.
-    assert len(response["citations"]) == 1
+    assert len(response["citations"]) == 2
 
 
 @pytest.mark.asyncio
@@ -225,5 +232,5 @@ async def test_an_empty_answer_is_a_generation_error_in_the_blocking_path(
     result = await agent.run(query="q", session_id="s1")
 
     assert result["refused"] is True
-    assert str(result["refusal_reason"]).startswith("generation_error")
-    assert len(result["citations"]) == 1
+    assert str(result["refusal_reason"]) == "model_unavailable"
+    assert len(result["citations"]) == 2

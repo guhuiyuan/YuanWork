@@ -82,8 +82,13 @@ class WikiLinker:
     async def extract_links_from_markdown(
         self, markdown: str
     ) -> list[str]:
-        """Extract [[wiki links]] from Markdown content."""
-        return re.findall(r"\[\[([^\]]+)\]\]", markdown)
+        """Extract [[wiki links]] from Markdown content.
+
+        The source markers (`[[来源:文件名 页码]]`) are not links -
+        they say where a fact comes from, not which page it refers to.
+        """
+        links = re.findall(r"\[\[([^\]]+)\]\]", markdown)
+        return [link for link in links if not link.startswith("来源:")]
 
     async def auto_link_page(
         self, page_id: str, markdown: str

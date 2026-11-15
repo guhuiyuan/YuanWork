@@ -12,12 +12,15 @@ from yuanwork.api.deps import (
     get_sqlite_store,
 )
 from yuanwork.api.schemas import (
+    ApproveRuleResponse,
     ConflictLog,
     ConflictLogResponse,
     ConsolidateRequest,
     ConsolidateResponse,
     EpisodicMemoryEntry,
     EpisodicMemoryResponse,
+    PendingRule,
+    PendingRulesResponse,
     ProfileEntry,
     ProfileResponse,
 )
@@ -118,25 +121,96 @@ async def list_conflicts(
     )
 
 
+@router.get("/memory/rules/pending", response_model=PendingRulesResponse)
+async def list_pending_rules(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> PendingRulesResponse:
+    """The rules that are waiting for the user.
+
+    A rule is a conclusion the integration layer drew across several
+    interactions. It does not count as evidence until the user confirms
+    it (ADR-039) - these are the ones to look at.
+    """
+    sqlite = get_sqlite_store()
+    entities = await sqlite.list_entities(status="pending", limit=limit)
+    rules = [
+        entity
+        for entity in entities
+        if (entity.get("properties") or {}).get("kind") == "rule"
+    ]
+
+    return PendingRulesResponse(
+        rules=[
+            PendingRule(
+                id=rule["id"],
+                statement=rule["name"],
+                source_event_ids=list(rule.get("source_event_ids") or []),
+                first_seen=rule.get("first_seen"),
+                last_seen=rule.get("last_seen"),
+            )
+            for rule in rules
+        ],
+        total=len(rules),
+    )
+
+
+@router.post("/memory/rules/{entity_id}/approve", response_model=ApproveRuleResponse)
+async def approve_rule(entity_id: str) -> ApproveRuleResponse:
+    """The user confirms a rule - it takes effect from now on.
+
+    The events it was induced from stay with it, so the conclusion can
+    still be read together with what it rests on.
+    """
+    from yuanwork.consolidation.engine import (
+        RuleNotPending,
+        UnknownRule,
+        approve_rule as approve,
+    )
+
+    sqlite = get_sqlite_store()
+    try:
+        rule = await approve(sqlite, entity_id)
+    except UnknownRule:
+        raise HTTPException(status_code=404, detail=f"规律不存在：{entity_id}")
+    except RuleNotPending:
+        raise HTTPException(
+            status_code=400, detail=f"这条规律不在待审状态：{entity_id}"
+        )
+
+    return ApproveRuleResponse(
+        id=rule["id"],
+        statement=rule["name"],
+        status=rule.get("status", "active"),
+        source_event_ids=list(rule.get("source_event_ids") or []),
+        approved=True,
+    )
+
+
 @router.post("/memory/consolidate", response_model=ConsolidateResponse)
 async def trigger_consolidation(body: ConsolidateRequest) -> ConsolidateResponse:
-    """Trigger memory consolidation (reflection)."""
-    from yuanwork.consolidation.engine import ConsolidationEngine
-    from yuanwork.api.deps import (
-        get_episodic_memory,
-        get_profile_store,
-        get_semantic_memory,
-        get_sqlite_store,
-    )
+    """Trigger a consolidation round by hand.
 
-    engine = ConsolidationEngine(
-        episodic_memory=get_episodic_memory(),
-        semantic_memory=get_semantic_memory(),
-        profile_store=get_profile_store(),
-        sqlite_store=get_sqlite_store(),
-    )
+    This is the third of the three ways a round starts (ADR-015): the
+    turns pile up, nobody asks anything for a while, or the user asks
+    for it here.
+    """
+    from yuanwork.api.deps import optional_consolidation_engine
 
-    result = await engine.run(reason=body.reason, force=body.force)
+    engine = optional_consolidation_engine()
+    if engine is None:
+        # The memory engineering layer is switched off - the round has
+        # nowhere to run.
+        return ConsolidateResponse(
+            episodes_processed=0,
+            duplicates_merged=0,
+            profile_updates=0,
+            conflicts_archived=0,
+            duration_ms=0.0,
+            triggered=False,
+            reason="episodic memory disabled",
+        )
+
+    result = await engine.consolidate(reason=body.reason)
 
     return ConsolidateResponse(
         episodes_processed=result["episodes_processed"],
@@ -144,4 +218,11 @@ async def trigger_consolidation(body: ConsolidateRequest) -> ConsolidateResponse
         profile_updates=result["profile_updates"],
         conflicts_archived=result["conflicts_archived"],
         duration_ms=result["duration_ms"],
+        events_read=result["events_read"],
+        entities_induced=result["entities_induced"],
+        rules_induced=result["rules_induced"],
+        page_points_induced=result["page_points_induced"],
+        induction_failures=result["induction_failures"],
+        triggered=True,
+        reason=body.reason,
     )

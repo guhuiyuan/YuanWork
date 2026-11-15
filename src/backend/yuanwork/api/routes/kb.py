@@ -8,7 +8,14 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from yuanwork.api.deps import get_sqlite_store
-from yuanwork.api.schemas import FileType, KBFileInfo, KBFilesResponse
+from yuanwork.api.schemas import (
+    DocumentTierRequest,
+    FileType,
+    KBFileInfo,
+    KBFilesResponse,
+    TermContextItem,
+    TermContextResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +107,40 @@ async def delete_kb_file(doc_id: str, request: Request) -> dict:
     return {"deleted": doc_id, "chunks_removed": file_info.get("chunk_count", 0)}
 
 
+@router.get("/kb/terms/{term}/context", response_model=TermContextResponse)
+async def get_term_context(
+    term: str,
+    top_k: int = Query(default=5, ge=1, le=20),
+) -> TermContextResponse:
+    """Where a term appears in the knowledge base.
+
+    The context comes from the original text, with the place it came
+    from - not from a model. A term that is not in the documents comes
+    back empty and is marked as not found (ADR-041).
+    """
+    from yuanwork.api.deps import get_semantic_memory
+    from yuanwork.retrieval.hybrid import HybridRetriever, TermContext
+
+    retriever = HybridRetriever(get_semantic_memory())
+    result = await TermContext(retriever).lookup(term, top_k=top_k)
+
+    return TermContextResponse(
+        term=result["term"],
+        found=result["found"],
+        contexts=[
+            TermContextItem(
+                text=item["text"],
+                file_name=item["file_name"],
+                doc_id=item["doc_id"],
+                chunk_id=item["chunk_id"],
+                location=item["location"],
+                page=item["page"],
+            )
+            for item in result["contexts"]
+        ],
+    )
+
+
 @router.get("/kb/stats")
 async def get_kb_stats(request: Request) -> dict:
     """Get knowledge base statistics."""
@@ -113,4 +154,52 @@ async def get_kb_stats(request: Request) -> dict:
         "total_files": total_files,
         "total_chunks": total_chunks,
         "by_type": by_type,
+    }
+
+
+@router.post("/kb/files/{doc_id}/tier")
+async def set_document_tier(doc_id: str, body: DocumentTierRequest) -> dict:
+    """Put a document in a layer by hand.
+
+    The user's choice is the last word: the rules and the model do not
+    overrule it (AC-F-021).
+    """
+    sqlite = get_sqlite_store()
+
+    file_info = await sqlite.get_file(doc_id)
+    if not file_info:
+        raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+
+    record = await sqlite.set_doc_tier_by_user(doc_id, body.tier)
+
+    return {
+        "doc_id": doc_id,
+        "tier": record.get("tier", body.tier),
+        "decided_by": record.get("decided_by", "user"),
+    }
+
+
+@router.get("/kb/tiers")
+async def list_document_tiers(
+    request: Request,
+    tier: str | None = Query(default=None, description="core | longtail"),
+) -> dict:
+    """The documents of each layer, and where the decision came from."""
+    sqlite = get_sqlite_store()
+
+    records = await sqlite.list_doc_tiers(tier=tier)
+
+    return {
+        "tiers": [
+            {
+                "doc_id": r["doc_id"],
+                "tier": r["tier"],
+                "decided_by": r["decided_by"],
+                "decided_at": r["decided_at"],
+                "compile_status": r["compile_status"],
+                "stale": bool(r.get("stale")),
+            }
+            for r in records
+        ],
+        "total": len(records),
     }

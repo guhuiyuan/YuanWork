@@ -1,0 +1,32 @@
+{# The judge's brief. It sees the evidence and the question, and nothing
+   else - no answer has been written yet, so it cannot be talked into
+   agreeing with one. #}
+你是知识库检索的质量裁判。用户提了一个问题，下面是检索到的证据片段。
+
+请只依据这些证据判断：它们是否足以回答用户的问题。
+
+判断标准：
+
+1. 只看证据本身。不要用你自己的知识去补足，也不要因为"我大概知道答案"就判为充分。
+2. 证据没有覆盖问题的关键内容（关键数字、条款、日期、对象）→ 判为不充分。
+3. 证据只是主题相关、但没有回答这个问题 → 判为不充分。
+4. 证据之间互相矛盾，且无法从证据本身判断哪个为准 → 判为不充分。
+5. 证据已经包含了回答这个问题所需的事实 → 判为充分。
+
+判断的是"证据够不够"，不是"这个问题难不难"。宁可判为不充分。
+
+## 用户问题
+
+{{ question }}
+
+## 证据
+
+{% for piece in pieces %}
+[{{ piece.index }}] 来源：《{{ piece.file_name }}》{% if piece.location %}（{{ piece.location }}）{% endif %}
+---
+{{ piece.text }}
+{% endfor %}
+
+用 JSON 回答，不要有多余文字：
+
+{"sufficient": true 或 false, "reason": "一句话说明依据"}

@@ -52,10 +52,14 @@ class YuanWorkSettings(BaseSettings):
     # ===== Server =====
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8765)
-    workers: int = Field(default=1)  # Single worker for now (bge-m3 in-process)
 
     # ===== Privacy =====
     network_mode: NetworkMode = Field(default=NetworkMode.LLM_ONLY)
+    enable_redaction: bool = Field(
+        default=True,
+        description="Mask phone numbers, id cards, emails and card numbers "
+        "before any evidence is sent to the model",
+    )
     allowed_domains: list[str] = Field(
         default_factory=lambda: [
             "api.openai.com",
@@ -65,25 +69,50 @@ class YuanWorkSettings(BaseSettings):
         ]
     )
 
-    # ===== LLM Budget =====
-    per_session_max_tokens: int = Field(default=200_000)
-    per_query_max_tokens: int = Field(default=8_000)
-    monthly_cap_usd: float = Field(default=30.0)
-
     # ===== Embedding =====
     embedding_model: str = Field(default="BAAI/bge-m3")
-    embedding_device: str = Field(default="cpu")  # cpu / cuda
-    embedding_batch_size: int = Field(default=8)
+    # auto = the GPU when there is one, the CPU otherwise. The reason
+    # for the fallback is written down when the model is loaded.
+    embedding_device: str = Field(default="auto")  # auto / cpu / cuda
+    embedding_batch_size: int = Field(default=8, gt=0)
+    # How many tokens one piece of text may have. bge-m3 reads 8192,
+    # but the long documents are cut into pieces anyway - and a shorter
+    # read is a faster one (ADR-035).
+    embedding_max_tokens: int = Field(default=512, gt=0)
+    # Half precision on the GPU. It is worth nothing on the CPU - it is
+    # slower there - so it is only used when there is a GPU.
+    embedding_use_fp16: bool = Field(default=True)
 
     # ===== Reranker =====
     reranker_model: str = Field(default="BAAI/bge-reranker-v2-m3")
-    use_reranker: bool = Field(default=True)
+    # Off by default: the cross-encoder costs 568 MB of disk, ~1.2 GB of
+    # RAM and 5-30 s on the first use - on a CPU-only machine that eats
+    # the whole latency budget of the first question.
+    use_reranker: bool = Field(default=False)
 
     # ===== Retrieval =====
     top_k_initial: int = Field(default=50)  # Initial vector recall
     top_k_rerank: int = Field(default=10)  # After reranking
     confidence_threshold_high: float = Field(default=0.7)
     confidence_threshold_low: float = Field(default=0.4)
+    fusion_alpha: float = Field(
+        default=0.65,
+        description="Weight of the dense channel in the fused score",
+        ge=0.0,
+        le=1.0,
+    )
+    fusion_beta: float = Field(
+        default=0.35,
+        description="Weight of the full-text channel in the fused score",
+        ge=0.0,
+        le=1.0,
+    )
+    # How long each step of the retrieval chain may take. A step that
+    # runs over its budget is degraded (the full-text channel) or fails
+    # the query (the dense channel) - what it must not do is hang.
+    dense_timeout_seconds: float = Field(default=10.0, gt=0)
+    sparse_timeout_seconds: float = Field(default=5.0, gt=0)
+    embedding_timeout_seconds: float = Field(default=60.0, gt=0)
 
     # ===== Memory / Wiki =====
     enable_episodic_memory: bool = Field(default=True)
@@ -91,8 +120,55 @@ class YuanWorkSettings(BaseSettings):
     reflection_trigger_turns: int = Field(default=10)
     reflection_trigger_idle_minutes: int = Field(default=30)
 
+    # ===== Ingestion =====
+    max_file_size_mb: int = Field(
+        default=100,
+        description="Files above this size are skipped instead of being read into memory",
+    )
+    # How long a document has to be before the rules put it in the core
+    # layer on its own (ADR-031).
+    core_min_chars: int = Field(default=20000, gt=0)
+    # Below this size the model is not asked about the layer - a note is
+    # a note, and every question costs a call.
+    tier_model_min_chars: int = Field(default=8000, gt=0)
+    # How long one core document may take to compile (AC-P-008: five
+    # minutes, without the queue in front of the model). The compilation
+    # runs while the document is being indexed - never on the way a
+    # question is answered. The ceiling is the promise itself: it cannot
+    # be configured above five minutes.
+    core_compile_timeout_seconds: int = Field(default=240, gt=0, le=300)
+    # How much of a core document the model reads in one go. A longer
+    # document is read in several parts, and every conclusion says
+    # which part it came from (AC-E-013).
+    core_read_chars: int = Field(default=60000, gt=0)
+    # How many slices are written to the store at once. A build of
+    # thousands of files is written in batches - one embedding call per
+    # batch instead of one per file (AC-P-007).
+    index_batch_size: int = Field(default=256, gt=0)
+    # How many slices the vector store takes in one write. The build
+    # hands the store a batch; the store writes it in pieces, so the
+    # peak memory and the write latency stay bounded.
+    index_write_batch_size: int = Field(default=256, gt=0)
+    # How many slices a second may be written at most. Zero means no
+    # limit. The cap keeps the build from starving the rest of the
+    # machine (AC-P-007).
+    index_rate_limit: float = Field(default=0.0, ge=0)
+    # How many documents may sit in the core layer. A core layer with
+    # thousands of documents is not a summary of anything any more
+    # (AC-P-007).
+    core_max_docs: int = Field(default=200, gt=0)
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        # The two fusion weights are a split of one whole: the fused
+        # score is alpha * dense + beta * full-text, and a score above
+        # 1.0 would mean nothing to the reader.
+        total = self.fusion_alpha + self.fusion_beta
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "YUANWORK_FUSION_ALPHA and YUANWORK_FUSION_BETA must add up "
+                f"to 1.0 (got {self.fusion_alpha} + {self.fusion_beta})"
+            )
         # Ensure data dir exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "logs").mkdir(exist_ok=True)

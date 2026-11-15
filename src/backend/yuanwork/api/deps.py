@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from yuanwork.llm.gateway import LLMGateway
     from yuanwork.memory.semantic import SemanticMemory
     from yuanwork.memory.episodic import EpisodicMemory
+    from yuanwork.memory.episodic_recorder import EpisodicRecorder
     from yuanwork.memory.profile import ProfileStore
     from yuanwork.wiki.trigger import WikiCompileTrigger
     from yuanwork.wiki.trigger import WikiCompileTrigger
@@ -29,6 +30,7 @@ SettingsDep = Annotated[YuanWorkSettings, Depends(get_settings)]
 _llm_gateway: "LLMGateway | None" = None
 _semantic_memory: "SemanticMemory | None" = None
 _episodic_memory: "EpisodicMemory | None" = None
+_episodic_recorder: "EpisodicRecorder | None" = None
 _profile_store: "ProfileStore | None" = None
 _sqlite_store: "SQLiteStore | None" = None
 _consolidation_engine: "ConsolidationEngine | None" = None
@@ -74,6 +76,33 @@ def get_episodic_memory() -> "EpisodicMemory":
     return _episodic_memory
 
 
+def optional_episodic_memory() -> "EpisodicMemory | None":
+    """The episodic memory, or None when the feature is switched off.
+
+    The memory engineering layer can be disabled in the settings, and a
+    chat that does not use it must still work.
+    """
+    return _episodic_memory
+
+
+def set_episodic_recorder(recorder: "EpisodicRecorder") -> None:
+    """Set the episodic recorder singleton."""
+    global _episodic_recorder
+    _episodic_recorder = recorder
+
+
+def get_episodic_recorder() -> "EpisodicRecorder":
+    """Get the episodic recorder instance."""
+    if _episodic_recorder is None:
+        raise RuntimeError("Episodic recorder not initialized")
+    return _episodic_recorder
+
+
+def optional_episodic_recorder() -> "EpisodicRecorder | None":
+    """The episodic recorder, or None when the feature is switched off."""
+    return _episodic_recorder
+
+
 def set_profile_store(store: "ProfileStore") -> None:
     """Set the profile store singleton."""
     global _profile_store
@@ -100,6 +129,15 @@ def get_sqlite_store() -> "SQLiteStore":
     return _sqlite_store
 
 
+def optional_sqlite_store() -> "SQLiteStore | None":
+    """The SQLite store, or None when there is none.
+
+    Without a store there is no core layer to search, and the question
+    is answered from the long tail alone (design 3.2).
+    """
+    return _sqlite_store
+
+
 def set_consolidation_engine(engine: "ConsolidationEngine") -> None:
     """Set the consolidation engine singleton."""
     global _consolidation_engine
@@ -110,6 +148,11 @@ def get_consolidation_engine() -> "ConsolidationEngine":
     """Get the consolidation engine instance."""
     if _consolidation_engine is None:
         raise RuntimeError("Consolidation engine not initialized")
+    return _consolidation_engine
+
+
+def optional_consolidation_engine() -> "ConsolidationEngine | None":
+    """The consolidation engine, or None when it is switched off."""
     return _consolidation_engine
 
 
@@ -125,12 +168,18 @@ def get_wiki_compile_trigger() -> "WikiCompileTrigger":
     return _wiki_compile_trigger
 
 
+def optional_wiki_compile_trigger() -> "WikiCompileTrigger | None":
+    """The wiki compile trigger, or None when it is switched off."""
+    return _wiki_compile_trigger
+
+
 def reset_dependencies() -> None:
     """Reset all dependencies (for testing)."""
-    global _llm_gateway, _semantic_memory, _episodic_memory, _profile_store, _sqlite_store, _consolidation_engine, _wiki_compile_trigger
+    global _llm_gateway, _semantic_memory, _episodic_memory, _profile_store, _sqlite_store, _consolidation_engine, _wiki_compile_trigger, _episodic_recorder
     _llm_gateway = None
     _semantic_memory = None
     _episodic_memory = None
+    _episodic_recorder = None
     _profile_store = None
     _sqlite_store = None
     _consolidation_engine = None

@@ -1,16 +1,34 @@
 {# Refusal Response Template - a Jinja comment, so the heading does not
-   end up in the message the user reads. #}
-我在你的知识库里没有找到足够明确的证据来回答这个问题。
+   end up in the message the user reads.
+
+   A refusal has to be actionable: where the answer probably is, and
+   what the user can do about it. The wording differs by the reason -
+   "the documents are silent" and "the documents cannot be located"
+   and "the documents do not answer this" are three different problems
+   with three different fixes. #}
+{{ opening }}
 
 ## 最可能相关的位置
 
-{% for chunk in candidates %}
-- 《{{ chunk.file_name }}》{% if chunk.meta.slide_number %}（Slide {{ chunk.meta.slide_number }}）{% endif %}{% if chunk.meta.page %}（第 {{ chunk.meta.page }} 页）{% endif %}{% if chunk.meta.heading %}（{{ chunk.meta.heading }}）{% endif %}
+{% for position in positions %}
+- 《{{ position.file_name }}》{% if position.location %}（{{ position.location }}）{% endif %}
+{% else %}
+- （暂时没有可定位的位置）
 {% endfor %}
 
 ## 你可以：
 
-1. **点击上面位置直接查看原文**
-2. **换个问法**（例如使用更具体的关键词）
-3. **允许我使用通用知识回答**（精度较低，仅供参考）
-4. **添加更多文档**到知识库，让我有更多可参考的资料
+{% if reason == "unlocatable_evidence" %}
+1. **重建一次索引** —— 找到的资料没有可定位的位置，重新索引之后才能让你点开逐条核对
+{% elif reason == "model_insufficient" %}
+1. **补上另一份文档** —— 找到的资料在讲别的事，回答这个问题需要的是另一份
+{% elif reason == "model_unavailable" %}
+1. **稍后重试** —— 模型暂时联系不上，资料已经找好了
+{% elif reason == "citation_invalid" %}
+1. **换个问法再问一次** —— 答案里的引用编号和找到的资料对不上，我不能拿它当结论
+{% else %}
+1. **换用更具体的关键词** —— 例如合同编号、金额、日期、条款名
+{% endif %}
+2. **点击上面的位置直接查看原文** —— 那里最接近你问的事
+3. **把相关文档加入知识库** —— 缺哪份就补哪份，答案就在里面
+4. **允许我使用通用知识回答**（精度较低，仅供参考）

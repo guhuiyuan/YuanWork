@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from yuanwork.ingestion.parser.base import BaseParser, RawBlock
+from yuanwork.utils.anchor import make_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,16 @@ class MarkdownTxtParser(BaseParser):
         current_level: int = 0
         current_content: list[str] = []
         section_idx = 0
+        # The headings above the current one, so a section can say how deep
+        # it is nested - "# 第一章" / "## 1.1 概述" is a path, not a string.
+        heading_stack: list[tuple[int, str]] = []
 
         def flush():
             nonlocal current_heading, current_level, current_content, section_idx
             text = "\n".join(current_content).strip()
             if text:
                 section_idx += 1
+                path = [t for _, t in heading_stack]
                 blocks.append(
                     RawBlock(
                         block_id=f"{doc_id}_section{section_idx}",
@@ -60,6 +65,8 @@ class MarkdownTxtParser(BaseParser):
                             "heading": current_heading,
                             "heading_level": current_level,
                             "section_index": section_idx,
+                            "heading_path": path,
+                            "anchor": make_anchor("heading_path", heading_path=path),
                         },
                     )
                 )
@@ -72,6 +79,10 @@ class MarkdownTxtParser(BaseParser):
                 level = len(heading_match.group(1))
                 current_heading = heading_match.group(2).strip()
                 current_level = level
+                # A new heading closes the sections nested under the old one.
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                heading_stack.append((level, current_heading))
             else:
                 current_content.append(line)
 
@@ -96,7 +107,12 @@ class MarkdownTxtParser(BaseParser):
                     doc_id=doc_id,
                     content=para,
                     type="text",
-                    meta={"paragraph_index": chunk_idx},
+                    meta={
+                        "paragraph_index": chunk_idx,
+                        # A plain text file has no headings; the paragraph
+                        # is the addressable unit.
+                        "anchor": make_anchor("section", section=f"第 {chunk_idx} 段"),
+                    },
                 )
             )
 

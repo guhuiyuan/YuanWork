@@ -42,9 +42,9 @@ async def list_audit_entries(
 ) -> dict[str, Any]:
     """Return the most recent audit entries (newest first).
 
-    Each entry has: timestamp, type, model, task_type, prompt_summary
-    (starts with '#<16hexhash>'), response_summary, token counts, duration,
-    success flag, and optional error.
+    Each entry has: timestamp, type, model, task_type, prompt_hash
+    (16 hex characters), prompt_length, token counts, duration, success
+    flag, and an optional error_kind.
     """
     audit_logger = _get_audit_logger(request)
     all_entries = audit_logger.read_all()

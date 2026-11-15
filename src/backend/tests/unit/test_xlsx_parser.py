@@ -31,36 +31,47 @@ def _make_xlsx(path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_xlsx_parser_produces_sheet_blocks(temp_dir: Path):
+async def test_xlsx_parser_produces_row_blocks(temp_dir: Path):
+    """One block per row: a chunk that covers a whole sheet cannot say
+    which row it came from."""
     xlsx = temp_dir / "demo.xlsx"
     _make_xlsx(xlsx)
 
     parser = XlsxParser()
     blocks = await parser.parse(xlsx, "doc-xlsx-1")
 
-    # Two non-empty sheets
-    assert len(blocks) == 2
+    # Two non-empty sheets, three rows each
+    assert len(blocks) == 6
     for b in blocks:
         assert b.type == "table"
         assert b.doc_id == "doc-xlsx-1"
         assert "sheet_name" in b.meta
         assert "sheet_index" in b.meta
         assert "sheet_total" in b.meta
+        assert b.meta["anchor"]["kind"] == "sheet_row"
 
-    # First block is the 项目进度 sheet
+    # The first sheet is 项目进度, and every row knows its number
     first = blocks[0]
     assert first.meta["sheet_name"] == "项目进度"
-    assert "任务" in first.content  # header preserved
-    assert "张三" in first.content
+    assert first.meta["row_index"] == 1
+    assert [b.meta["row_index"] for b in blocks[:3]] == [1, 2, 3]
+
+    # A data row carries its header, so it can be read on its own
+    data_row = blocks[1]
+    assert "任务" in data_row.content  # header preserved
+    assert "张三" in data_row.content
     # Markdown table syntax
     assert first.content.startswith("| ")
     assert "---" in first.content
 
-    # Second block is the 预算 sheet
-    second = blocks[1]
+    # The last three blocks are the 预算 sheet
+    second = blocks[3]
     assert second.meta["sheet_name"] == "预算"
-    assert "人力成本" in second.content
-    assert "120" in second.content
+    # its first block is the header row, the second one the data
+    data = blocks[4]
+    assert "人力成本" in data.content
+    assert "120" in data.content
+    assert data.meta["row_index"] == 2
 
 
 @pytest.mark.asyncio

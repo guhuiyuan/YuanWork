@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from yuanwork.ingestion.parser.base import BaseParser, RawBlock
+from yuanwork.utils.anchor import make_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,9 @@ class DocxParser(BaseParser):
         current_heading_level: int = 0
         current_paragraphs: list[str] = []
         current_block_id: str | None = None
+        # The headings above the current one, so a block can say which
+        # section it sits in and how deep that section is nested.
+        heading_stack: list[tuple[int, str]] = []
 
         def flush():
             nonlocal current_heading, current_heading_level, current_paragraphs, current_block_id
@@ -47,6 +51,12 @@ class DocxParser(BaseParser):
                             meta={
                                 "heading": current_heading,
                                 "heading_level": current_heading_level,
+                                "heading_path": [t for _, t in heading_stack],
+                                "anchor": make_anchor(
+                                    "section",
+                                    section=current_heading,
+                                    heading_path=[t for _, t in heading_stack],
+                                ),
                             },
                         )
                     )
@@ -70,6 +80,10 @@ class DocxParser(BaseParser):
                     current_heading_level = int(style_name.split()[-1])
                 except (ValueError, IndexError):
                     current_heading_level = 1
+                # A new heading closes the sections nested under the old one.
+                while heading_stack and heading_stack[-1][0] >= current_heading_level:
+                    heading_stack.pop()
+                heading_stack.append((current_heading_level, text))
                 current_block_id = f"{doc_id}_p{para_idx}_h{current_heading_level}"
             else:
                 current_paragraphs.append(text)
@@ -86,7 +100,14 @@ class DocxParser(BaseParser):
                     doc_id=doc_id,
                     content=table_md,
                     type="table",
-                    meta={"table_index": table_idx},
+                    meta={
+                        "table_index": table_idx,
+                        "anchor": make_anchor(
+                            "section",
+                            section=current_heading,
+                            heading_path=[t for _, t in heading_stack],
+                        ),
+                    },
                 )
             )
 

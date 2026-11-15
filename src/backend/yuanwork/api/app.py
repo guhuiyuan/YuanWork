@@ -17,12 +17,14 @@ from yuanwork import __version__
 from yuanwork.api.deps import (
     set_consolidation_engine,
     set_episodic_memory,
+    set_episodic_recorder,
     set_llm_gateway,
     set_profile_store,
     set_semantic_memory,
     set_sqlite_store,
     set_wiki_compile_trigger,
 )
+from yuanwork.api.errors import classify_exception, error_payload
 from yuanwork.config import YuanWorkSettings
 
 if TYPE_CHECKING:
@@ -108,6 +110,13 @@ async def lifespan(app: FastAPI):
     set_sqlite_store(sqlite_store)
     logger.info("✓ SQLite store initialized")
 
+    # A build that was running when the process died is not running any
+    # more - the worker thread went with the process. Leaving it behind
+    # would show a progress bar that never moves.
+    stale = await sqlite_store.clear_running_ingest_jobs()
+    if stale:
+        logger.info(f"✓ Cleared {stale} stale ingest job(s) from a previous run")
+
     # Initialize LLM gateway
     from yuanwork.llm.gateway import LLMGateway
     from yuanwork.privacy.audit import AuditLogger
@@ -143,45 +152,74 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("ℹ Embedding model not prewarming (set YUANWORK_PREWARM_EMBEDDING=1 to enable)")
 
-    # Initialize episodic memory
-    from yuanwork.memory.episodic import EpisodicMemory
+    # Initialize episodic memory, the profile store and the
+    # consolidation engine - the memory engineering layer. It can be
+    # switched off: some users do not want their interaction history
+    # kept at all.
+    consolidation_engine = None
+    episodic_memory = None
+    profile_store = None
+    episodic_recorder = None
+    if settings.enable_episodic_memory:
+        from yuanwork.memory.episodic import EpisodicMemory
+        from yuanwork.memory.episodic_recorder import EpisodicRecorder
 
-    episodic_memory = EpisodicMemory(sqlite_store)
-    set_episodic_memory(episodic_memory)
-    logger.info("✓ Episodic memory initialized")
+        episodic_memory = EpisodicMemory(sqlite_store)
+        set_episodic_memory(episodic_memory)
+        logger.info("✓ Episodic memory initialized")
 
-    # Initialize profile store
-    from yuanwork.memory.profile import ProfileStore
+        # The recorder keeps the interactions: asking, citing, accepting,
+        # rejecting, adding and removing files.
+        episodic_recorder = EpisodicRecorder(sqlite_store)
+        set_episodic_recorder(episodic_recorder)
+        logger.info("✓ Episodic recorder initialized")
 
-    profile_store = ProfileStore(sqlite_store)
-    set_profile_store(profile_store)
-    logger.info("✓ Profile store initialized")
+        # Initialize profile store
+        from yuanwork.memory.profile import ProfileStore
 
-    # Initialize consolidation engine (integration layer)
-    from yuanwork.consolidation.engine import ConsolidationEngine
+        profile_store = ProfileStore(sqlite_store)
+        set_profile_store(profile_store)
+        logger.info("✓ Profile store initialized")
 
-    consolidation_engine = ConsolidationEngine(
-        episodic_memory=episodic_memory,
-        semantic_memory=semantic_memory,
-        profile_store=profile_store,
-        sqlite_store=sqlite_store,
-        llm_gateway=llm_gateway,
-    )
-    set_consolidation_engine(consolidation_engine)
-    logger.info("✓ Consolidation engine initialized")
+        # Initialize consolidation engine (integration layer)
+        from yuanwork.consolidation.engine import ConsolidationEngine
+
+        consolidation_engine = ConsolidationEngine(
+            episodic_memory=episodic_memory,
+            semantic_memory=semantic_memory,
+            profile_store=profile_store,
+            sqlite_store=sqlite_store,
+            llm_gateway=llm_gateway,
+        )
+        set_consolidation_engine(consolidation_engine)
+        logger.info("✓ Consolidation engine initialized")
+    else:
+        logger.info("ℹ Episodic memory disabled (YUANWORK_ENABLE_EPISODIC_MEMORY=false)")
+
+    # The idle trigger (ADR-015): somebody has to notice that the user
+    # stopped asking questions - the next question would notice it too
+    # late, and "idle" means idle.
+    idle_watcher: asyncio.Task | None = None
+    if consolidation_engine is not None:
+        idle_watcher = asyncio.create_task(consolidation_engine.watch_idle())
+        logger.info("✓ Consolidation idle watcher started")
 
     # Initialize wiki page compile trigger (Stage 2 differentiator).
     # Decides when to compile a Wiki page from the chunks surfaced during
     # a chat turn. Uses the LLM gateway for actual compilation; the
     # trigger itself is in-process state.
-    from yuanwork.wiki.trigger import WikiCompileTrigger
+    wiki_compile_trigger = None
+    if settings.enable_wiki_auto_compile:
+        from yuanwork.wiki.trigger import WikiCompileTrigger
 
-    wiki_compile_trigger = WikiCompileTrigger(
-        sqlite_store=sqlite_store,
-        llm_gateway=llm_gateway,
-    )
-    set_wiki_compile_trigger(wiki_compile_trigger)
-    logger.info("✓ Wiki compile trigger initialized")
+        wiki_compile_trigger = WikiCompileTrigger(
+            sqlite_store=sqlite_store,
+            llm_gateway=llm_gateway,
+        )
+        set_wiki_compile_trigger(wiki_compile_trigger)
+        logger.info("✓ Wiki compile trigger initialized")
+    else:
+        logger.info("ℹ Wiki auto-compile disabled (YUANWORK_ENABLE_WIKI_AUTO_COMPILE=false)")
 
     # Store references for shutdown
     app.state.sqlite_store = sqlite_store
@@ -199,6 +237,14 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("Shutting down YuanWork components...")
+        # The idle watcher sleeps between checks - it has to be told
+        # that the process is going away.
+        if idle_watcher is not None:
+            idle_watcher.cancel()
+            try:
+                await idle_watcher
+            except asyncio.CancelledError:
+                pass
         # Cleanup
         if hasattr(semantic_memory, "close"):
             await semantic_memory.close()
@@ -249,7 +295,17 @@ def create_app(settings: YuanWorkSettings | None = None) -> FastAPI:
     )
 
     # Register routers
-    from yuanwork.api.routes import audit, chat, health, ingest, kb, memory, wiki
+    from yuanwork.api.routes import (
+        audit,
+        chat,
+        health,
+        ingest,
+        interactions,
+        kb,
+        memory,
+        wiki,
+        workspace,
+    )
 
     app.include_router(health.router, prefix="/api/v1", tags=["health"])
     app.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])
@@ -258,18 +314,22 @@ def create_app(settings: YuanWorkSettings | None = None) -> FastAPI:
     app.include_router(memory.router, prefix="/api/v1", tags=["memory"])
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
+    app.include_router(workspace.router, prefix="/api/v1", tags=["workspace"])
+    app.include_router(interactions.router, prefix="/api/v1", tags=["interactions"])
 
     # Global exception handler
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request, exc):
+        """Answer with a code and a readable message - not the exception.
+
+        The exception text can hold a local path, an upstream endpoint or
+        a piece of the user's data. It goes to the local log; the
+        response says only what the user needs to know.
+        """
         logger.exception(f"Unhandled exception in {request.url.path}: {exc}")
         return JSONResponse(
             status_code=500,
-            content={
-                "error": "Internal server error",
-                "detail": str(exc),
-                "code": "INTERNAL_ERROR",
-            },
+            content=error_payload(classify_exception(exc)),
         )
 
     return app

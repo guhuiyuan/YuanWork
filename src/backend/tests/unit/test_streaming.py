@@ -249,7 +249,7 @@ async def test_gateway_stream_audit_written_once(gw, monkeypatch, temp_dir: Path
     entries = audit.read_all()
     assert len(entries) == 1
     assert entries[0]["success"] is True
-    assert "Hi there" in entries[0]["response_summary"]
+    assert len(entries[0]["prompt_hash"]) == 16
 
 
 @pytest.mark.asyncio
@@ -360,11 +360,17 @@ class _StubGateway:
         fail_with: Exception | None = None,
         fail_complete_with: Exception | None = None,
     ):
+        # An answer has to cite its evidence - one that cites nothing
+        # is a refusal (the citation check).
+        if deltas and not any("[" in delta for delta in deltas):
+            deltas = list(deltas)
+            deltas[-1] = deltas[-1] + " [1]"
         self.deltas = deltas
         self.fail_with = fail_with
         self.fail_complete_with = fail_complete_with
         self.stream_calls = 0
         self.complete_calls = 0
+        self.gate_calls = 0
 
     async def stream(self, task):
         self.stream_calls += 1
@@ -374,9 +380,20 @@ class _StubGateway:
             raise self.fail_with
 
     async def complete(self, task):
-        self.complete_calls += 1
         from yuanwork.llm.gateway import LLMResponse
 
+        if getattr(task, "task_type", "") == "evidence_gate":
+            # The evidence gate asks its own question.
+            self.gate_calls += 1
+            if self.fail_complete_with is not None:
+                raise self.fail_complete_with
+            return LLMResponse(
+                content='{"sufficient": true, "reason": "证据覆盖了问题"}',
+                model="stub",
+                finish_reason="stop",
+            )
+
+        self.complete_calls += 1
         if self.fail_complete_with is not None:
             raise self.fail_complete_with
         return LLMResponse(
@@ -431,9 +448,19 @@ EVIDENCE = [
         "file_path": "/kb/contract.pdf",
         "text": "违约金为每日万分之三。",
         "meta": {"page": 3},
-    }
+    },
+    {
+        "id": "c2",
+        "file_name": "contract.pdf",
+        "file_path": "/kb/contract.pdf",
+        "text": "逾期超过三十日的，按日万分之五计算。",
+        "meta": {"page": 4},
+    },
 ]
-CONFIDENCE = {"confidence": 0.9, "should_refuse": False, "reason": None}
+#: One piece of evidence is not enough to back an answer - the evidence
+#: gate refuses on it.
+THIN_EVIDENCE = EVIDENCE[:1]
+CONFIDENCE = {"confidence": 0.9}
 
 
 @pytest.mark.asyncio
@@ -446,7 +473,7 @@ async def test_agent_stream_emits_token_events(monkeypatch, temp_dir: Path):
     events = [e async for e in agent.stream(query="违约金?", session_id="s1")]
 
     token_events = [e for e in events if e["type"] == "token"]
-    assert [e["data"]["text"] for e in token_events] == ["违约", "金为", "万分之三"]
+    assert [e["data"]["text"] for e in token_events] == ["违约", "金为", "万分之三 [1]"]
 
     # The gateway's streaming path was used, not the blocking one.
     assert gateway.stream_calls == 1
@@ -465,7 +492,7 @@ async def test_agent_stream_answer_event_carries_full_text(monkeypatch, temp_dir
 
     answer = [e for e in events if e["type"] == "answer"]
     assert len(answer) == 1
-    assert answer[0]["data"]["text"] == "abcd"
+    assert answer[0]["data"]["text"] == "abcd [1]"
 
 
 @pytest.mark.asyncio
@@ -480,10 +507,11 @@ async def test_agent_stream_done_carries_full_response(monkeypatch, temp_dir: Pa
     done = [e for e in events if e["type"] == "done"]
     assert len(done) == 1
     response = done[0]["data"]["response"]
-    assert response["answer"] == "abcd"
+    assert response["answer"] == "abcd [1]"
     assert response["confidence"] == 0.9
     assert response["refused"] is False
     assert response["session_id"] == "s1"
+    # The answer cited one piece of evidence, so that is the citation.
     assert len(response["citations"]) == 1
     assert response["citations"][0]["file_name"] == "contract.pdf"
 
@@ -508,19 +536,14 @@ async def test_agent_stream_refusal_emits_no_tokens(monkeypatch, temp_dir: Path)
     """The refusal path produces a refusal event and no token events."""
     gateway = _StubGateway(["should not appear"])
     agent = _agent(gateway, temp_dir)
-    _patch_steps(
-        agent,
-        monkeypatch,
-        EVIDENCE,
-        {"confidence": 0.1, "should_refuse": True, "reason": "no_results"},
-    )
+    _patch_steps(agent, monkeypatch, THIN_EVIDENCE, CONFIDENCE)
 
     events = [e async for e in agent.stream(query="q", session_id="s1")]
 
     assert not [e for e in events if e["type"] == "token"]
     refusals = [e for e in events if e["type"] == "refusal"]
     assert len(refusals) == 1
-    assert refusals[0]["data"]["reason"] == "no_results"
+    assert refusals[0]["data"]["reason"] == "insufficient_evidence"
 
     done = [e for e in events if e["type"] == "done"][0]
     assert done["data"]["response"]["refused"] is True
@@ -537,13 +560,13 @@ async def test_agent_stream_error_keeps_partial_text(monkeypatch, temp_dir: Path
     events = [e async for e in agent.stream(query="q", session_id="s1")]
 
     tokens = [e["data"]["text"] for e in events if e["type"] == "token"]
-    assert tokens == ["partial text"]
+    assert tokens == ["partial text [1]"]
 
     done = [e for e in events if e["type"] == "done"][0]
     response = done["data"]["response"]
     assert response["refused"] is True
     assert "partial text" in response["answer"]
-    assert "生成回答时出现错误" in response["answer"]
+    assert "模型暂时不可用" in response["answer"]
 
 
 @pytest.mark.asyncio
@@ -561,11 +584,11 @@ async def test_agent_stream_error_keeps_citations(monkeypatch, temp_dir: Path):
 
     citations = [e for e in events if e["type"] == "citations"]
     assert len(citations) == 1
-    assert len(citations[0]["data"]["citations"]) == 1
+    assert len(citations[0]["data"]["citations"]) == 2
     assert citations[0]["data"]["citations"][0]["file_name"] == "contract.pdf"
 
     done = [e for e in events if e["type"] == "done"][0]
-    assert len(done["data"]["response"]["citations"]) == 1
+    assert len(done["data"]["response"]["citations"]) == 2
 
 
 @pytest.mark.asyncio
@@ -579,12 +602,7 @@ async def test_agent_stream_refusal_still_emits_citations_event(
     """
     gateway = _StubGateway(["unused"])
     agent = _agent(gateway, temp_dir)
-    _patch_steps(
-        agent,
-        monkeypatch,
-        EVIDENCE,
-        {"confidence": 0.1, "should_refuse": True, "reason": "no_results"},
-    )
+    _patch_steps(agent, monkeypatch, THIN_EVIDENCE, CONFIDENCE)
 
     events = [e async for e in agent.stream(query="q", session_id="s1")]
 
@@ -613,7 +631,7 @@ async def test_agent_stream_generation_error_is_a_refusal_with_a_reason(
     assert len(refusals) == 1
     reason = refusals[0]["data"]["reason"]
     assert isinstance(reason, str)
-    assert reason.startswith("generation_error")
+    assert reason == "model_unavailable"
     # The message keeps the text produced before the failure.
     assert "partial" in refusals[0]["data"]["message"]
 
@@ -628,8 +646,8 @@ async def test_agent_run_error_keeps_citations(monkeypatch, temp_dir: Path):
     result = await agent.run(query="q", session_id="s1")
 
     assert result["refused"] is True
-    assert str(result["refusal_reason"]).startswith("generation_error")
-    assert len(result["citations"]) == 1
+    assert str(result["refusal_reason"]) == "model_unavailable"
+    assert len(result["citations"]) == 2
     assert result["citations"][0]["file_name"] == "contract.pdf"
 
 
@@ -642,7 +660,7 @@ async def test_agent_run_still_uses_the_blocking_path(monkeypatch, temp_dir: Pat
 
     result = await agent.run(query="q", session_id="s1")
 
-    assert result["answer"] == "abcd"
+    assert result["answer"] == "abcd [1]"
     assert gateway.complete_calls == 1
     assert gateway.stream_calls == 0
 
@@ -694,7 +712,7 @@ async def test_sse_route_emits_token_frames(monkeypatch, temp_dir: Path):
         if line.startswith("data: ") and '"text"' in line
     ]
     assert any(p.get("text") == "第一" for p in token_payloads)
-    assert any(p.get("text") == "第二" for p in token_payloads)
+    assert any(p.get("text") == "第二 [1]" for p in token_payloads)
 
     # The done event carries the whole response.
     done_payload = None
@@ -703,7 +721,7 @@ async def test_sse_route_emits_token_frames(monkeypatch, temp_dir: Path):
             done_payload = json.loads(line[len("data: "):])
             break
     assert done_payload is not None
-    assert done_payload["response"]["answer"] == "第一第二"
+    assert done_payload["response"]["answer"] == "第一第二 [1]"
 
 
 @pytest.mark.asyncio

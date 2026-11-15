@@ -18,6 +18,14 @@ Localhost is allowed in `LLM_ONLY` because Ollama / llama.cpp / vLLM
 typically bind to 127.0.0.1. In `OFFLINE` we block even that, because the
 user has explicitly chosen to run with no network of any kind.
 
+Allowing localhost has a hole in it: a proxy running on the machine
+(Clash, v2ray, a corporate tunnel) turns every connection into a
+connection to 127.0.0.1, and the guard - which only sees the socket
+target - cannot tell that the real destination is somewhere else
+entirely. So a connection to an **explicitly configured proxy** is
+blocked: the proxy environment variables name it, and the guard refuses
+to let traffic through a tunnel it cannot inspect.
+
 The guard is **opt-in at the install level**: it patches the socket module
 only after `install()` is called. Tests must `uninstall()` in a finally
 block (use the `installed_guard` fixture) to avoid contaminating other
@@ -40,6 +48,7 @@ right-anchored; `v1.api.openai.com` matches `api.openai.com`.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import threading
 from typing import Any
@@ -52,6 +61,17 @@ logger = logging.getLogger(__name__)
 # (only when mode != OFFLINE).
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
+#: The environment variables that name a proxy. A connection to one of
+#: them is a connection to a tunnel, not to the destination.
+PROXY_ENV_VARS = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+)
+
 
 class NetworkIsolationError(PermissionError):
     """Raised when a network connection is blocked by NetworkGuard.
@@ -60,17 +80,30 @@ class NetworkIsolationError(PermissionError):
     catches it, but with extra fields for the UX.
     """
 
-    def __init__(self, hostname: str, allowed_domains: list[str], mode: str):
+    def __init__(
+        self,
+        hostname: str,
+        allowed_domains: list[str],
+        mode: str,
+        reason: str = "blocked",
+        detail: str | None = None,
+    ):
         self.hostname = hostname
         self.allowed_domains = list(allowed_domains)
         self.mode = mode
+        self.reason = reason
+        self.detail = detail
         msg = (
             f"Network isolation: outbound to {hostname!r} is blocked.\n"
             f"  Network mode: {mode}\n"
             f"  Allowed domains: {sorted(self.allowed_domains)}\n"
-            f"  To allow this domain, add it to settings.allowed_domains "
-            f"(or configs/privacy.yaml), or set\n"
-            f"  YUANWORK_NETWORK_MODE=allow_all to disable isolation."
+        )
+        if detail:
+            msg += f"  {detail}\n"
+        msg += (
+            "  To allow this domain, add it to settings.allowed_domains "
+            "(or configs/privacy.yaml), or set\n"
+            "  YUANWORK_NETWORK_MODE=allow_all to disable isolation."
         )
         super().__init__(msg)
 
@@ -95,10 +128,18 @@ class NetworkGuard:
         self,
         mode: str,
         allowed_domains: list[str],
+        proxy_targets: list[tuple[str, int | None]] | None = None,
     ):
         self.mode = mode.upper() if isinstance(mode, str) else str(mode)
         # Normalize domain list: lowercase, no port, no scheme
         self.allowed_domains = [d.lower().strip() for d in allowed_domains if d.strip()]
+        # The proxies that are explicitly configured. A connection to one
+        # of them is a connection to a tunnel.
+        self.proxy_targets = (
+            list(proxy_targets)
+            if proxy_targets is not None
+            else configured_proxy_targets()
+        )
         # Storage for original socket functions (for uninstall)
         self._original_create_connection: Any = None
         self._original_socket_connect: Any = None
@@ -164,6 +205,53 @@ class NetworkGuard:
                 mode=self.mode,
             )
 
+    # ----- The proxy tunnel -----
+
+    def is_proxy_target(self, hostname: str, port: int | None = None) -> bool:
+        """Whether this connection goes to a configured proxy.
+
+        A proxy on the machine would turn every outbound connection into
+        a connection to localhost - and the guard, which only sees the
+        socket target, could not tell that the real destination is
+        somewhere else entirely. A connection to the configured proxy is
+        therefore refused: the guard does not let traffic through a
+        tunnel it cannot inspect.
+        """
+        if not hostname or not self.proxy_targets:
+            return False
+
+        host = hostname.lower().strip()
+        if host.startswith("[") and "]" in host:
+            host = host[1 : host.index("]")]
+
+        for proxy_host, proxy_port in self.proxy_targets:
+            if proxy_host != host:
+                continue
+            # A proxy without an explicit port is blocked on every port.
+            if proxy_port is None or port is None or proxy_port == port:
+                return True
+        return False
+
+    def check_connection(self, hostname: str, port: int | None = None) -> None:
+        """Check a connection: the destination, and whether it is a tunnel."""
+        if self.is_proxy_target(hostname, port):
+            raise NetworkIsolationError(
+                hostname=hostname,
+                allowed_domains=self.allowed_domains,
+                mode=self.mode,
+                reason="proxy_tunnel",
+                detail=(
+                    "A proxy is configured ("
+                    + ", ".join(
+                        f"{h}:{p}" if p is not None else h for h, p in self.proxy_targets
+                    )
+                    + "). Traffic through a proxy cannot be checked against "
+                    "the whitelist, so it is blocked. Remove the proxy from "
+                    "the environment, or set YUANWORK_NETWORK_MODE=allow_all."
+                ),
+            )
+        self.check(hostname)
+
     @staticmethod
     def extract_hostname(address: Any) -> str | None:
         """Extract hostname from any of the address shapes socket APIs use.
@@ -173,23 +261,35 @@ class NetworkGuard:
         `socket.socket().connect((host, port))`
         `socket.socket().connect(host)`  (some libs)
         """
+        host, _port = NetworkGuard.extract_host_and_port(address)
+        return host
+
+    @staticmethod
+    def extract_host_and_port(address: Any) -> tuple[str | None, int | None]:
+        """The host and the port of an address, whatever shape it has."""
         if not address:
-            return None
+            return None, None
+        port: int | None = None
         # The address is most often a (host, port) tuple
         if isinstance(address, (tuple, list)):
             if not address:
-                return None
+                return None, None
             host = address[0]
+            if len(address) > 1:
+                try:
+                    port = int(address[1])
+                except (TypeError, ValueError):
+                    port = None
         else:
             host = address
         if isinstance(host, bytes):
             try:
                 host = host.decode("ascii", errors="replace")
             except Exception:
-                return None
+                return None, None
         if not host:
-            return None
-        return str(host)
+            return None, None
+        return str(host), port
 
     # ----- Install / uninstall -----
 
@@ -226,9 +326,9 @@ class NetworkGuard:
             guard = self  # capture for closure
 
             def _guarded_create_connection(address, *args, **kwargs):  # type: ignore[no-untyped-def]
-                host = NetworkGuard.extract_hostname(address)
+                host, port = NetworkGuard.extract_host_and_port(address)
                 if host is not None:
-                    guard.check(host)
+                    guard.check_connection(host, port)
                 return guard._original_create_connection(address, *args, **kwargs)
 
             socket.create_connection = _guarded_create_connection  # type: ignore[assignment]
@@ -238,9 +338,9 @@ class NetworkGuard:
             _orig_connect = self._original_socket_connect
 
             def _guarded_connect(self_sock, address, *args, **kwargs):  # type: ignore[no-untyped-def]
-                host = NetworkGuard.extract_hostname(address)
+                host, port = NetworkGuard.extract_host_and_port(address)
                 if host is not None:
-                    guard.check(host)
+                    guard.check_connection(host, port)
                 return _orig_connect(self_sock, address, *args, **kwargs)
 
             socket.socket.connect = _guarded_connect  # type: ignore[assignment]
@@ -279,6 +379,44 @@ class NetworkGuard:
 
     def __exit__(self, *exc_info: Any) -> None:
         self.uninstall()
+
+
+def configured_proxy_targets() -> list[tuple[str, int | None]]:
+    """The proxies the environment explicitly configures.
+
+    A proxy turns every outbound connection into a connection to the
+    proxy, and the guard cannot see where the traffic really goes. So it
+    refuses to let traffic through a tunnel it cannot inspect.
+
+    Returns a list of ``(host, port)``; the port is None when the proxy
+    is named without one, which blocks every port on that host.
+    """
+    targets: list[tuple[str, int | None]] = []
+    seen: set[tuple[str, int | None]] = set()
+
+    for name in PROXY_ENV_VARS:
+        raw = os.environ.get(name)
+        if not raw or not raw.strip():
+            continue
+        value = raw.strip()
+        if "://" not in value:
+            # A bare host:port, as some tools write it
+            value = "http://" + value
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "").lower()
+        if not host:
+            continue
+        port = parsed.port
+        key = (host, port)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(key)
+
+    return targets
 
 
 # Re-export the URL-domain helper from config, for symmetry. Tests and

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,10 @@ def _import_flag_embedding():
     return BGEM3FlagModel
 
 
+#: How many rows the vector store takes in one write, when the setting
+#: is not around.
+DEFAULT_WRITE_BATCH_SIZE = 256
+
 # Schema versioning: when the chunks table schema evolves, bump this and
 # add a migration block in `get_or_create_chunks_table`. v1 = initial.
 # v2 = added `sparse_str` column for bge-m3 lexical weights.
@@ -58,12 +63,44 @@ class SemanticMemory:
         self,
         data_dir: Path | str,
         embedding_model: str = "BAAI/bge-m3",
-        embedding_device: str = "cpu",
+        embedding_device: str = "auto",
+        dense_timeout: float | None = None,
+        sparse_timeout: float | None = None,
+        embedding_timeout: float | None = None,
     ):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.embedding_model_name = embedding_model
-        self.embedding_device = embedding_device
+        # Which device the embedding runs on, and why it is that one.
+        # "auto" means: the GPU when there is one, the CPU otherwise.
+        self.embedding_device, self.device_fallback_reason = self._resolve_device(
+            embedding_device
+        )
+        from yuanwork.config import get_settings
+
+        settings = get_settings()
+        self.embedding_max_tokens = settings.embedding_max_tokens
+        self.embedding_use_fp16 = settings.embedding_use_fp16
+        # The embedding batch size is configuration: it is the biggest
+        # lever on how long the first build takes.
+        self.embedding_batch_size = settings.embedding_batch_size
+        # How many rows the vector store takes in one write. A build
+        # hands over a whole batch; the store writes it in pieces so
+        # the peak memory and the write latency stay bounded (AC-P-007).
+        self.write_batch_size = settings.index_write_batch_size
+        if dense_timeout is None:
+            dense_timeout = settings.dense_timeout_seconds
+        if sparse_timeout is None:
+            sparse_timeout = settings.sparse_timeout_seconds
+        if embedding_timeout is None:
+            embedding_timeout = settings.embedding_timeout_seconds
+        # How long each step of the retrieval chain may take. The dense
+        # channel is the one that cannot be dropped, so its timeout
+        # fails the query; the full-text channel degrades to dense-only
+        # (design 4.3). What neither may do is hang.
+        self.dense_timeout = dense_timeout
+        self.sparse_timeout = sparse_timeout
+        self.embedding_timeout = embedding_timeout
         self._db = None
         self._table = None
         self._embedder = None
@@ -87,6 +124,41 @@ class SemanticMemory:
         # When True, the next FTS read will rebuild the index from
         # LanceDB (used for one-time migration of v3 KBs).
         self._fts_needs_reindex: bool = True
+        #: How long the last write took, in seconds: the embedding and
+        #: the writing. The benchmark reads them to say where the time
+        #: of a build went (AC-P-011 / AC-P-012).
+        self.last_timings: dict[str, float] = {"embed": 0.0, "write": 0.0}
+
+    @staticmethod
+    def _resolve_device(device: str) -> tuple[str, str]:
+        """Which device the embedding runs on, and why.
+
+        The GPU is worth a lot of time on a build (ADR-035) - but only
+        when there is one. When there is not, the reason is written
+        down: a build that is slow for no visible reason is the kind
+        of thing a person loses an afternoon to.
+        """
+        wanted = (device or "auto").strip().lower()
+        if wanted not in ("auto", "cpu", "cuda"):
+            return "cpu", f"配置的设备「{device}」不认识，按 CPU 处理"
+
+        try:
+            import torch
+
+            cuda = bool(torch.cuda.is_available())
+        except Exception as e:  # noqa: BLE001 - torch may not be there at all
+            return "cpu", f"torch 不可用（{e!r}），按 CPU 处理"
+
+        if wanted == "cpu":
+            return "cpu", ""
+        if wanted == "cuda":
+            if cuda:
+                return "cuda", ""
+            return "cpu", "配置要求用 CUDA，但这台机器上没有可用的 NVIDIA 显卡"
+
+        if cuda:
+            return "cuda", ""
+        return "cpu", "这台机器上没有可用的 NVIDIA 显卡，按 CPU 处理"
 
     async def initialize(self) -> None:
         """Initialize LanceDB connection."""
@@ -174,9 +246,14 @@ class SemanticMemory:
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
         logger.info(f"Loading embedding model {self.embedding_model_name} on {self.embedding_device}...")
+        # Half precision is worth it on the GPU and nothing on the CPU.
+        # The token budget belongs to the model: one piece of text is
+        # at most this many tokens (ADR-035).
         self._embedder = BGEM3FlagModel(
             self.embedding_model_name,
             devices=self.embedding_device,
+            use_fp16=bool(self.embedding_use_fp16 and self.embedding_device == "cuda"),
+            max_length=self.embedding_max_tokens,
         )
         logger.info("Embedding model loaded")
 
@@ -217,9 +294,11 @@ class SemanticMemory:
             ("file_name", "string"),
             ("file_path", "string"),
             ("file_type", "string"),
-            ("page", "int32"),
-            ("slide_number", "int32"),
-            ("section", "string"),
+            # The position of the chunk in its document: one structure with
+            # a kind and the coordinates that kind defines. It replaces the
+            # three fixed columns (page / slide_number / section), which
+            # had nowhere to put an Excel row or a heading path.
+            ("anchor", "string"),
             ("content_type", "string"),
             ("token_count", "int32"),
             ("modified_at", "string"),
@@ -229,6 +308,10 @@ class SemanticMemory:
             # rows (placeholders) or back-compat with v1 tables.
             ("sparse_str", "string"),
         ]
+
+    def _expected_schema_fields_names(self) -> list[str]:
+        """The names of the chunk columns, in schema order."""
+        return [name for name, _ in self._expected_schema_fields()]
 
     def get_or_create_chunks_table(self):
         """Get or create the chunks table, with lazy schema migration.
@@ -275,9 +358,7 @@ class SemanticMemory:
                 ("file_name", pa.string()),
                 ("file_path", pa.string()),
                 ("file_type", pa.string()),
-                ("page", pa.int32()),
-                ("slide_number", pa.int32()),
-                ("section", pa.string()),
+                ("anchor", pa.string()),
                 ("content_type", pa.string()),
                 ("token_count", pa.int32()),
                 ("modified_at", pa.string()),
@@ -384,7 +465,7 @@ class SemanticMemory:
     async def embed_texts(
         self,
         texts: list[str],
-        batch_size: int = 8,
+        batch_size: int | None = None,
         return_sparse: bool | None = None,
     ) -> tuple[list[list[float]], list[dict[str, float]] | None]:
         """Embed texts using bge-m3. Returns (dense, sparse_or_None).
@@ -396,6 +477,8 @@ class SemanticMemory:
         if self._embedder is None:
             await self.load_embedding_model_async()
 
+        if batch_size is None:
+            batch_size = self.embedding_batch_size
         if return_sparse is None:
             return_sparse = self._sparse_enabled
 
@@ -404,13 +487,21 @@ class SemanticMemory:
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            result = await asyncio.to_thread(
-                self._embedder.encode,
-                batch,
-                return_dense=True,
-                return_sparse=return_sparse,
-                return_colbert_vecs=False,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._embedder.encode,
+                        batch,
+                        return_dense=True,
+                        return_sparse=return_sparse,
+                        return_colbert_vecs=False,
+                    ),
+                    timeout=self.embedding_timeout,
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    f"嵌入模型推理超过 {self.embedding_timeout} 秒"
+                ) from None
             dense = result["dense_vecs"]
             if hasattr(dense, "tolist"):
                 dense = dense.tolist()
@@ -442,11 +533,22 @@ class SemanticMemory:
 
         # Embed all texts (dense + sparse)
         texts = [c["text"] for c in chunks]
+        embed_started = time.perf_counter()
         embeddings, sparse_vecs = await self.embed_texts(texts, return_sparse=True)
+        embed_seconds = time.perf_counter() - embed_started
 
         from datetime import datetime
 
         now = datetime.now().isoformat()
+
+        # A table created before the anchor existed still has the three
+        # fixed location columns. They are filled from the anchor so the
+        # old columns keep working - but the anchor is the position of
+        # record.
+        try:
+            table_fields = {f.name for f in table.schema}
+        except Exception:  # noqa: BLE001 - a schema we cannot read is a schema we trust
+            table_fields = set(self._expected_schema_fields_names())
 
         records = []
         for chunk, embedding, sparse in zip(chunks, embeddings, sparse_vecs or [None] * len(chunks)):
@@ -459,6 +561,7 @@ class SemanticMemory:
             # so the location has to be read from there - reading the flat
             # "page" key would store a null for every PDF and PPTX.
             meta = chunk_meta(chunk)
+            anchor = meta.get("anchor")
 
             record = {
                 "id": chunk["id"],
@@ -469,18 +572,24 @@ class SemanticMemory:
                 "file_name": chunk.get("file_name", ""),
                 "file_path": chunk.get("file_path", ""),
                 "file_type": chunk.get("file_type", "unknown"),
-                "page": meta.get("page"),
-                "slide_number": meta.get("slide_number"),
-                # The DOCX / Markdown parsers call the heading "heading";
-                # the column is named "section".
-                "section": meta.get("heading") or meta.get("section"),
+                "anchor": json.dumps(anchor, ensure_ascii=False) if anchor else "",
                 "content_type": chunk.get("content_type", "text"),
                 "token_count": chunk.get("token_count", len(chunk["text"]) // 4),
                 "modified_at": chunk.get("modified_at", now),
                 "created_at": now,
                 "sparse_str": self._sparse_to_json(sparse),
             }
+
+            if "page" in table_fields:
+                record["page"] = meta.get("page")
+                record["slide_number"] = meta.get("slide_number")
+                # The DOCX / Markdown parsers call the heading "heading";
+                # the column is named "section".
+                record["section"] = meta.get("heading") or meta.get("section")
+
             records.append(record)
+
+        write_started = time.perf_counter()
 
         # Delete existing chunks with same IDs (for re-ingestion)
         existing_ids = [c["id"] for c in chunks]
@@ -489,8 +598,12 @@ class SemanticMemory:
         except Exception:
             pass  # Table might be empty
 
-        # Add new records
-        table.add(records)
+        # Add new records, in pieces. One write of ten thousand rows
+        # holds ten thousand vectors in memory at once; a build of
+        # thousands of files hands over that much in one go (AC-P-007).
+        size = max(1, int(getattr(self, "write_batch_size", DEFAULT_WRITE_BATCH_SIZE)))
+        for start in range(0, len(records), size):
+            table.add(records[start : start + size])
 
         # Mirror into the FTS index. Best-effort: if tantivy/jieba are
         # missing or fail, dense-only retrieval still works (we just lose
@@ -521,6 +634,11 @@ class SemanticMemory:
         except Exception as e:
             logger.warning(f"FTS index add failed (dense-only fallback): {e!r}")
 
+        self.last_timings = {
+            "embed": embed_seconds,
+            "write": time.perf_counter() - write_started,
+        }
+
         logger.info(f"Added {len(records)} chunks to LanceDB + FTS")
         return [c["id"] for c in chunks]
 
@@ -549,10 +667,21 @@ class SemanticMemory:
             query_vec.append(0.0)
 
         # Search
-        if filter_expr:
-            results = table.search(query_vec).where(filter_expr).limit(top_k).to_list()
-        else:
-            results = table.search(query_vec).limit(top_k).to_list()
+        def _dense_search() -> list[dict[str, Any]]:
+            if filter_expr:
+                return (
+                    table.search(query_vec).where(filter_expr).limit(top_k).to_list()
+                )
+            return table.search(query_vec).limit(top_k).to_list()
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.to_thread(_dense_search), timeout=self.dense_timeout
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"稠密检索超过 {self.dense_timeout} 秒"
+            ) from None
 
         # Extract distance (LanceDB returns _distance; smaller = closer)
         for r in results:
@@ -608,12 +737,25 @@ class SemanticMemory:
             dense_q.append(0.0)
 
         # --- Channel 1: dense vector recall ---
-        if filter_expr:
-            dense_results = (
-                table.search(dense_q).where(filter_expr).limit(recall_k).to_list()
+        # The vector store call is synchronous and gets slow as the table
+        # grows, so it runs in a thread with a cap. The dense channel is
+        # the one that cannot be dropped - a timeout fails the query
+        # rather than quietly returning nothing (design 4.3).
+        def _dense_search() -> list[dict[str, Any]]:
+            if filter_expr:
+                return (
+                    table.search(dense_q).where(filter_expr).limit(recall_k).to_list()
+                )
+            return table.search(dense_q).limit(recall_k).to_list()
+
+        try:
+            dense_results = await asyncio.wait_for(
+                asyncio.to_thread(_dense_search), timeout=self.dense_timeout
             )
-        else:
-            dense_results = table.search(dense_q).limit(recall_k).to_list()
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"稠密检索超过 {self.dense_timeout} 秒"
+            ) from None
         for r in dense_results:
             distance = r.pop("_distance", 0.0)
             r["_score_dense"] = 1.0 / (1.0 + distance)
@@ -632,29 +774,38 @@ class SemanticMemory:
         sparse_results: list[dict[str, Any]] = []
         try:
             fts = self._get_fts_index()
-            fts_hits = await asyncio.to_thread(fts.search, query, recall_k)
+            fts_hits = await asyncio.wait_for(
+                asyncio.to_thread(fts.search, query, recall_k),
+                timeout=self.sparse_timeout,
+            )
         except Exception as e:
+            # The full-text channel is the one that can be dropped: the
+            # query still answers from the dense channel alone.
             logger.warning(f"FTS search failed (sparse channel empty): {e!r}")
             fts_hits = []
         for cid, fts_score in fts_hits:
             base = dense_ids.get(cid)
             if base is None:
                 # FTS hit not in dense top-K — pull it from the table.
-                try:
+                def _fetch(cid: str = cid) -> list[dict[str, Any]]:
                     if filter_expr:
-                        rows = (
+                        return (
                             table.search(dense_q)
                             .where(f"{filter_expr} AND id = '{cid}'")
                             .limit(1)
                             .to_list()
                         )
-                    else:
-                        rows = (
-                            table.search(dense_q)
-                            .where(f"id = '{cid}'")
-                            .limit(1)
-                            .to_list()
-                        )
+                    return (
+                        table.search(dense_q)
+                        .where(f"id = '{cid}'")
+                        .limit(1)
+                        .to_list()
+                    )
+
+                try:
+                    rows = await asyncio.wait_for(
+                        asyncio.to_thread(_fetch), timeout=self.dense_timeout
+                    )
                 except Exception:
                     rows = []
                 if not rows:

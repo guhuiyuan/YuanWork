@@ -29,6 +29,13 @@ dependencies = [
     # Embedding
     "FlagEmbedding>=1.2.0",
     "sentence-transformers>=2.6.0",
+    # torch itself comes with FlagEmbedding. On a machine with an
+    # NVIDIA card the CUDA build is what makes the embedding fast
+    # (ADR-035) - it is not on PyPI's default index, so it is installed
+    # separately:
+    #   pip install torch --index-url https://download.pytorch.org/whl/cu121
+    # Without it the embedding falls back to the CPU, and the reason is
+    # written down in the health endpoint.
 
     # Document parsing
     "pdfplumber>=0.10.0",
@@ -38,6 +45,9 @@ dependencies = [
     "openpyxl>=3.1.0",
     "markdown-it-py>=3.0.0",
     "Pillow>=10.0.0",
+    # The benchmark writes its own PDFs - a corpus built with a real
+    # writer has the page count and the text volume of a real one.
+    "reportlab>=4.0.0",
 
     # OCR (stage 2) — rapidocr-onnxruntime is a pure-ONNX port of RapidOCR.
     # We prefer it over PaddleOCR because (a) no PaddlePaddle native dep
@@ -68,6 +78,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The CUDA build of torch. It lives on PyTorch's own index, so it is
+# not a plain dependency - the comment says how to install it.
+gpu = []
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -79,6 +92,8 @@ dev = [
 
 [project.scripts]
 yuanwork = "yuanwork.__main__:main"
+yuanwork-bench = "bench.run:main"
+yuanwork-accept-workspace = "bench.accept_workspace:main"
 
 [build-system]
 requires = ["hatchling"]

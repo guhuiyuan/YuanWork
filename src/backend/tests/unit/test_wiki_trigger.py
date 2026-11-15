@@ -180,7 +180,11 @@ async def test_maybe_compile_uses_fallback_when_no_llm(sqlite_store):
 
     # Verify chunks are linked to the page (outgoing: page → chunks)
     outgoing = await sqlite_store.get_wiki_outgoing_links(result["page_id"])
-    assert len(outgoing) == 4  # one per evidence chunk
+    chunk_links = [l for l in outgoing if l["target_type"] == "chunk"]
+    assert len(chunk_links) == 4  # one per evidence chunk
+    # And the page points at the documents it came from, too.
+    doc_links = [l for l in outgoing if l["target_type"] == "doc"]
+    assert len(doc_links) == 4
 
 
 @pytest.mark.asyncio
@@ -291,7 +295,7 @@ def test_wiki_prompt_format_does_not_raise():
     # real date in the final stored markdown.)
     assert "{标题}" in rendered
     assert "{category}" in rendered
-    assert "{doc1, doc2, ...}" in rendered
+    assert "{要点 1}" in rendered
     assert "{date_placeholder}" in rendered
 
 

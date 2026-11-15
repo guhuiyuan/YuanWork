@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from yuanwork.ingestion.parser.base import BaseParser, RawBlock
+from yuanwork.utils.anchor import make_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class PptxParser(BaseParser):
                             "slide_title": slide_title,
                             "has_notes": bool(notes_text),
                             "has_tables": bool(table_blocks),
+                            "anchor": make_anchor("slide", slide=slide_idx),
                         },
                     )
                 )
@@ -104,6 +106,7 @@ class PptxParser(BaseParser):
                             "slide_total": total_slides,
                             "slide_title": slide_title,
                             "table_index": t_idx,
+                            "anchor": make_anchor("slide", slide=slide_idx),
                         },
                     )
                 )

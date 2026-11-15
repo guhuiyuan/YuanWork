@@ -130,6 +130,14 @@ class Citation(BaseModel):
     page: int | None = None
     slide_number: int | None = None
     section: str | None = None
+    sheet: str | None = Field(default=None, description="Excel sheet name")
+    row: int | None = Field(default=None, description="Excel row number")
+    anchor: dict[str, Any] | None = Field(
+        default=None, description="The position of the quote in its document"
+    )
+    location: str | None = Field(
+        default=None, description="Human-readable position, e.g. 第 12 页"
+    )
     text: str = Field(..., description="Quoted original text")
     chunk_id: str
 
@@ -146,6 +154,20 @@ class ConflictInfo(BaseModel):
     explanation: str | None = None
 
 
+class InteractionRequest(BaseModel):
+    """What the client reports about an interaction.
+
+    The user opening a citation, accepting an answer or rejecting it
+    happens on the client; the server records what it is told.
+    """
+
+    session_id: str = ""
+    subject: str = ""
+    detail: str = ""
+    topic: str = ""
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class ChatResponse(BaseModel):
     """Chat response (non-streaming fallback)."""
 
@@ -157,7 +179,34 @@ class ChatResponse(BaseModel):
     refusal_reason: str | None = None
     conflicts: list[ConflictInfo] = Field(default_factory=list)
     wiki_compile: dict[str, Any] | None = None
+    # The terms the reader may not know - each one opens the text it
+    # stands for (ADR-041).
+    terms: list[str] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ===== The context of a term =====
+
+
+class TermContextItem(BaseModel):
+    """One passage around a term, and where it came from."""
+
+    text: str
+    file_name: str = ""
+    doc_id: str = ""
+    chunk_id: str = ""
+    #: Where in the document - "第 12 页", "Slide 3", ...
+    location: str = ""
+    page: int | None = None
+
+
+class TermContextResponse(BaseModel):
+    """Where a term appears in the knowledge base."""
+
+    term: str
+    #: Whether the knowledge base holds the term at all.
+    found: bool = False
+    contexts: list[TermContextItem] = Field(default_factory=list)
 
 
 # ===== Memory =====
@@ -223,6 +272,8 @@ class ConsolidateRequest(BaseModel):
     """Request to trigger memory consolidation."""
 
     reason: str = Field(default="manual")
+    # Accepted and ignored: the round does the same work either way -
+    # the trigger decides *when* it runs, not *what* it does.
     force: bool = Field(default=False)
 
 
@@ -234,6 +285,45 @@ class ConsolidateResponse(BaseModel):
     profile_updates: int
     conflicts_archived: int
     duration_ms: float
+    # What the round induced out of the recent interactions.
+    events_read: int = 0
+    entities_induced: int = 0
+    rules_induced: int = 0
+    page_points_induced: int = 0
+    induction_failures: int = 0
+    # Whether a round ran at all, and why.
+    triggered: bool = True
+    reason: str = "manual"
+
+
+# ===== The rules waiting for the user =====
+
+
+class PendingRule(BaseModel):
+    """A rule the integration layer found, waiting for the user."""
+
+    id: str
+    statement: str
+    source_event_ids: list[int] = Field(default_factory=list)
+    first_seen: str | None = None
+    last_seen: str | None = None
+
+
+class PendingRulesResponse(BaseModel):
+    """The rules waiting for the user."""
+
+    rules: list[PendingRule] = Field(default_factory=list)
+    total: int = 0
+
+
+class ApproveRuleResponse(BaseModel):
+    """A rule the user confirmed."""
+
+    id: str
+    statement: str
+    status: str
+    source_event_ids: list[int] = Field(default_factory=list)
+    approved: bool = True
 
 
 # ===== Wiki =====
@@ -245,11 +335,16 @@ class WikiPageInfo(BaseModel):
     id: str
     title: str
     summary: str
+    key_points: list[str] = Field(default_factory=list)
     category: str
     tags: list[str] = Field(default_factory=list)
     source_doc_ids: list[str] = Field(default_factory=list)
     chunk_count: int = 0
     version: int
+    #: The file the page was read from has changed since it was
+    #: compiled (AC-E-015). The page is kept - it is what the document
+    #: said - but the reader has to know.
+    stale: bool = False
     created_at: datetime
     updated_at: datetime
     last_compiled_at: datetime | None = None
@@ -261,6 +356,78 @@ class WikiPageDetail(WikiPageInfo):
     markdown: str
 
 
+class WikiPageBlock(BaseModel):
+    """A paragraph of a page, and who wrote it."""
+
+    #: Where the paragraph sits in the page.
+    index: int
+    #: The text of the paragraph.
+    text: str
+    #: "model" - the model wrote it ; "user" - the user wrote it, and a
+    #: later automatic recompile will not replace it (AC-F-027).
+    owner: Literal["model", "user"] = "model"
+
+
+class WikiPageBlocksResponse(BaseModel):
+    """The blocks of a page - its paragraphs, one by one."""
+
+    page_id: str
+    blocks: list[WikiPageBlock] = Field(default_factory=list)
+    total: int = 0
+
+
+class WikiConclusion(BaseModel):
+    """A conclusion on a page, and the place it was read from."""
+
+    id: str
+    page_id: str
+    text: str
+    #: The position in the original document (ADR-032).
+    anchor: dict[str, Any] = Field(default_factory=dict)
+    #: The position in words, e.g. "第 12 页".
+    location: str = ""
+    #: The file the conclusion was read from.
+    file_name: str = ""
+    file_path: str = ""
+    #: Which segment of the document it came from.
+    segment_index: int = 0
+    active: bool = True
+
+
+class WikiConclusionsResponse(BaseModel):
+    """The conclusions of a page."""
+
+    page_id: str
+    conclusions: list[WikiConclusion] = Field(default_factory=list)
+
+
+class DocumentTierRequest(BaseModel):
+    """The user's own choice of layer for a document."""
+
+    #: "core" = the documents with conclusions of their own ;
+    #: "longtail" = the scattered, everyday material.
+    tier: Literal["core", "longtail"]
+
+
+class WikiPageEdit(BaseModel):
+    """The user's edit of a page body."""
+
+    markdown: str
+
+
+class WikiCompileResponse(BaseModel):
+    """The outcome of a manual page compilation."""
+
+    #: Whether a page was written.
+    compiled: bool
+    page_id: str = ""
+    title: str = ""
+    #: Why nothing was compiled - "no_evidence", "search_failed",
+    #: "compile_failed". The detail stays in the log.
+    reason: str = ""
+    chunk_count: int = 0
+
+
 class WikiLink(BaseModel):
     """A bidirectional link between wiki entities."""
 
@@ -270,6 +437,9 @@ class WikiLink(BaseModel):
     target_type: Literal["page", "chunk", "doc", "episode"]
     link_type: str
     weight: float
+    #: The name of the other end - a link to a page id is not something
+    #: a reader can use.
+    title: str = ""
 
 
 class WikiBacklinks(BaseModel):
@@ -294,6 +464,8 @@ class WikiGraphNode(BaseModel):
     type: str
     category: str | None = None
     weight: int = 1
+    #: The key points of a page - what the page says, in short.
+    key_points: list[str] = Field(default_factory=list)
 
 
 class WikiGraphEdge(BaseModel):
@@ -310,6 +482,31 @@ class WikiGraphResponse(BaseModel):
 
     nodes: list[WikiGraphNode]
     edges: list[WikiGraphEdge]
+
+
+# ===== Workspace =====
+
+
+class WorkspacePathRequest(BaseModel):
+    """Request to add a folder or a single file to the workspace."""
+    path: str = Field(..., description="Absolute path to the folder or the file")
+    included: bool = Field(default=True, description="Whether to index it")
+
+
+class WorkspaceEntryInfo(BaseModel):
+    """One entry of the workspace."""
+    id: str
+    path: str
+    kind: Literal["folder", "file"]
+    included: bool
+    added_at: str
+    doc_id: str | None = None
+
+
+class WorkspaceEntriesResponse(BaseModel):
+    """The workspace entries."""
+    entries: list[WorkspaceEntryInfo]
+    total: int
 
 
 # ===== Generic =====

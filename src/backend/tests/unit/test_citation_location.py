@@ -17,6 +17,8 @@ cannot do, and the user gets a citation that says only *which file*.
 
 from __future__ import annotations
 
+import json
+
 from typing import Any
 
 import pytest
@@ -189,9 +191,9 @@ def test_the_answer_prompt_carries_the_slide_number():
 
 
 @pytest.mark.asyncio
-async def test_add_chunks_stores_the_page_from_the_nested_shape(monkeypatch):
-    """The chunker hands the page number over nested - the store has to
-    lift it into the flat column, or it is lost for good."""
+async def test_add_chunks_stores_the_anchor_from_the_nested_shape(monkeypatch):
+    """The chunker hands the position over nested - the store has to
+    carry it into the anchor column, or it is lost for good."""
     from yuanwork.memory.semantic import SemanticMemory
 
     stored: dict[str, Any] = {}
@@ -221,11 +223,9 @@ async def test_add_chunks_stores_the_page_from_the_nested_shape(monkeypatch):
 
     records = stored["records"]
     assert len(records) == 1
-    assert records[0]["page"] == 12
-    assert records[0]["slide_number"] is None
-    # The DOCX / Markdown parsers call the heading "heading"; the column
-    # is called "section".
-    assert records[0]["section"] is None
+    anchor = json.loads(records[0]["anchor"])
+    assert anchor["kind"] == "page"
+    assert anchor["page"] == 12
 
 
 async def _fake_embed_texts(self, texts, return_sparse=False):

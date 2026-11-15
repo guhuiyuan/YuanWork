@@ -56,6 +56,13 @@ async def health_check(request: Request) -> HealthResponse:
                 "table_count": len(semantic.list_tables()),
                 "embedding_loaded": embedding_loaded,
                 "embedding_model": semantic.embedding_model_name,
+                # Which device the embedding runs on, and why it is
+                # that one - a build that is slow for no visible reason
+                # is the kind of thing a person loses an afternoon to.
+                "embedding_device": getattr(semantic, "embedding_device", ""),
+                "embedding_device_reason": getattr(
+                    semantic, "device_fallback_reason", ""
+                ),
             }
         else:
             components["semantic_memory"] = {"status": "not_initialized"}
