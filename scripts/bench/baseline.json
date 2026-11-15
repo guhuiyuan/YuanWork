@@ -1,0 +1,44 @@
+{
+  "files": 30,
+  "chunks": 314,
+  "elapsed_seconds": 17.904,
+  "measured": {
+    "parse": true,
+    "embed": false,
+    "write": false
+  },
+  "timings": {
+    "parse": 12.019,
+    "chunk": 0.002,
+    "embed": 0.0,
+    "write": 0.0,
+    "compile": 0.0
+  },
+  "stage_share": {
+    "parse": 0.6713,
+    "embed": 0.0,
+    "write": 0.0
+  },
+  "throughput": {
+    "parse_files_per_minute": 149.76,
+    "embed_chunks_per_second": 0.0,
+    "write_chunks_per_second": 0.0,
+    "files_per_minute": 100.54
+  },
+  "requested_files": 30,
+  "peak_memory_bytes": 591593472,
+  "machine": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.12",
+    "processor": "Intel64 Family 6 Model 154 Stepping 3, GenuineIntel",
+    "cpu_count": 20,
+    "memory_bytes": 16962281472,
+    "torch": "2.14.1+cpu",
+    "cuda": false
+  },
+  "not_measured": [
+    "embed",
+    "write"
+  ],
+  "note": "这些环节没有测到：embed、write（多半是嵌入模型在本机装不上）——没有测到的数字不算数，也不参与退步判断。"
+}
