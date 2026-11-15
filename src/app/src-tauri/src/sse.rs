@@ -362,4 +362,52 @@ data: 2
         assert_eq!(d.decode(&bytes[..2]), "");
         assert_eq!(d.finish(), "\u{FFFD}");
     }
+
+    // ===== the fixtures both parsers have to agree on =====
+    //
+    // The browser-side parser (src/app/src/api/sse.ts) parses the same
+    // strings with the same expectations. A change in one parser that
+    // the other does not follow breaks a test on both sides.
+
+    #[test]
+    fn agrees_with_the_browser_parser_on_the_shared_fixtures() {
+        // (wire, expected event, expected data)
+        let fixtures: [(&str, &str, &str); 6] = [
+            (
+                "event: token\r\ndata: {\"text\":\"hi\"}\r\n\r\n",
+                "token",
+                "{\"text\":\"hi\"}",
+            ),
+            (
+                "event: token\ndata: {\"text\":\"hi\"}\n\n",
+                "token",
+                "{\"text\":\"hi\"}",
+            ),
+            ("data: plain\n\n", "message", "plain"),
+            ("event: x\ndata: one\ndata: two\n\n", "x", "one\ntwo"),
+            // a comment frame yields no event
+            (": ping - 1700000000\n\n", "", ""),
+            ("event: x\ndata\n\n", "x", ""),
+        ];
+
+        for (wire, event, data) in fixtures {
+            let mut parser = SseParser::new();
+            let events = parser.push(wire);
+            if event.is_empty() {
+                assert!(events.is_empty(), "a comment frame yields no event");
+            } else {
+                assert_eq!(events.len(), 1, "for {:?}", wire);
+                assert_eq!(events[0].event, event, "for {:?}", wire);
+                assert_eq!(events[0].data, data, "for {:?}", wire);
+            }
+        }
+    }
+
+    #[test]
+    fn the_comment_frame_is_skipped_but_the_next_one_is_not() {
+        let mut p = SseParser::new();
+        let events = p.push(": ping - 1\n\nevent: token\ndata: x\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "token");
+    }
 }

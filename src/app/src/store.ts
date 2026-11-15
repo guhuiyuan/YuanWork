@@ -17,10 +17,24 @@ export interface ChatMessage {
   citations?: Citation[];
   confidence?: number;
   refused?: boolean;
-  /** Why the answer was refused - "low_confidence" or "generation_error: ..." */
+  /** The terms in the answer - each one opens the text it stands for. */
+  terms?: string[];
+  /** Why the answer was refused - "insufficient_evidence", "unlocatable_evidence"
+   *  or "generation_error: ..." */
   refusalReason?: string;
   conflict?: string;
   timestamp: number;
+}
+
+export interface CitationAnchor {
+  /** "page" | "slide" | "section" | "sheet_row" | "heading_path" */
+  kind: string;
+  page?: number;
+  slide?: number;
+  section?: string;
+  sheet?: string;
+  row?: number;
+  heading_path?: string[];
 }
 
 export interface Citation {
@@ -30,6 +44,13 @@ export interface Citation {
   page?: number;
   slide_number?: number;
   section?: string | null;
+  /** The worksheet of a spreadsheet, and the row inside it. */
+  sheet?: string | null;
+  row?: number | null;
+  /** The position in the document, in the shape the shell takes. */
+  anchor?: CitationAnchor | null;
+  /** The position in words, e.g. "第 12 页". */
+  location?: string | null;
   text: string;
   chunk_id?: string;
 }
@@ -42,6 +63,42 @@ export interface KbFile {
   chunk_count: number;
 }
 
+/**
+ * One entry of the workspace - a folder or a single file the user set up.
+ *
+ * The workspace is the scope of the whole app: the build runs over its
+ * entries, and the sidebar lists them instead of the indexed files.
+ */
+export interface WorkspaceEntry {
+  id: string;
+  path: string;
+  kind: "folder" | "file";
+  /** Whether the entry takes part in the build. */
+  included: boolean;
+  added_at: string;
+  /** The document this entry was indexed as, once it was built. */
+  doc_id?: string | null;
+}
+
+/** One passage around a term, and where it came from. */
+export interface TermContextItem {
+  text: string;
+  file_name: string;
+  doc_id: string;
+  chunk_id: string;
+  /** Where in the document - "第 12 页", "Slide 3", ... */
+  location: string;
+  page: number | null;
+}
+
+/** Where a term appears in the knowledge base. */
+export interface TermContext {
+  term: string;
+  /** Whether the knowledge base holds the term at all. */
+  found: boolean;
+  contexts: TermContextItem[];
+}
+
 export interface WikiPage {
   id: string;
   title: string;
@@ -51,6 +108,8 @@ export interface WikiPage {
   source_doc_ids: string[];
   chunk_count: number;
   version: number;
+  /** The file the page was read from has changed since it was compiled. */
+  stale?: boolean;
   updated_at: string;
   last_compiled_at: string | null;
 }
@@ -58,6 +117,33 @@ export interface WikiPage {
 export interface WikiPageDetail extends WikiPage {
   markdown: string;
   source_doc_ids: string[];
+}
+
+/**
+ * One paragraph of a page, and who wrote it.
+ *
+ * A paragraph the user wrote stays theirs - a later automatic
+ * recompile replaces the model's paragraphs and leaves these alone.
+ */
+export interface WikiPageBlock {
+  index: number;
+  text: string;
+  owner: "model" | "user";
+}
+
+/**
+ * A conclusion on a page, and the place it was read from.
+ *
+ * The anchor is what makes the conclusion checkable - the reader can
+ * open the original at that position.
+ */
+export interface WikiConclusion {
+  id: string;
+  text: string;
+  anchor?: CitationAnchor | null;
+  location: string;
+  file_name: string;
+  file_path: string;
 }
 
 export interface WikiLink {
@@ -116,6 +202,21 @@ interface AppState {
   setKbError: (e: string | null) => void;
   currentFolder: string | null;
   setCurrentFolder: (f: string | null) => void;
+
+  /**
+   * The workspace: the folders and the single files the user set up.
+   *
+   * The build runs over these entries, and the sidebar lists them -
+   * the indexed files are what the build made of them.
+   */
+  workspaceEntries: WorkspaceEntry[];
+  setWorkspaceEntries: (e: WorkspaceEntry[]) => void;
+  /** True once the workspace has been fetched - avoids an empty flash. */
+  workspaceLoaded: boolean;
+  setWorkspaceLoaded: (v: boolean) => void;
+  /** Set when the workspace could not be read at all (backend down). */
+  workspaceError: string | null;
+  setWorkspaceError: (e: string | null) => void;
 
   /** The folder currently being indexed, and how it is going. */
   ingesting: boolean;
@@ -182,6 +283,13 @@ export const useAppStore = create<AppState>((set) => ({
   setKbError: (e) => set({ kbError: e }),
   currentFolder: null,
   setCurrentFolder: (f) => set({ currentFolder: f }),
+
+  workspaceEntries: [],
+  setWorkspaceEntries: (e) => set({ workspaceEntries: e }),
+  workspaceLoaded: false,
+  setWorkspaceLoaded: (v) => set({ workspaceLoaded: v }),
+  workspaceError: null,
+  setWorkspaceError: (e) => set({ workspaceError: e }),
 
   ingesting: false,
   ingestMessage: null,

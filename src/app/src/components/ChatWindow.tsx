@@ -1,7 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useAppStore, ChatMessage } from "../store";
-import { chatStream, ChatResponse, ConflictInfo } from "../api/backend";
-import { appendFailureNotice, failureNotice, refusalBanner, refusalContent } from "../api/streamText";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAppStore, ChatMessage, Citation, TermContext } from "../store";
+import {
+  cancelChat,
+  chatStream,
+  ChatResponse,
+  ConflictInfo,
+  getTermContext,
+  openCitation,
+} from "../api/backend";
+import { citationLabel } from "../api/citations";
+import { markTerms, termContextSummary } from "../api/terms";
+import { appendFailureNotice, failureNotice, isCancellation, refusalBanner, refusalContent } from "../api/streamText";
 
 /** Format the backend's conflict records into one warning string. */
 function formatConflicts(conflicts: unknown): string | undefined {
@@ -35,6 +44,8 @@ export function ChatWindow() {
   const gotTokensRef = useRef(false);
   const answerTextRef = useRef("");
   const errorNoticedRef = useRef(false);
+  // The session of the run that is going on - the stop button needs it.
+  const sessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -132,8 +143,13 @@ export function ChatWindow() {
     answerTextRef.current = "";
     errorNoticedRef.current = false;
 
+    // The session identifies the run - the stop button needs it to
+    // reach the generation that is going on.
+    const sessionId = crypto.randomUUID();
+    sessionIdRef.current = sessionId;
+
     try {
-      const resp: ChatResponse = await chatStream({ query: q }, (ev) => {
+      const resp: ChatResponse = await chatStream({ query: q, session_id: sessionId }, (ev) => {
         switch (ev.type) {
           case "token": {
             const text = typeof ev.data.text === "string" ? ev.data.text : "";
@@ -156,6 +172,19 @@ export function ChatWindow() {
             const citations = ev.data.citations as ChatMessage["citations"];
             if (citations) {
               useAppStore.getState().updateMessage(assistantId, { citations });
+            }
+            break;
+          }
+          case "done": {
+            // The terms of the answer travel with the final response.
+            // They are read here as well, because the desktop bridge
+            // hands the answer back without them.
+            const response = ev.data.response as
+              | { terms?: string[] }
+              | undefined;
+            const terms = response?.terms;
+            if (terms && terms.length > 0) {
+              useAppStore.getState().updateMessage(assistantId, { terms });
             }
             break;
           }
@@ -208,6 +237,7 @@ export function ChatWindow() {
         citations: resp.citations,
         confidence: resp.confidence,
         refused: resp.refused,
+        terms: resp.terms,
       };
       // The reason tells the banner apart: a deliberate refusal
       // ("low_confidence") and a model failure ("generation_error: ...")
@@ -243,10 +273,16 @@ export function ChatWindow() {
       const current = useAppStore
         .getState()
         .messages.find((m) => m.id === assistantId);
-      // Keep whatever was already streamed - losing it would be worse
-      // than showing the error next to it. If an `error` event already
-      // reported the failure, do not repeat the notice.
-      if (!errorNoticedRef.current) {
+      // A cancellation is not a failure - the user asked for it.
+      if (isCancellation(detail)) {
+        const base = current?.content || answerTextRef.current;
+        useAppStore.getState().updateMessage(assistantId, {
+          content: base ? `${base}\n\n（已停止生成）` : "（已停止生成）",
+        });
+      } else if (!errorNoticedRef.current) {
+        // Keep whatever was already streamed - losing it would be worse
+        // than showing the error next to it. If an `error` event already
+        // reported the failure, do not repeat the notice.
         // The backend's "answer" event carries the complete text. If the
         // stream was cut before "done", that is the only place the full
         // answer exists - fall back to it instead of showing nothing.
@@ -259,8 +295,22 @@ export function ChatWindow() {
     } finally {
       setStreaming(false);
       streamIdRef.current = null;
+      sessionIdRef.current = null;
     }
   }
+
+  // Stop the generation that is going on.
+  const handleStop = useCallback(async () => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return;
+    try {
+      await cancelChat(sessionId);
+    } catch (e) {
+      // The stream ends on its own anyway - the user is not left with a
+      // dialog about it.
+      console.warn("Could not stop the generation:", e);
+    }
+  }, []);
 
   return (
     <div className="chat">
@@ -316,6 +366,11 @@ export function ChatWindow() {
         >
           发送
         </button>
+        {isStreaming && (
+          <button className="btn btn--stop" onClick={() => void handleStop()}>
+            停止
+          </button>
+        )}
       </div>
 
       <style>{chatStyles}</style>
@@ -324,6 +379,68 @@ export function ChatWindow() {
 }
 
 function Message({ msg }: { msg: ChatMessage }) {
+  const [openError, setOpenError] = useState<string | null>(null);
+  // The term whose context is open, and the context itself.
+  const [activeTerm, setActiveTerm] = useState<string | null>(null);
+  const [termContext, setTermContext] = useState<TermContext | null>(null);
+  const [termLoading, setTermLoading] = useState(false);
+  const [termError, setTermError] = useState<string | null>(null);
+  // Counts the lookups, so a slow answer for a term the reader has
+  // already left does not overwrite the one that is open.
+  const termRequestRef = useRef(0);
+
+  // Clicking a citation opens the file it points at, at the position it
+  // points to (ADR-017). A file that cannot be opened says so instead
+  // of doing nothing - the reader has to know the click did not work.
+  const openCitationAt = useCallback(async (citation: Citation) => {
+    setOpenError(null);
+    try {
+      await openCitation(citation);
+    } catch (e) {
+      setOpenError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  /**
+   * Open the text a term stands for.
+   *
+   * The passages come from the knowledge base with the place they were
+   * read from - nothing is generated here (ADR-041). A term the
+   * knowledge base does not hold says so.
+   */
+  const openTerm = useCallback(async (term: string) => {
+    const request = ++termRequestRef.current;
+    setActiveTerm(term);
+    setTermLoading(true);
+    setTermError(null);
+    setTermContext(null);
+    try {
+      const context = await getTermContext(term);
+      if (request !== termRequestRef.current) return;
+      setTermContext(context);
+    } catch (e) {
+      if (request !== termRequestRef.current) return;
+      setTermError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (request === termRequestRef.current) setTermLoading(false);
+    }
+  }, []);
+
+  const closeTerm = useCallback(() => {
+    termRequestRef.current += 1;
+    setActiveTerm(null);
+    setTermContext(null);
+    setTermError(null);
+    setTermLoading(false);
+  }, []);
+
+  // The answer, with the terms in it marked. The text itself is not
+  // changed - the pieces joined together are the answer.
+  const segments = useMemo(
+    () => markTerms(msg.content, msg.terms ?? []),
+    [msg.content, msg.terms]
+  );
+
   if (msg.role === "user") {
     return (
       <div className="msg msg--user">
@@ -350,25 +467,102 @@ function Message({ msg }: { msg: ChatMessage }) {
         </div>
       )}
 
-      <div className="msg__content">{msg.content || "（生成中…）"}</div>
+      <div className="msg__content">
+        {msg.content
+          ? segments.map((segment, index) => {
+              const term = segment.term;
+              if (!term) return <span key={index}>{segment.text}</span>;
+              return (
+                <button
+                  key={index}
+                  type="button"
+                  className="msg__term"
+                  title="查看原文上下文"
+                  onClick={() => void openTerm(term)}
+                >
+                  {segment.text}
+                </button>
+              );
+            })
+          : "（生成中…）"}
+      </div>
+
+      {msg.terms && msg.terms.length > 0 && (
+        <div className="msg__terms">
+          <span className="msg__terms-title">术语</span>
+          {msg.terms.map((term, index) => (
+            <button
+              key={`${term}-${index}`}
+              type="button"
+              className="msg__term-chip"
+              onClick={() => void openTerm(term)}
+            >
+              {term}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {activeTerm && (
+        <div className="msg__term-panel">
+          <div className="msg__term-panel-head">
+            <span>「{activeTerm}」的原文上下文</span>
+            <button
+              type="button"
+              className="msg__term-panel-close"
+              onClick={closeTerm}
+            >
+              关闭
+            </button>
+          </div>
+          {termLoading && <div className="msg__term-status">查找中…</div>}
+          {termError && (
+            <div className="msg__term-status msg__term-status--error">
+              查不到：{termError}
+            </div>
+          )}
+          {termContext && (
+            <>
+              <div className="msg__term-summary">
+                {termContextSummary(termContext)}
+              </div>
+              {termContext.contexts.map((item, index) => (
+                <div
+                  key={item.chunk_id || index}
+                  className="msg__term-passage"
+                >
+                  <div className="msg__term-passage-text">{item.text}</div>
+                  <div className="msg__term-passage-loc">
+                    {item.file_name}
+                    {item.location ? ` · ${item.location}` : ""}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
 
       {msg.citations && msg.citations.length > 0 && (
         <div className="msg__citations">
           <div className="msg__citations-title">引用来源</div>
           {msg.citations.map((c) => (
-            <div key={c.index} className="citation">
+            <button
+              key={c.index}
+              className="citation"
+              onClick={() => void openCitationAt(c)}
+              title="打开原文"
+            >
               <span className="citation__index">[{c.index}]</span>
-              <div className="citation__body">
-                <div className="citation__loc">
-                  📄 {c.file_name}
-                  {c.page != null && ` · 第 ${c.page} 页`}
-                  {c.slide_number != null && ` · Slide ${c.slide_number}`}
-                  {c.section ? ` · ${c.section}` : ""}
-                </div>
-                <div className="citation__text">「{c.text}」</div>
-              </div>
-            </div>
+              <span className="citation__body">
+                <span className="citation__loc">📄 {citationLabel(c)}</span>
+                <span className="citation__text">「{c.text}」</span>
+              </span>
+            </button>
           ))}
+          {openError && (
+            <div className="citation__error">打不开这个文件：{openError}</div>
+          )}
         </div>
       )}
 
@@ -450,6 +644,10 @@ const chatStyles = `
     resize: none;
     min-height: 60px;
   }
+  .chat__input .btn--stop {
+    align-self: flex-end;
+    white-space: nowrap;
+  }
   .chat__thinking {
     color: var(--text-tertiary);
     font-size: 12px;
@@ -478,6 +676,94 @@ const chatStyles = `
     max-width: 85%;
     white-space: pre-wrap;
     word-wrap: break-word;
+  }
+  .msg__term {
+    display: inline;
+    background: none;
+    border: none;
+    border-bottom: 1px dotted var(--accent);
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .msg__term:hover { border-bottom-style: solid; }
+  .msg__terms {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    max-width: 85%;
+  }
+  .msg__terms-title {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .msg__term-chip {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .msg__term-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .msg__term-panel {
+    margin-top: 6px;
+    max-width: 85%;
+    background: var(--bg-secondary);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  .msg__term-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 6px;
+  }
+  .msg__term-panel-close {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 6px;
+  }
+  .msg__term-panel-close:hover { border-color: var(--accent); }
+  .msg__term-status {
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  .msg__term-status--error { color: var(--conflict-border, #991b1b); }
+  .msg__term-summary {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 6px;
+  }
+  .msg__term-passage {
+    border-top: 1px solid var(--border);
+    padding: 6px 0;
+  }
+  .msg__term-passage-text {
+    color: var(--text-primary);
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+  .msg__term-passage-loc {
+    color: var(--text-tertiary);
+    font-size: 11px;
+    margin-top: 2px;
   }
   .msg__refusal {
     background: var(--refusal-bg);
@@ -512,26 +798,43 @@ const chatStyles = `
     display: flex;
     gap: 8px;
     background: var(--citation-bg);
+    border: none;
     border-left: 3px solid var(--citation-border);
-    padding: 8px 10px;
     border-radius: 4px;
+    padding: 8px 10px;
     margin-bottom: 4px;
     font-size: 13px;
+    font-family: inherit;
+    color: inherit;
+    text-align: left;
+    width: 100%;
+    cursor: pointer;
+  }
+  .citation:hover {
+    background: var(--citation-hover-bg, var(--citation-bg));
+    border-left-color: var(--accent);
   }
   .citation__index {
     color: var(--accent);
     font-weight: 600;
     flex-shrink: 0;
   }
-  .citation__body { flex: 1; }
+  .citation__body { flex: 1; display: block; }
   .citation__loc {
+    display: block;
     font-size: 12px;
     color: var(--text-secondary);
     margin-bottom: 2px;
   }
   .citation__text {
+    display: block;
     color: var(--text-primary);
     font-style: italic;
+  }
+  .citation__error {
+    font-size: 11px;
+    color: var(--conflict-border, #991b1b);
+    margin-top: 4px;
   }
   .msg__confidence {
     font-size: 11px;

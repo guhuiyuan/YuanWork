@@ -1,19 +1,39 @@
 import { useAppStore } from "../store";
 import { useIngest } from "../hooks/useIngest";
-import { markOnboarded } from "../api/firstRun";
+import { hasOnboarded, markOnboarded } from "../api/firstRun";
 
 /**
  * The first-run screen.
  *
- * Shown until the user has picked a working folder. A fresh install has
- * an empty knowledge base, so the app has nothing to say until it knows
- * what to index - this screen makes that one decision obvious instead
- * of leaving the user staring at an empty sidebar.
+ * Shown until the workspace has something in it. A fresh install has
+ * an empty workspace, so the app has nothing to say until it knows
+ * what to work on - this screen makes that one decision obvious
+ * instead of leaving the user staring at an empty sidebar.
+ *
+ * The screen is only for a workspace that is really empty: an
+ * unreadable workspace is not an empty one, and a workspace with
+ * entries means the setup already happened - the user should not be
+ * dragged back into the welcome screen over a live chat.
  */
 export function Onboarding() {
   const { ingesting, message, pickAndIngest, cancel } = useIngest();
+  const workspaceEntries = useAppStore((s) => s.workspaceEntries);
+  const workspaceLoaded = useAppStore((s) => s.workspaceLoaded);
+  const workspaceError = useAppStore((s) => s.workspaceError);
   const setView = useAppStore((s) => s.setView);
   const showToast = useAppStore((s) => s.showToast);
+
+  // Still reading the workspace - drawing the screen now would make it
+  // flash on every launch.
+  if (!workspaceLoaded) return null;
+  // The workspace could not be read. That is not an empty workspace,
+  // and the welcome screen would be a lie.
+  if (workspaceError) return null;
+  // The workspace is set up - the app has something to work on.
+  if (workspaceEntries.length > 0) return null;
+  // The user already made the setup decision, even if the workspace is
+  // empty now (they may have removed every entry on purpose).
+  if (hasOnboarded()) return null;
 
   async function handlePick() {
     const ok = await pickAndIngest();
@@ -25,7 +45,7 @@ export function Onboarding() {
   function handleSkip() {
     markOnboarded();
     setView("chat");
-    showToast("可以随时从左侧「+ 添加」选择工作目录", "info");
+    showToast("可以随时从左侧「+ 文件夹」选择工作目录", "info");
   }
 
   return (

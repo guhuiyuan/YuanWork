@@ -3,6 +3,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatWindow } from "./components/ChatWindow";
 import { RightPanel } from "./components/RightPanel";
 import { Onboarding } from "./components/Onboarding";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WikiTreePanel } from "./components/Wiki/WikiTreePanel";
 import { WikiPageView } from "./components/Wiki/WikiPageView";
 import { WikiGraphView } from "./components/Wiki/WikiGraphView";
@@ -12,20 +13,22 @@ import { hasOnboarded, shouldShowOnboarding } from "./api/firstRun";
 
 export function App() {
   const view = useAppStore((s) => s.view);
-  const kbFiles = useAppStore((s) => s.kbFiles);
-  const kbLoaded = useAppStore((s) => s.kbLoaded);
-  const kbError = useAppStore((s) => s.kbError);
+  const workspaceEntries = useAppStore((s) => s.workspaceEntries);
+  const workspaceLoaded = useAppStore((s) => s.workspaceLoaded);
+  const workspaceError = useAppStore((s) => s.workspaceError);
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
 
-  // The welcome screen shows until the user has picked a working
-  // folder. An empty knowledge base alone is not enough to decide
-  // that - someone may have removed every file on purpose.
+  // The welcome screen shows until the user has set up a workspace
+  // (AC-F-001). The *workspace* decides that - not the indexed files:
+  // an empty knowledge base only means the build has not run yet (or
+  // that the user removed every file on purpose), while an empty
+  // workspace means the app does not know what to work on.
   const needsSetup = shouldShowOnboarding(
-    kbLoaded,
-    kbFiles.length,
+    workspaceLoaded,
+    workspaceEntries.length,
     hasOnboarded(),
-    kbError
+    workspaceError
   );
 
   // Auto-dismiss the toast.
@@ -38,7 +41,9 @@ export function App() {
   return (
     <div className="app">
       <aside className="app__sidebar">
-        <Sidebar />
+        <ErrorBoundary label="侧边栏">
+          <Sidebar />
+        </ErrorBoundary>
       </aside>
 
       <main className="app__main">
@@ -46,22 +51,38 @@ export function App() {
           <Onboarding />
         ) : (
           <>
-            {view === "chat" && <ChatWindow />}
-            {view === "wiki" && <WikiPageView />}
-            {view === "graph" && <WikiGraphView />}
+            {view === "chat" && (
+              <ErrorBoundary label="对话">
+                <ChatWindow />
+              </ErrorBoundary>
+            )}
+            {view === "wiki" && (
+              <ErrorBoundary label="Wiki 页面">
+                <WikiPageView />
+              </ErrorBoundary>
+            )}
+            {view === "graph" && (
+              <ErrorBoundary label="图谱">
+                <WikiGraphView />
+              </ErrorBoundary>
+            )}
           </>
         )}
       </main>
 
       <aside className="app__right">
-        {view === "wiki" ? <WikiBacklinks /> : <RightPanel />}
+        <ErrorBoundary label="右侧面板">
+          {view === "wiki" ? <WikiBacklinks /> : <RightPanel />}
+        </ErrorBoundary>
       </aside>
 
       {/* Wiki tree floats as a slide-in panel over the sidebar when in wiki view,
           so users can browse the page tree without losing the navigation. */}
       {view === "wiki" && (
         <aside className="app__wiki-tree">
-          <WikiTreePanel />
+          <ErrorBoundary label="页面树">
+            <WikiTreePanel />
+          </ErrorBoundary>
         </aside>
       )}
 
@@ -77,6 +98,19 @@ export function App() {
 }
 
 const toastStyles = `
+  .error-boundary {
+    padding: 16px;
+    margin: 12px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--danger);
+    border-radius: 6px;
+    background: var(--bg-secondary, transparent);
+    font-size: 13px;
+    color: var(--text-primary);
+  }
+  .error-boundary strong { display: block; margin-bottom: 4px; }
+  .error-boundary .btn { margin-top: 8px; }
+
   .toast {
     position: fixed;
     left: 50%;

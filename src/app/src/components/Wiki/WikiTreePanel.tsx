@@ -54,7 +54,7 @@ export function WikiTreePanel() {
       return (
         p.title.toLowerCase().includes(q) ||
         p.category.toLowerCase().includes(q) ||
-        p.tags.some((t) => t.toLowerCase().includes(q))
+        (p.tags ?? []).some((t) => t.toLowerCase().includes(q))
       );
     });
     const groups: Record<string, typeof pages> = {};
@@ -113,6 +113,14 @@ export function WikiTreePanel() {
                   title={p.summary || p.title}
                 >
                   {p.title}
+                  {p.stale && (
+                    <span
+                      className="wiki-tree__stale"
+                      title="源文件已变更，页面仍是旧版本——重新编译前以旧页面为准"
+                    >
+                      源文件已变更
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -163,6 +171,11 @@ const treeStyles = `
     border-radius: 8px;
     font-size: 10px;
     color: var(--text-primary);
+  }
+  .wiki-tree__stale {
+    margin-left: 6px;
+    color: var(--warning, #c47f00);
+    font-size: 10px;
   }
   .wiki-tree__item {
     padding: 4px 12px 4px 24px;

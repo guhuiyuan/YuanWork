@@ -7,6 +7,7 @@
 
 mod sidecar;
 mod commands;
+mod commands_contract;
 mod fs_scope;
 mod secrets;
 mod sse;
@@ -56,10 +57,21 @@ pub fn run() {
             commands::list_wiki_pages,
             commands::get_wiki_page,
             commands::get_wiki_backlinks,
+            commands::list_page_conclusions,
+            commands::list_page_blocks,
+            commands::update_wiki_page,
+            commands::get_term_context,
             commands::get_wiki_graph,
             commands::search_episodic,
             commands::trigger_consolidation,
             commands::app_info,
+            commands::open_at_anchor,
+            commands::cancel_chat,
+            commands::list_workspace_entries,
+            commands::add_workspace_folder,
+            commands::add_workspace_file,
+            commands::remove_workspace_entry,
+            commands::rebuild_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

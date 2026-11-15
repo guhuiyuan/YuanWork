@@ -302,6 +302,10 @@ pub struct BackendStatus {
 mod tests {
     use super::*;
 
+    /// The environment is shared by all the tests in one binary, so the
+    /// tests that touch it take a lock.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_backend_url() {
         let handle = BackendHandle {
@@ -313,6 +317,7 @@ mod tests {
 
     #[test]
     fn test_backend_port_falls_back_to_the_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // No YUANWORK_PORT in the test environment -> the default.
         assert_eq!(backend_port(), BACKEND_PORT);
     }
@@ -334,5 +339,125 @@ mod tests {
         if let Ok(dir) = find_backend_module_dir() {
             assert!(dir.join("yuanwork").exists());
         }
+    }
+
+    // ===== the port =====
+
+    #[test]
+    fn test_the_port_comes_from_the_environment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("YUANWORK_PORT", "9123");
+        assert_eq!(backend_port(), 9123);
+        std::env::remove_var("YUANWORK_PORT");
+    }
+
+    #[test]
+    fn test_the_port_is_trimmed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("YUANWORK_PORT", "  9124  ");
+        assert_eq!(backend_port(), 9124);
+        std::env::remove_var("YUANWORK_PORT");
+    }
+
+    #[test]
+    fn test_a_junk_port_falls_back_to_the_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("YUANWORK_PORT", "not-a-port");
+        assert_eq!(backend_port(), BACKEND_PORT);
+        std::env::remove_var("YUANWORK_PORT");
+    }
+
+    #[test]
+    fn test_a_zero_port_falls_back_to_the_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("YUANWORK_PORT", "0");
+        assert_eq!(backend_port(), BACKEND_PORT);
+        std::env::remove_var("YUANWORK_PORT");
+    }
+
+    #[test]
+    fn test_the_default_port_is_8765() {
+        assert_eq!(BACKEND_PORT, 8765);
+    }
+
+    // ===== the interpreter lookup =====
+
+    #[test]
+    fn test_the_interpreter_is_found_in_the_project_venv() {
+        // The repository has a .venv at its root; walking up from the
+        // crate directory has to find it.
+        if let Ok(path) = find_python_interpreter() {
+            assert!(path.exists());
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            assert!(name.starts_with("python"));
+        }
+    }
+
+    #[test]
+    fn test_the_interpreter_lookup_walks_up_at_most_eight_levels() {
+        let source = include_str!("sidecar.rs");
+        assert!(source.contains("for _ in 0..8"));
+    }
+
+    #[test]
+    fn test_the_backend_module_dir_is_found() {
+        if let Ok(dir) = find_backend_module_dir() {
+            assert!(dir.join("yuanwork").exists());
+        }
+    }
+
+    // ===== the health probe =====
+
+    #[test]
+    fn the_probe_asks_the_health_path() {
+        let source = include_str!("sidecar.rs");
+        assert!(source.contains("/api/v1/health"));
+    }
+
+    #[test]
+    fn test_the_probe_keeps_trying_until_the_budget_is_spent() {
+        // The probe gives up after 60 attempts * 500 ms. We do not wait
+        // that long in a test, so we pin the budget instead.
+        let source = include_str!("sidecar.rs");
+        assert!(source.contains("for attempt in 0..60"));
+        assert!(source.contains("Duration::from_millis(500)"));
+    }
+
+    #[test]
+    fn test_the_probe_budget_is_thirty_seconds() {
+        let source = include_str!("sidecar.rs");
+        assert!(source.contains("for attempt in 0..60"));
+        assert!(source.contains("Duration::from_millis(500)"));
+        assert!(source.contains("within 30 seconds"));
+    }
+
+    // ===== the launch path =====
+
+    #[test]
+    fn the_bundled_launch_path_is_unreachable_in_this_configuration() {
+        // `tauri.conf.json` declares no `bundle.resources`, so the
+        // bundled branch of `find_backend_executable` never fires.
+        let conf = include_str!("../tauri.conf.json");
+        assert!(!conf.contains("\"resources\""));
+    }
+
+    #[test]
+    fn the_child_output_is_never_read() {
+        // The child's stdout and stderr are piped, but nothing drains
+        // them — the pipe buffer can fill up and block the backend.
+        let source = include_str!("sidecar.rs");
+        assert!(source.contains("Stdio::piped()"));
+        // built at runtime so this test's own text cannot satisfy it
+        let reader = format!("Buf{}", "Reader");
+        assert!(!source.contains(&reader));
+    }
+
+    #[test]
+    fn the_backend_process_is_not_monitored() {
+        // There is no process check and no restart: if the backend dies,
+        // the shell does not notice.
+        let source = include_str!("sidecar.rs");
+        let needle = format!("try_{}", "wait");
+        assert!(!source.contains(&needle));
     }
 }

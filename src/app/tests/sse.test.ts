@@ -119,3 +119,92 @@ test("a frame with no event name defaults to message", () => {
   assert.equal(frames[0].event, "message");
   assert.equal(frames[0].data, "only data");
 });
+
+// ===== the fixtures both parsers have to agree on =====
+//
+// The Rust side (`src-tauri/src/sse.rs`) parses the same strings. The
+// expectations below are duplicated in the Rust test module, so a change
+// in one parser that the other does not follow breaks a test on both
+// sides.
+
+const SHARED_FIXTURES: {
+  name: string;
+  wire: string;
+  event: string | null;
+  data: string;
+}[] = [
+  {
+    name: "a CRLF frame",
+    wire: "event: token\r\ndata: {\"text\":\"hi\"}\r\n\r\n",
+    event: "token",
+    data: '{"text":"hi"}',
+  },
+  {
+    name: "an LF frame",
+    wire: "event: token\ndata: {\"text\":\"hi\"}\n\n",
+    event: "token",
+    data: '{"text":"hi"}',
+  },
+  {
+    name: "a frame without an event name",
+    wire: "data: plain\n\n",
+    event: "message",
+    data: "plain",
+  },
+  {
+    name: "a frame with several data lines",
+    wire: "event: x\ndata: one\ndata: two\n\n",
+    event: "x",
+    data: "one\ntwo",
+  },
+  {
+    name: "a comment frame",
+    wire: ": ping - 1700000000\n\n",
+    event: null,
+    data: "",
+  },
+  {
+    name: "a frame without a colon",
+    wire: "event: x\ndata\n\n",
+    event: "x",
+    data: "",
+  },
+];
+
+for (const fixture of SHARED_FIXTURES) {
+  test(`the parser handles ${fixture.name}`, () => {
+    const { frames, rest } = parseSseFrames(fixture.wire);
+    if (fixture.event === null) {
+      assert.equal(frames.length, 0, "a comment frame yields no event");
+    } else {
+      assert.equal(frames.length, 1);
+      assert.equal(frames[0].event, fixture.event);
+      assert.equal(frames[0].data, fixture.data);
+    }
+    assert.equal(rest, "", "the whole input was consumed");
+  });
+}
+
+test("a frame split across two chunks is reassembled", () => {
+  const first = parseSseFrames("event: token\r\ndata: {\"text\"");
+  assert.equal(first.frames.length, 0, "an incomplete frame is not returned");
+  assert.equal(first.rest, "event: token\r\ndata: {\"text\"");
+
+  const second = parseSseFrames(first.rest + ":\"hi\"}\r\n\r\n");
+  assert.equal(second.frames.length, 1);
+  assert.equal(second.frames[0].data, '{"text":"hi"}');
+});
+
+test("a multi-byte character split across two chunks survives", () => {
+  // The Rust side has a dedicated UTF-8 decoder for this; the
+  // browser's TextDecoder with `stream: true` does the same.
+  const text = "违约金";
+  const bytes = new TextEncoder().encode(text);
+  const head = bytes.slice(0, 4);
+  const tail = bytes.slice(4);
+
+  const decoder = new TextDecoder("utf-8");
+  const first = decoder.decode(head, { stream: true });
+  const second = decoder.decode(tail, { stream: true });
+  assert.equal(first + second, text);
+});

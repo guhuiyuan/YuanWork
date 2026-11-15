@@ -5,15 +5,20 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { parseSseFrame, parseSseFrames, type RawSseFrame } from "./sse";
+import { anchorOf } from "./citations.ts";
+import { parseSseFrame, parseSseFrames, type RawSseFrame } from "./sse.ts";
 import type {
   Citation,
   KbFile,
+  TermContext,
   WikiBacklinksPayload,
+  WikiConclusion,
   WikiGraph,
   WikiPage,
+  WikiPageBlock,
   WikiPageDetail,
-} from "../store";
+  WorkspaceEntry,
+} from "../store.ts";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -65,6 +70,8 @@ export interface ChatResponse {
   refused: boolean;
   refusal_reason?: string | null;
   conflicts?: ConflictInfo[];
+  /** The terms in the answer - each one opens the text it stands for. */
+  terms?: string[];
   wiki_compile?: {
     triggered: boolean;
     page_id?: string;
@@ -131,6 +138,34 @@ function toStreamEvent(frame: RawSseFrame): StreamEvent {
 // ===== Chat streaming =====
 
 /**
+ * The requests that are running, by session.
+ *
+ * The browser path can abort its own request; the desktop path asks
+ * the shell to stop reading the stream.
+ */
+const runningStreams = new Map<string, AbortController>();
+
+/**
+ * Stop a generation that is running.
+ *
+ * The backend is told as well - it stops pulling from the model even
+ * if the connection is still open.
+ */
+export async function cancelChat(sessionId: string): Promise<void> {
+  const controller = runningStreams.get(sessionId);
+  runningStreams.delete(sessionId);
+  controller?.abort(new Error("cancelled by the user"));
+
+  if (isTauri) {
+    await invoke<unknown>("cancel_chat", { sessionId });
+    return;
+  }
+  await callBackend(`/chat/cancel/${encodeURIComponent(sessionId)}`, {
+    method: "POST",
+  });
+}
+
+/**
  * Stream a chat completion, delivering every backend event to `onEvent`
  * as it arrives.
  *
@@ -159,6 +194,9 @@ export async function chatStream(
   // timer is reset every time bytes arrive, so a long but progressing
   // answer is never cut short.
   const controller = new AbortController();
+  if (req.session_id) {
+    runningStreams.set(req.session_id, controller);
+  }
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   const armIdleTimer = () => {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
@@ -217,6 +255,7 @@ export async function chatStream(
     }
   } finally {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
+    if (req.session_id) runningStreams.delete(req.session_id);
   }
 
   // Flush whatever is left, including a frame with no trailing blank line.
@@ -245,6 +284,40 @@ export async function pickFolder(): Promise<string | null> {
   // ask for the path instead.
   const path = window.prompt(
     "浏览器开发模式没有原生目录选择器。\n请输入要索引的文件夹完整路径：",
+    "D:\\"
+  );
+  return path && path.trim() ? path.trim() : null;
+}
+
+/**
+ * Pick a single file.
+ *
+ * The desktop app has a native file dialog; the browser build has
+ * none, so it asks for the path instead - same as the folder picker.
+ */
+export async function pickFile(): Promise<string | null> {
+  if (isTauri) {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      // The dialog answers with one path, but a list when several
+      // were allowed - both shapes are handled here.
+      const picked = (await open({
+        multiple: false,
+        directory: false,
+        title: "选择要加入工作域的文件",
+      })) as string | string[] | null;
+      if (typeof picked === "string") return picked;
+      if (Array.isArray(picked) && picked.length > 0) return picked[0];
+      return null;
+    } catch (e) {
+      // The dialog is not available (an older shell, a locked down
+      // build). The webview has no prompt dialog to fall back on, so
+      // the failure is passed on - the caller can say so.
+      throw new Error(`无法打开文件选择器（${(e as Error).message}）`);
+    }
+  }
+  const path = window.prompt(
+    "浏览器开发模式没有原生文件选择器。\n请输入要加入工作域的文件完整路径：",
     "D:\\"
   );
   return path && path.trim() ? path.trim() : null;
@@ -330,6 +403,115 @@ export async function deleteKbFile(docId: string): Promise<void> {
   await callBackend(`/kb/files/${encodeURIComponent(docId)}`, { method: "DELETE" });
 }
 
+/**
+ * Where a term appears in the knowledge base.
+ *
+ * The passages come from the original documents, each with the place
+ * it was read from - the backend does not explain the term, it shows
+ * the text it stands for (ADR-041).
+ */
+export async function getTermContext(term: string): Promise<TermContext> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("get_term_context", { term });
+    return toJson<TermContext>(raw);
+  }
+  return callBackend<TermContext>(
+    `/kb/terms/${encodeURIComponent(term)}/context`
+  );
+}
+
+// ===== Workspace =====
+
+/**
+ * The workspace: the folders and the single files the user set up.
+ *
+ * This is the scope of the app - the build runs over these entries,
+ * and taking an entry out takes what it brought into the index with
+ * it.
+ */
+export async function listWorkspaceEntries(): Promise<WorkspaceEntry[]> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("list_workspace_entries");
+    return toEntries(raw);
+  }
+  const body = await callBackend<{ entries?: WorkspaceEntry[] }>(
+    "/workspace/entries"
+  );
+  return body.entries ?? [];
+}
+
+/**
+ * Add a folder to the workspace.
+ *
+ * Adding it does not index it - the build runs over the whole
+ * workspace, so the folder joins the next build.
+ */
+export async function addWorkspaceFolder(path: string): Promise<WorkspaceEntry> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("add_workspace_folder", { path });
+    return toEntry(raw);
+  }
+  return callBackend<WorkspaceEntry>("/workspace/folders", {
+    method: "POST",
+    body: JSON.stringify({ path, included: true }),
+  });
+}
+
+/** Add a single file to the workspace, by hand. */
+export async function addWorkspaceFile(path: string): Promise<WorkspaceEntry> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("add_workspace_file", { path });
+    return toEntry(raw);
+  }
+  return callBackend<WorkspaceEntry>("/workspace/files", {
+    method: "POST",
+    body: JSON.stringify({ path, included: true }),
+  });
+}
+
+/**
+ * Take an entry out of the workspace.
+ *
+ * The backend also clears what that entry brought into the index - the
+ * files on disk are left alone.
+ */
+export async function removeWorkspaceEntry(entryId: string): Promise<void> {
+  if (isTauri) {
+    await invoke<void>("remove_workspace_entry", { entryId });
+    return;
+  }
+  await callBackend(`/workspace/entries/${encodeURIComponent(entryId)}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Build the index over everything the workspace covers.
+ *
+ * The build runs in the background - the returned job is polled with
+ * `getIngestStatus`, exactly like the folder build.
+ */
+export async function rebuildWorkspace(): Promise<IngestJob> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("rebuild_workspace");
+    return toJson<IngestJob>(raw);
+  }
+  return callBackend<IngestJob>("/ingest/rebuild", { method: "POST" });
+}
+
+/** The entries - a list, or the list inside an envelope. */
+function toEntries(raw: unknown): WorkspaceEntry[] {
+  const value = toJson<unknown>(raw);
+  if (Array.isArray(value)) return value as WorkspaceEntry[];
+  const entries = (value as { entries?: WorkspaceEntry[] } | null)?.entries;
+  return Array.isArray(entries) ? entries : [];
+}
+
+/** One entry - the object itself, or the text it was sent as. */
+function toEntry(raw: unknown): WorkspaceEntry {
+  return toJson<WorkspaceEntry>(raw);
+}
+
 // ===== Wiki =====
 
 export async function listWikiPages(): Promise<WikiPage[]> {
@@ -362,11 +544,131 @@ export async function getWikiBacklinks(
   );
 }
 
+/**
+ * The conclusions of a page, each with the place it was read from.
+ *
+ * The anchor is what lets the reader jump back to the original.
+ */
+export async function listPageConclusions(
+  pageId: string
+): Promise<WikiConclusion[]> {
+  if (isTauri) {
+    return invoke<WikiConclusion[]>("list_page_conclusions", { pageId });
+  }
+  const body = await callBackend<{ conclusions: WikiConclusion[] }>(
+    `/wiki/pages/${encodeURIComponent(pageId)}/conclusions`
+  );
+  return body.conclusions ?? [];
+}
+
 export async function getWikiGraph(): Promise<WikiGraph> {
   if (isTauri) {
     return invoke<WikiGraph>("get_wiki_graph");
   }
   return callBackend<WikiGraph>("/wiki/graph");
+}
+
+/**
+ * The paragraphs of a page, and who wrote each one.
+ *
+ * The ownership is what the backend recorded: a paragraph the user
+ * wrote stays theirs when the page is compiled again.
+ */
+export async function listPageBlocks(pageId: string): Promise<WikiPageBlock[]> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("list_page_blocks", { pageId });
+    return toBlocks(raw);
+  }
+  const body = await callBackend<{ blocks: WikiPageBlock[] }>(
+    `/wiki/pages/${encodeURIComponent(pageId)}/blocks`
+  );
+  return body.blocks ?? [];
+}
+
+/**
+ * Save the user's edit of a page body.
+ *
+ * The backend decides which paragraphs became the user's - the ones
+ * that changed - and leaves the rest as they were.
+ */
+export async function updateWikiPage(
+  pageId: string,
+  markdown: string
+): Promise<WikiPageDetail> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("update_wiki_page", { pageId, markdown });
+    return toJson<WikiPageDetail>(raw);
+  }
+  return callBackend<WikiPageDetail>(`/wiki/pages/${encodeURIComponent(pageId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ markdown }),
+  });
+}
+
+/**
+ * The JSON a command returned.
+ *
+ * Some commands hand back the parsed object, others the raw text -
+ * both are read here so the caller does not have to care.
+ */
+function toJson<T>(raw: unknown): T {
+  if (typeof raw !== "string") return raw as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error("the backend sent something that is not JSON");
+  }
+}
+
+/** The blocks of a page - a list, or the list inside an envelope. */
+function toBlocks(raw: unknown): WikiPageBlock[] {
+  if (Array.isArray(raw)) return raw as WikiPageBlock[];
+  const blocks = (raw as { blocks?: WikiPageBlock[] } | null)?.blocks;
+  return Array.isArray(blocks) ? blocks : [];
+}
+
+// ===== Opening the source =====
+
+/** What was opened, and where. */
+export interface OpenedLocation {
+  path: string;
+  location: string;
+  method: string;
+}
+
+/**
+ * Open the file a citation points at, at the position it points to.
+ *
+ * The way to get there is different per format - the shell knows how:
+ * a PDF viewer understands a `#page=` fragment, Office is told through
+ * its own automation.
+ */
+export async function openCitation(
+  citation: Citation
+): Promise<OpenedLocation> {
+  const anchor = anchorOf(citation);
+  const path = citation.file_path ?? "";
+  if (isTauri) {
+    return invoke<OpenedLocation>("open_at_anchor", { path, anchor });
+  }
+  throw new Error("浏览器里打不开本地文件，请在桌面端使用。");
+}
+
+/**
+ * Open the file a conclusion was read from, at the place it was read.
+ *
+ * A conclusion the reader cannot check is a conclusion the reader has
+ * to take on faith - this is the way back to the original.
+ */
+export async function openConclusion(
+  conclusion: WikiConclusion
+): Promise<OpenedLocation> {
+  const path = conclusion.file_path ?? "";
+  const anchor = conclusion.anchor ?? null;
+  if (isTauri) {
+    return invoke<OpenedLocation>("open_at_anchor", { path, anchor });
+  }
+  throw new Error("浏览器里打不开本地文件，请在桌面端使用。");
 }
 
 // ===== Memory =====

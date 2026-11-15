@@ -34,13 +34,16 @@ export function refusalContent(message: string): string {
 
 /**
  * Whether a refusal was caused by the model failing rather than by the
- * confidence being too low.
+ * evidence being insufficient.
  *
- * The two cases need different wording: "置信度不足" is a deliberate
- * refusal, "生成出错" is a malfunction.
+ * The two cases need different wording: "证据不足" is a deliberate
+ * refusal, "生成出错" is a malfunction. The model can fail in two
+ * places - while judging the evidence and while writing the answer -
+ * and both come back as "model_unavailable".
  */
 export function isGenerationError(reason: string | undefined): boolean {
-  return !!reason && reason.startsWith("generation_error");
+  if (!reason) return false;
+  return reason.startsWith("generation_error") || reason === "model_unavailable";
 }
 
 /** The banner shown above a refused or failed answer. */
@@ -54,10 +57,32 @@ export function refusalBanner(reason: string | undefined): {
       detail: "已保留生成到一半的内容，你可以重试一次。",
     };
   }
+  if (reason === "citation_invalid") {
+    return {
+      title: "⚠️ 引用校验没通过，已拒绝直接回答",
+      detail: "答案里的引用编号和资料对不上，下面是可能相关的位置。",
+    };
+  }
   return {
-    title: "⚠️ 置信度不足，已拒绝直接回答",
+    title: "⚠️ 证据不足，已拒绝直接回答",
     detail: "下方仅供参考可能位置。",
   };
+}
+
+/**
+ * Whether the stream ended because the user stopped it.
+ *
+ * A cancellation is not a failure: the user asked for it, so it gets
+ * its own wording instead of the failure notice.
+ */
+export function isCancellation(detail: string): boolean {
+  const d = (detail ?? "").trim();
+  if (!d) return false;
+  return (
+    /cancelled by the user/i.test(d) ||
+    /aborted/i.test(d) ||
+    /已停止生成/.test(d)
+  );
 }
 
 /**

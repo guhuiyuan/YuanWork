@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import {
   appendFailureNotice,
   failureNotice,
+  isCancellation,
   isGenerationError,
   refusalBanner,
   refusalContent,
@@ -35,29 +36,54 @@ test("the refusal content replaces the streamed text", () => {
   assert.equal(refusalContent(message), message);
 });
 
-test("a generation error is told apart from a low-confidence refusal", () => {
+// ===== the cancellation =====
+
+test("a cancellation is told apart from a failure", () => {
+  // The user asked to stop - that is not a failure and must not be
+  // dressed up as one.
+  assert.equal(isCancellation("cancelled by the user"), true);
+  assert.equal(isCancellation("AbortError: The user aborted a request."), true);
+  assert.equal(isCancellation("已停止生成"), true);
+});
+
+test("a real failure is not a cancellation", () => {
+  assert.equal(isCancellation("HTTP 500: boom"), false);
+  assert.equal(isCancellation("stream ended without a final response"), false);
+  assert.equal(isCancellation(""), false);
+});
+
+test("a generation error is told apart from an evidence refusal", () => {
   assert.equal(isGenerationError("generation_error: boom"), true);
-  assert.equal(isGenerationError("low_confidence"), false);
+  assert.equal(isGenerationError("model_unavailable"), true);
+  assert.equal(isGenerationError("insufficient_evidence"), false);
+  assert.equal(isGenerationError("unlocatable_evidence"), false);
+  assert.equal(isGenerationError("model_insufficient"), false);
   assert.equal(isGenerationError(undefined), false);
   assert.equal(isGenerationError(""), false);
 });
 
-test("the banner says the model failed, not that confidence was low", () => {
+test("the banner says the model failed, not that the evidence was thin", () => {
   const banner = refusalBanner("generation_error: boom");
   assert.match(banner.title, /生成回答时出错/);
-  assert.doesNotMatch(banner.title, /置信度/);
+  assert.doesNotMatch(banner.title, /证据不足/);
 });
 
-test("the banner says confidence was too low for a plain refusal", () => {
-  const banner = refusalBanner("low_confidence");
-  assert.match(banner.title, /置信度不足/);
+test("the banner says the evidence was thin for a plain refusal", () => {
+  const banner = refusalBanner("insufficient_evidence");
+  assert.match(banner.title, /证据不足/);
   assert.doesNotMatch(banner.title, /生成回答时出错/);
 });
 
-test("a refusal without a reason falls back to the low-confidence wording", () => {
+test("a refusal without a reason falls back to the plain wording", () => {
   const banner = refusalBanner(undefined);
-  assert.match(banner.title, /置信度不足/);
+  assert.match(banner.title, /证据不足/);
   assert.ok(banner.detail.length > 0);
+});
+
+test("a citation that does not check out gets its own wording", () => {
+  const banner = refusalBanner("citation_invalid");
+  assert.match(banner.title, /引用校验/);
+  assert.doesNotMatch(banner.title, /生成回答时出错/);
 });
 
 test("a known internal error is shown in Chinese", () => {
@@ -87,4 +113,51 @@ test("an unknown reason is kept but truncated", () => {
 
 test("an empty reason still produces a notice", () => {
   assert.match(failureNotice(""), /请求失败/);
+});
+
+// ===== the streaming contract in the component and the store =====
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const chatSource = readFileSync(join(here, "..", "src", "components", "ChatWindow.tsx"), "utf-8");
+const storeSource = readFileSync(join(here, "..", "src", "store.ts"), "utf-8");
+
+test("the token event is the only source of incremental text", () => {
+  // The `answer` event carries the whole answer, so using it as text
+  // would duplicate what the tokens already rendered.
+  assert.match(chatSource, /case "token"/);
+  assert.match(chatSource, /case "answer"/);
+  // the answer event is only kept as a fallback
+  assert.match(chatSource, /answerTextRef/);
+});
+
+test("the text is appended to the message it belongs to", () => {
+  // The old `appendToLast` wrote to whatever the last message happened
+  // to be, which corrupts the transcript when a message is inserted.
+  assert.match(storeSource, /appendToMessage/);
+  assert.doesNotMatch(storeSource, /appendToLast/);
+});
+
+test("the flush is throttled by a frame, with a timer as the backstop", () => {
+  // requestAnimationFrame does not fire in a hidden tab, so the whole
+  // answer would sit in the buffer.
+  assert.match(chatSource, /requestAnimationFrame/);
+  assert.match(chatSource, /setTimeout/);
+});
+
+test("a refusal replaces the streamed text", () => {
+  // The backend's refusal message already contains what was streamed;
+  // appending would duplicate the tail.
+  assert.match(chatSource, /refusalContent/);
+});
+
+test("a failure notice is appended after the text", () => {
+  assert.match(chatSource, /appendFailureNotice/);
+});
+
+test("a failure notice is not added twice", () => {
+  assert.match(chatSource, /errorNoticedRef/);
 });
