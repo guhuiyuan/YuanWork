@@ -62,7 +62,7 @@ YuanWork 的三条核心隐私原则：
 - 文档原文在解析后**立即丢弃**（Block 对象是 in-memory）
 - LanceDB / Tantivy 只存 chunk 文本（**已经过 chunker 切分**）+ 向量 + 元数据
 - SQLite 存对话历史、用户画像、wiki metadata
-- 审计日志只记 `prompt_hash` + `prompt_summary`（前 200 字符），不存全文
+- 审计日志只记 `prompt_hash` + `prompt_length` + 令牌数与耗时，**不存提问与回答的原文**
 
 ---
 
@@ -103,6 +103,31 @@ YUANWORK_ALLOWED_DOMAINS=["api.openai.com","api.anthropic.com","api.deepseek.com
 
 IPv6 字面量单独处理（多个冒号不剥离端口）。
 
+### 代理隧道（本机代理）
+
+放行本机地址留了一个口子：本机上跑着的代理（Clash、v2ray、公司隧道）会把**每一次出站连接**都变成连 `127.0.0.1`，而守卫只看得到套接字目标，看不出真实目的地。于是：
+
+**显式配置为代理的连接被拦截。**
+
+守卫读下列环境变量得到代理目标（大小写都认）：
+
+`http_proxy` / `https_proxy` / `all_proxy` / `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+
+- 写成 `host:port`（没有协议前缀）也能识别
+- 只写主机不写端口 → 该主机的**所有端口**都拦
+- 拦截发生在放行判断**之前**：命中即抛错，不再走白名单逻辑
+
+本机**其他**端口照常放行，所以本地模型（Ollama / llama.cpp）不受影响。
+
+```
+Network isolation: outbound to '127.0.0.1' is blocked.
+  Network mode: LLM_ONLY
+  Allowed domains: ['api.openai.com', ...]
+  A proxy is configured (127.0.0.1:7890). Traffic through a proxy cannot
+  be checked against the whitelist, so it is blocked. Remove the proxy
+  from the environment, or set YUANWORK_NETWORK_MODE=allow_all.
+```
+
 ### 错误 UX
 
 被拒时抛 `NetworkIsolationError(PermissionError)`，错误信息完整：
@@ -124,11 +149,18 @@ Network isolation: outbound to 'evil.com' is blocked.
 - Socket hook：blocks via create_connection / blocks via socket.connect / idempotent / context manager
 - 集成：真实 httpx 调用被拦截
 
+`tests/unit/test_privacy_contract_bypass.py`（14 测试）：
+
+- 代理目标识别：带端口 / 不带端口 / 端口不匹配的放行
+- 连接代理被拦（`reason == "proxy_tunnel"`），本机其他端口仍放行
+- 未覆盖的面显式钉住：`getaddrinfo`、`connect_ex`、子进程不受约束
+
 ### 已知边界
 
 | 场景 | 行为 | 缓解 |
 |---|---|---|
-| 系统级 HTTP 代理（如 `HTTP_PROXY=127.0.0.1:7897`） | 流量走代理，guard 只看到代理 IP | 用户显式把代理加入白名单；测试用 `trust_env=False` 验证 |
+| 系统级 HTTP 代理（如 `HTTP_PROXY=127.0.0.1:7897`） | **拦截**——守卫认得代理环境变量，连代理即报错 | 换掉代理配置，或 `YUANWORK_NETWORK_MODE=allow_all` |
+| 代理**没有**出现在环境变量里（如应用内自带的代理设置） | 流量走代理，guard 只看到代理 IP | 需用户自行把代理加入白名单；测试用 `trust_env=False` 验证 |
 | DNS 解析后 httpx 直接传 IP 给 socket | guard 看到 IP 形式 | guard 用 IP 后缀匹配（`v1.api.openai.com` 仍能匹配） |
 | Tauri 桌面端内置浏览器走 proxy | 同上 | 同上 |
 | WebView 渲染的任意前端 | 浏览器自己的网络栈绕过 Python socket guard | UI 只能调本地后端 API（`http://localhost:8765`），由后端的 guard 兜底 |
@@ -153,19 +185,19 @@ Network isolation: outbound to 'evil.com' is blocked.
   "type": "llm_call",
   "model": "MiniMax-chat",
   "task_type": "answer",
-  "prompt_summary": "#a1b2c3d4e5f6g7h8 [user] 发票上的金额是多少?",
-  "response_summary": "根据您提供的发票,金额为 1280 元。",
+  "prompt_hash": "a1b2c3d4e5f6g7h8",
+  "prompt_length": 14,
   "prompt_tokens": 256,
   "completion_tokens": 128,
   "duration_ms": 1240.5,
   "success": true,
-  "error": null
+  "error_kind": null
 }
 ```
 
 ### Prompt 哈希
 
-`prompt_summary` 前缀 `#<16hexhash>` 是 prompt 消息列表的 SHA-256 前 16 字符。计算方式：
+`prompt_hash` 是 prompt 消息列表的 SHA-256 前 16 字符。计算方式：
 
 ```python
 canon = json.dumps(
@@ -176,7 +208,11 @@ canon = json.dumps(
 h = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 ```
 
-**不持久化 prompt 原文**——这是隐私承诺的关键。
+**不持久化 prompt 原文**——这是隐私承诺的关键。条目里只有哈希、长度、令牌数与耗时；
+`AuditLogger.log_llm_call` 的参数里压根没有能接收原文的地方，所以不存在「顺手存了」
+的可能。失败也只记**类别**（`timeout` / `connection` / `rate_limit` / `auth` /
+`invalid_response` / `cancelled` / `unknown`），不记异常原文——异常里可能带着本地路径、
+上游端点，甚至提问内容。
 
 ### API 访问
 
@@ -256,13 +292,15 @@ TODO Stage 4：把 `api_key` 改为 OS keyring 存储（Windows Credential Manag
 
 ---
 
-## 6. 敏感字段处理（未来）
+## 6. 敏感字段处理
 
-`src/backend/yuanwork/privacy/redactor.py` 已存在但未启用。计划：
+`src/backend/yuanwork/privacy/redactor.py` 在**发往模型之前**生效：
 
-- 身份证 / 手机号 / 银行卡正则替换为 `<ID>` / `<PHONE>` / `<BANK>`
-- 配置开关 `YUANWORK_ENABLE_REDACTION=true`
-- 在 chunk 文本发往 LLM 之前 redact，不修改本地存储
+- 身份证 / 手机号 / 邮箱 / 银行卡 / 信用卡正则替换为 `[身份证号]` / `[手机号]` / `[邮箱]` / `[银行卡号]` / `[信用卡号]`
+- 配置开关 `YUANWORK_ENABLE_REDACTION=true`（**默认开启**）
+- 生效的位置：构造回答提示词时、构造冲突判定输入时
+- **不修改本地存储**：知识库里存的是原文，引用里显示的也是原文；脱敏只发生在文本离开机器的那一刻
+- **用户的提问本身不脱敏**——它就是要问的问题
 
 ---
 
@@ -288,7 +326,27 @@ TODO Stage 4：把 `api_key` 改为 OS keyring 存储（Windows Credential Manag
 
 ---
 
-## 9. 未来工作
+## 9. 承诺与实现的偏差（现状）
+
+下列条目是**当前代码的实际行为**，与上文第 2、4、6 节的表述存在出入。以本节为准。
+
+| 承诺 | 实际行为 | 位置 |
+|---|---|---|
+| 「数据访问审计」 | `log_data_access` 全仓零调用点，运行时**只有 `llm_call` 一种事件** | `privacy/audit.py` |
+| 「敏感字段脱敏」 | 已在**发往模型前**接线（回答提示词与冲突判定），开关 `YUANWORK_ENABLE_REDACTION` 默认开启；**用户自己的提问不脱敏**，引用里显示的也是原文 | `privacy/redactor.py`、`orchestrator/steps/answer.py` |
+| 「网络隔离覆盖所有出站」 | 守卫只覆盖**本进程**的套接字调用；子进程、网页视图不受约束；**经显式配置的代理**的流量会被拦下 | `privacy/network_guard.py` |
+| 「socket 层拦截 = 覆盖全部出站」 | 只替换了 `create_connection` 与 `socket.connect` 两个入口；`connect_ex`、`getaddrinfo` 未被拦截 | 同上 |
+| 「域名白名单」 | 匹配是**精确相等或右锚定后缀**；`api.openai.com.evil.com` 不会被放行，但**解析在检查之后**（DNS rebinding 不受约束） | 同上 |
+| 「仅放行白名单 + localhost」 | 本机地址被放行，但**显式配置的代理连接被拦截**（`reason="proxy_tunnel"`）；**未写进环境变量**的代理仍可隧道全部外网流量 | 同上 |
+| 「离线模式仅用本地模型」 | 离线模式下守卫**连 localhost 也拦**，而网关又把模型改写成本机 Ollama —— 两者冲突 | `privacy/network_guard.py` + `llm/gateway.py` |
+| 「接口鉴权」 | 全部端点**无鉴权**；本机任何进程可读审计并清空（审计里已不含提问与回答原文） | `api/routes/audit.py` |
+| 「错误处理不泄露内部信息」 | 已收敛：错误响应只有 `error`（可读文案）与 `code`（错误码），**异常原文只进本地日志** | `api/app.py`、`api/routes/chat.py`、`api/errors.py` |
+| 「嵌入模型首次使用需下载」 | 模型下载域名**不在白名单**内，默认模式下首次对话/摄取会被守卫拦下，且因为嵌入是懒加载，**失败不在启动时暴露** | `config.py` 的 `allowed_domains` |
+| 「日志有轮转」 | **没有日志文件也没有轮转**；审计文件只增不减，直到用户手动清空 | `utils/logging.py`（未被调用） |
+
+---
+
+## 10. 未来工作
 
 - [ ] OS keyring 存储 API key
 - [ ] 自动 redact 敏感字段（身份证/手机/银行卡）
