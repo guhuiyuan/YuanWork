@@ -1,0 +1,695 @@
+# YuanWork — 任务拆解（目标态）
+
+<!-- SDD:SPEC:tasks -->
+
+## 0. 元信息
+
+| 项目 | yuanwork |
+|------|------|
+| 版本 | v0.1 |
+| 关联文档 | proposal.md, design.md |
+| 任务总数 | 51 |
+| 执行策略 | 按里程碑推进；每个里程碑结束跑一次全量回归与验收回放 |
+| 批次 | M8 |
+
+## 1. 任务列表
+
+### M1 地底：工作域、锚点、隐私与错误语义
+
+### [x] TASK-001: 实现工作域条目表与增删查接口
+
+- **描述**: 新增工作域条目表（路径、类型、是否纳入索引、加入时间），提供加入文件夹与单个文件、列出条目、移除条目的接口；解析管线改为遍历工作域条目
+- **输入**: `yuanwork/db/sqlite.py`、`yuanwork/ingestion/pipeline.py`
+- **输出**: 工作域表与 `Workspace` 模块，工作域路由的 4 个端点
+- **验收标准**: 覆盖 AC-F-001、AC-F-002、AC-E-001、AC-E-002、AC-E-003、AC-E-004、AC-E-005、AC-E-006、AC-E-012
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_workspace_contract.py -q`
+- **验证结果**: 21 passed（2026-11-14）；全量回归后端 1053 passed / Rust 42 passed / 前端 62 passed。旧测试按新规范同步更新：端点清单 24→28（新增 workspace 组 4 个端点）、标签组 7→8、提示词模板 4→5（新增空库拒答文案）、schema 表 11→12 / 索引 16→17
+
+### [x] TASK-002: 实现可扩展的位置锚点结构并迁移五类锚点
+
+- **描述**: 用一个含类型与坐标的锚点结构替换固定的三个定位列，让 PDF、PPT、Word、Excel、Markdown 各自产出对应锚点
+- **输入**: `yuanwork/memory/semantic.py`、六个解析器、`yuanwork/utils/chunk_meta.py`
+- **输出**: 锚点结构与其在各解析器中的产出，以及一条只加列不回填的迁移
+- **验收标准**: 覆盖 AC-F-003、AC-E-007
+- **依赖**: TASK-001
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_anchor_contract.py -q`
+- **验证结果**: 17 passed（2026-11-14）；全量回归后端 1071 passed / Rust 42 passed / 前端 62 passed。旧测试按新规范同步更新：向量表 16→14 列（page/slide_number/section 三列换成 anchor 一列）、迁移字段数、Excel 由整表一块改为按行出块、章节与标题路径现在也算位置
+
+### [x] TASK-003: 修复切块丢弃短切片的问题
+
+- **描述**: 去掉最小 50 字符的过滤，改为把过短的切片并入相邻切片，保证原文内容不丢
+- **输入**: `yuanwork/ingestion/chunker/structural_chunker.py`
+- **输出**: 切块器的合并逻辑
+- **验收标准**: 覆盖 AC-F-002、AC-E-002、AC-E-003
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_storage_contract_chunker.py -q`
+- **验证结果**: 11 passed（2026-11-14）；全量回归后端 1082 passed。过短的切片改为并入相邻切片（放得下才并，放不下就单独保留），文档末尾的短句不再丢失；旧测试里「短切片被丢弃」的两条断言改为「不丢内容」
+
+### [x] TASK-004: 审计条目改为只存元数据与哈希
+
+- **描述**: 审计条目去掉提问与回答原文，改为提示词哈希、长度、令牌数与耗时；同步修订隐私文档的承诺表述
+- **输入**: `yuanwork/privacy/audit.py`、`yuanwork/llm/gateway.py`、`docs/privacy.md`
+- **输出**: 新的审计条目结构与文档修订
+- **验收标准**: 覆盖 AC-F-019
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_privacy_contract_audit_entry.py -q`
+- **验证结果**: 15 passed（2026-11-14）；全量回归后端 1086 passed。审计条目改为 `prompt_hash` + `prompt_length` + 令牌数 + 耗时 + `error_kind`（失败只记类别不记异常原文）；`log_llm_call` 的参数里不再有能接收原文的地方；`docs/privacy.md` 与 `docs/architecture.md` 的承诺表述同步修订，偏差表里那条「保存了提问与回答前 200 字符」已删除
+
+### [x] TASK-005: 接入脱敏，使片段发往模型前先脱敏
+
+- **描述**: 在构造回答提示词与冲突判定输入之前对证据片段做脱敏；修掉实体抽取提示词里的花括号占位符问题；补一个脱敏开关配置
+- **输入**: `yuanwork/privacy/redactor.py`、`yuanwork/orchestrator/steps/answer.py`、`yuanwork/wiki/entity_extractor.py`
+- **输出**: 脱敏接线、开关配置、抽取提示词的模板修正
+- **验收标准**: 覆盖 AC-F-019
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_privacy_contract_redaction_wiring.py -q`
+- **验证结果**: 11 passed（2026-11-14）；全量回归后端 1097 passed。脱敏在**发往模型前**生效（回答提示词 + 冲突判定），本地存储与引用显示的仍是原文；新增开关 `YUANWORK_ENABLE_REDACTION`（默认开启）；实体抽取提示词的 JSON 示例花括号已转义，模型路径第一次真正跑通（顺带容忍模型直接返回数组）
+
+### [x] TASK-006: 收敛错误响应，不再回显内部异常原文
+
+- **描述**: 全局异常处理器与问答端点改为返回错误码与用户可读文案，异常原文只进本地日志
+- **输入**: `yuanwork/api/app.py`、`yuanwork/api/routes/chat.py`
+- **输出**: 统一错误响应结构
+- **验收标准**: 覆盖 AC-E-005、AC-E-009
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_api_contract_errors.py -q`
+- **验证结果**: 17 passed（2026-11-14）；全量回归后端 1103 passed。新增 `api/errors.py` 统一错误体（`error` + `code`）；全局处理器、阻塞与流式问答端点不再回显异常原文；模型失败与「证据不足」用 `refusal_reason` 区分（`model_unavailable` vs `low_confidence`），文案也不同
+
+### [x] TASK-007: 实现摄取任务状态落库
+
+- **描述**: 把摄取任务状态从进程内存字典迁到关系库的既有任务表，提供状态回收；启动时清理遗留的运行中任务
+- **输入**: `yuanwork/api/routes/ingest.py`、`yuanwork/db/sqlite.py`
+- **输出**: 任务状态的持久化读写
+- **验收标准**: 覆盖 AC-P-005
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_api_contract_ingest_kb.py -q`
+- **验证结果**: 16 passed（2026-11-14）；全量回归后端 1105 passed / Rust 42 / 前端 62。任务状态落到 `ingest_jobs` 表（新增 `current_file` 列并带老库的加列迁移）；写入是「未提及的字段保持原值」，不会把进度抹掉；启动时清理遗留的运行中任务；提供已完成任务的回收
+
+### [x] TASK-008: 实现网络守卫拦截本机代理隧道
+
+- **描述**: 网络守卫在放行本机地址的同时，拦截显式配置为代理的连接，堵住「本机代理隧道全部外网流量」的绕过面
+- **输入**: `yuanwork/privacy/network_guard.py`
+- **输出**: 代理识别的匹配规则
+- **验收标准**: 覆盖 AC-F-019
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_privacy_contract_bypass.py -q`
+- **验证结果**: 14 passed（2026-11-14）；全量回归后端 1112 passed。守卫读 `http_proxy`/`https_proxy`/`all_proxy`（含大写形式）得到代理目标，连接这些目标即抛 `NetworkIsolationError(reason="proxy_tunnel")`；只写主机不写端口的代理拦该主机全部端口；本机其他端口仍放行（本地模型不受影响）；未覆盖的绕过面（`getaddrinfo`、`connect_ex`、子进程）继续在文档与测试中显式钉住
+
+### M2 检索与证据闸：可信地回答或拒答
+
+### [x] TASK-009: 实现证据充分性判定的硬规则闸
+
+- **描述**: 新增证据闸的硬规则部分：证据条数达阈、每条证据都能定位到原文位置；任一不满足即判定为不通过
+- **输入**: `yuanwork/retrieval/confidence.py`、新增的证据闸模块
+- **输出**: 证据闸的硬规则判定与判定结果结构
+- **验收标准**: 覆盖 AC-F-007、AC-E-007、AC-E-008、AC-E-011
+- **依赖**: TASK-002
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_evidence_gate_hard_rules.py -q`
+- **验证结果**: 31 passed（2026-11-14）；全量回归后端 1143 passed / Rust 42 / 前端 62。新增 `yuanwork/retrieval/evidence_gate.py`：`check_hard_rule()` 判「条数 ≥ 2 且每条证据都能定位到原文位置」（定位用 TASK-002 的锚点，5 类锚点与旧的三列回退都算定位得到），`EvidenceGate.evaluate()` 出设计 §3.1 的判定结果（`passed`/`hard_rule_ok`/`model_ok`/`reason`/`sufficient_count`）。证据闸成为独立步骤并接进编排层（阻塞与流式两条路径都走），拒答原因改为 `insufficient_evidence` / `unlocatable_evidence`。原置信度打分器的单一数值阈值不再参与是否作答的判断（设计 §6 的「重做」），分数只作为给用户看的信号保留；模型自评闸留到 TASK-010 接入，硬规则不过时不再调用模型
+
+### [x] TASK-010: 实现证据充分性判定的模型自评闸
+
+- **描述**: 新增证据闸的模型自评部分：让模型判断这些证据能否回答该问题；调用失败按不通过处理
+- **输入**: 新增的证据闸模块、模型网关
+- **输出**: 模型自评闸的提示词与判定逻辑
+- **验收标准**: 覆盖 AC-F-008、AC-E-008、AC-P-004
+- **依赖**: TASK-009
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_evidence_gate_model.py -q`
+- **验证结果**: 22 passed（2026-11-14）；全量回归后端 1165 passed / Rust 42 / 前端 62。新增 `yuanwork/retrieval/model_gate.py` 与 `orchestrator/prompts/evidence_gate.j2`：模型以 JSON 回答「这些证据够不够回答这个问题」，只依据证据判断、不许用自己的知识补足；读不出结论、解析失败、调用失败一律按不通过处理。「模型不可用」与「证据不足」分开记原因（设计 §4.3），文案也不同：前者说模型暂时不可用并保留证据位置，后者说没找到足够明确的证据。硬规则已判不通过时不再调用模型；等待有上限（`DEFAULT_GATE_TIMEOUT`）；闸门判定耗时写进 trace，可实测（AC-P-004 的预算要在真实供应商上量）
+
+### [x] TASK-011: 实现拒答输出：最可能位置与改进建议
+
+- **描述**: 拒答分支改为输出最可能相关的位置与改进建议（怎么改问法、怎么补文档），不给出未经证据支持的结论；位置用使用者读得懂的表述（文件名 + 页码或章节名），不用内部标识
+- **输入**: `yuanwork/orchestrator/steps/answer.py`
+- **输出**: 拒答模板与渲染逻辑
+- **验收标准**: 覆盖 AC-F-009
+- **依赖**: TASK-009
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_llm_contract_refusal_citation.py -q`
+- **验证结果**: 22 passed（2026-11-14）；全量回归后端 1176 passed / 前端 62 / Rust 42。拒答位置改从**证据**取（带页码/章节/表行），候选文件只作兜底；措辞按拒答原因分开（证据不足 / 证据定位不到 / 模型判定证据不足 / 模型不可用），第一条建议随原因变，其余三条固定；拒答文案由模板渲染、不经过模型，所以不会夹带未经证据支持的结论；内部标识（切片 id、文档 id、路径）不出现在文案里
+
+### [x] TASK-012: 实现回答步骤的引用校验
+
+- **描述**: 解析答案里的引用编号，剔除未被引用的证据；出现越界编号或解析不出时转拒答
+- **输入**: `yuanwork/orchestrator/steps/answer.py`、`yuanwork/orchestrator/agent.py`
+- **输出**: 引用校验逻辑与失败时的拒答分支
+- **验收标准**: 覆盖 AC-F-005、AC-F-020
+- **依赖**: TASK-002
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_citation_validation.py -q`
+- **验证结果**: 20 passed（2026-11-14）；全量回归后端 1196 passed / 前端 63 / Rust 42。新增 `validate_citations()`：解析答案里的 `[n]`（也认 `[1,2]` 与 `[1][2]`，非数字的方括号不算引用），编号越界或一个引用都没有即转拒答（原因 `citation_invalid`）；引用列表只保留答案真正用到的证据，但编号保持原样（答案里的 `[3]` 仍对应引用 3），避免用户拿错出处核对。流式路径同样校验：文本已经发出无法收回，改为用拒答文案替换并保留证据引用
+
+### [x] TASK-013: 实现冲突判定并把答案改写为以知识库为准
+
+- **描述**: 独立判定模型答案与知识库是否冲突；冲突时以知识库内容改写答案，模型原答作为对照附在后面，并在开头标注分歧；判定失败时仍按知识库作答且不泄漏模型认知
+- **输入**: `yuanwork/consolidation/conflict.py`、`yuanwork/orchestrator/agent.py`
+- **输出**: 冲突判定结果结构与答案改写逻辑、冲突记录写入
+- **验收标准**: 覆盖 AC-F-010、AC-F-011、AC-E-009、AC-E-010、AC-P-004
+- **依赖**: TASK-012
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_conflict_rewrite.py -q`
+- **验证结果**: 14 passed（2026-11-14）；全量回归后端 1210 passed / 前端 63 / Rust 42。`detect_conflict` 失败时返回 `failed: true`（不再与「没有冲突」混为一谈）；新增 `rewrite_with_knowledge_base()`：冲突时答案正文换成知识库原文 + 顶部标注分歧 + 模型原答作为「仅作对照」附在后面（ADR-010）；**判定失败时同样按知识库作答但不附模型原答**（没被核对过的说法没资格当结论，AC-E-010）。冲突记录补齐设计 §3.1 要求的字段：`conflicts` 表加 `topic` 与 `citation` 两列（带老库加列迁移），记录分歧点、双方说法、出处与判定说明
+
+### [x] TASK-014: 配置融合权重并重新标定
+
+- **描述**: 把稠密与稀疏的融合权重从硬编码常量改为配置项，并按融合分的实际区间重新标定置信度的归一化项
+- **输入**: `yuanwork/retrieval/hybrid.py`、`yuanwork/retrieval/confidence.py`、`yuanwork/config.py`
+- **输出**: 配置项与重新标定后的公式
+- **验收标准**: 覆盖 AC-F-004、AC-P-002
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_retrieval_contract_confidence.py -q`
+- **验证结果**: 13 passed（2026-11-14）；全量回归后端 1212 passed / 前端 63 / Rust 42。新增配置项 `YUANWORK_FUSION_ALPHA` / `YUANWORK_FUSION_BETA`（两者必须相加为 1.0，否则启动即报错）；检索器不再写死 0.65/0.35，而是读配置。置信度的两个归一化项按**融合分的实际区间**重标：融合分 = alpha×稠密 + beta×全文，两路各自按自身最大值归一，所以最好的一条命中落在「只有一路找到」（较大权重）到「两路都找到」（权重之和）之间——归一化区间即 `[max(alpha,beta), alpha+beta]`，标定区间与生产口径对齐了（ADR-006）
+
+### [x] TASK-015: 限制检索链路的超时上限
+
+- **描述**: 给向量库调用、嵌入模型推理与全文检索各加超时上限，通道不可用时按设计降级
+- **输入**: `yuanwork/retrieval/hybrid.py`、`yuanwork/memory/semantic.py`
+- **输出**: 超时配置与降级分支
+- **验收标准**: 覆盖 AC-F-004、AC-P-002
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_retrieval_contract_edges.py -q`
+- **验证结果**: 17 passed（2026-11-14）；全量回归后端 1217 passed / 前端 63 / Rust 42。三处各加超时上限（配置项 `YUANWORK_DENSE_TIMEOUT_SECONDS` / `YUANWORK_SPARSE_TIMEOUT_SECONDS` / `YUANWORK_EMBEDDING_TIMEOUT_SECONDS`）：向量库调用与嵌入推理原来还**阻塞事件循环**，现在都放进线程并加 `asyncio.wait_for`。降级按设计 §4.3：全文通道超时 → 降级为纯稠密（查询照常作答）；稠密通道或嵌入超时 → **整体失败并报错**，不静默返回空
+
+### [x] TASK-016: 接线或删除失效配置项
+
+- **描述**: 逐项判定 15 个声明但未被读取的配置项：接线的接线、删除的删除，并同步修订环境变量样例文件的注释
+- **输入**: `yuanwork/config.py`、`.env.example`
+- **输出**: 生效的配置项与修订后的样例文件
+- **验收标准**: 覆盖 AC-F-020
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_runtime_contract_validation.py -q`
+- **验证结果**: 22 passed（2026-11-14）；全量回归后端 1217 passed / 前端 63 / Rust 42。15 项逐项判定：**删除 4 项**（`workers` 本应用单进程；`per_session_max_tokens` / `per_query_max_tokens` / `monthly_cap_usd` 目标态没有承诺预算，留着只是骗人）；**接线 11 项**：`embedding_batch_size`（嵌入批大小）、`reranker_model` + `use_reranker`（交叉编码器，默认**改为关**：568 MB 磁盘 + 1.2 GB 内存 + 首次 5-30 秒，CPU 机器上会吃掉首个问题的全部延迟预算）、`top_k_initial` + `top_k_rerank`（召回规模）、`confidence_threshold_high/low`（分数档位）、`enable_episodic_memory`（关掉则不建情景记忆/画像库/整合层，聊天照常可用）、`enable_wiki_auto_compile`（关掉则不自动编译页面）、`reflection_trigger_turns` / `reflection_trigger_idle_minutes`（整合触发判定，`ConsolidationEngine.should_trigger()`）。另：首阶段召回规模不再随重排开关变化（`max(top_k, top_k_initial)`），否则关掉重排会让全文通道的召回变窄、融合变差。新增测试「每个声明的配置项都有人读」——以后再出现失效配置会直接失败
+
+### M3 记忆工程：情景事件、语义实体、整合
+
+### [x] TASK-017: 定义情景事件表与记录接口
+
+- **描述**: 新增情景事件表（发生时刻、会话标识、事件类型、主体、细节、重要度），提供记录与按时间、主题、对象检索的接口
+- **输入**: `yuanwork/db/sqlite.py`、新增的情景记录模块
+- **输出**: 情景事件表与记录接口
+- **验收标准**: 覆盖 AC-F-016
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_episodic_event_contract.py -q`
+- **验证结果**: 17 passed（2026-11-14）；全量回归后端 1234 passed / 前端 63 / Rust 42。新增 `episodic_events` 表（与既有 `episodes` 对话表分开：前者记「发生了什么」，后者记「说了什么」）与 `memory/episodic_recorder.py` 的 `EpisodicRecorder`（对应设计 §1.1 的模块名）：六类事件（提问/引用/采纳/否定/增文件/删文件）由数据库 CHECK 约束把关，未知类型不记；发生时刻带时区的 ISO 8601；可按时间、主题、对象、会话、类型检索（可组合），最新在前。写失败只记日志不抛错——一次记不下来的交互不该把交互本身弄坏
+
+### [x] TASK-018: 接入六类交互事件到提问链路
+
+- **描述**: 在提问、引用、采纳或否定、增删工作域文件这 6 个动作点记录情景事件
+- **输入**: `yuanwork/orchestrator/agent.py`、工作域模块、情景记录模块
+- **输出**: 6 个记录点的接线
+- **验收标准**: 覆盖 AC-F-016
+- **依赖**: TASK-001, TASK-017
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_episodic_wiring.py -q`
+- **验证结果**: 13 passed（2026-11-14）；全量回归后端 1247 passed / 前端 63 / Rust 42。六个记录点都接上了：**提问**在编排层（理解之后记，主题取自理解结果；被拒答的问题也算一次提问）、**增文件/删文件**在工作域路由（加文件夹与加单文件都算增）、**引用/采纳/否定**由客户端上报（新端点 `POST /api/v1/interactions/{kind}`，只认这三种类型，其余 422）。记录器在启动时装配；关掉记忆工程层（`YUANWORK_ENABLE_EPISODIC_MEMORY=false`）时端点照常返回、不记也不报错
+
+### [x] TASK-019: 实现语义实体与关系的存储
+
+- **描述**: 新增语义实体与实体关系的存储，含别名、属性、提及次数与来源情景事件列表
+- **输入**: `yuanwork/db/sqlite.py`
+- **输出**: 实体与关系表及读写方法
+- **验收标准**: 覆盖 AC-F-015
+- **依赖**: TASK-017
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_semantic_entity_store.py -q`
+- **验证结果**: 25 passed（2026-11-14）；全量回归后端 1272 passed / 前端 63 / Rust 42。`entities` 表补齐设计 §3.1 要求的字段：`source_event_ids`（归纳来源的情景事件，结论才回溯得到）与 `status`（生效/待审——待审的规律不计入作答证据）；新增 `entity_relations` 表（源、目标、关系类型、来源事件，同一关系不重复存）与读写方法（按类别/状态列出、按实体取关系、删除实体连带删除关系）。类别仍由数据库 CHECK 把关（八类之外写不进去）。老库带加列迁移——状态索引随迁移建，不能在 SCHEMA_V1 里建（老表还没有那一列）
+
+### [x] TASK-020: 实现实体抽取并校验类别白名单
+
+- **描述**: 实现模型抽取实体的路径（修正提示词里的花括号占位符），校验类别在 8 类白名单内，无模型时降级为模式匹配
+- **输入**: `yuanwork/wiki/entity_extractor.py`
+- **输出**: 可用的实体抽取与类别校验
+- **验收标准**: 覆盖 AC-F-015
+- **依赖**: TASK-019
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_entity_extraction.py -q`
+- **验证结果**: 27 passed（2026-11-14）；全量回归后端 1299 passed / 前端 63 / Rust 42。模型路径可用（提示词里的 JSON 花括号已转义，`.format()` 不再把它当占位符；裸数组、带围栏、解析失败都处理得了，模型不可用降级为模式匹配）。**类别白名单**：八类之外（"alien"、"员工"）的实体不写入图谱——以前是把非法类别直接塞给数据库，CHECK 约束一炸，整批抽取全废；现在单个坏实体只丢自己，同批的其他实体照常入库。中文类别名（人物/公司/合同…）与大小写差异都归一到图谱认识的那一类
+
+### [x] TASK-021: 实现整合：归纳实体、规律与页面更新
+
+- **描述**: 从近期情景事件归纳出候选实体、候选规律与页面要点更新，写入语义记忆；单条归纳失败跳过该条而不中断整轮
+- **输入**: `yuanwork/consolidation/engine.py`
+- **输出**: 整合逻辑与统计结果
+- **验收标准**: 覆盖 AC-F-017
+- **依赖**: TASK-018, TASK-020
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_consolidation_induction.py -q`
+- **验证结果**: 30 passed（2026-11-15）；全量回归后端 1329 passed / 前端 63 / Rust 42。新增 `consolidation/induction.py`（归纳器：读近期情景事件 → 模型给 JSON → 实体/规律/页面要点三类候选），`ConsolidationEngine.consolidate(reason)` 按设计 §3.1 的接口名落地（原 `run()` 保留为同一轮的别名）。**分级生效（ADR-039）**：实体直接生效（`status=active`），**规律以待审入库**（`status=pending`，不计入作答证据，确认入口留给 TASK-047）；页面要点落 `page_update_candidates` 新表（同一页同一要点只存一次，来源事件合并）。**单条失败不中断整轮**：每条候选单独 try，写不进去只跳过那一条并计入 `induction_failures`。**可回溯（ADR-030）**：每条结果都带来源情景事件列表（模型指明的事件编号映射回真实 id，没指明就记整个窗口）；同一实体再次归纳时来源列表**合并**而不是覆盖，用户确认过的状态**不会**被下一轮打回待审。模型不可用或答非所问时降级为模式匹配——只归纳实体，规律宁缺毋滥（编出来的规律是错规律，用户还要去读它）
+
+### [x] TASK-022: 实现整合的三种触发
+
+- **描述**: 支持空闲到阈值、累计轮数到阈值、用户手动这 3 种触发整合的方式
+- **输入**: `yuanwork/consolidation/engine.py`、整合路由
+- **输出**: 3 种触发的接线与阈值配置
+- **验收标准**: 覆盖 AC-F-018
+- **依赖**: TASK-021
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_consolidation_triggers.py -q`
+- **验证结果**: 16 passed（2026-11-15）；全量回归后端 1345 passed / 前端 63 / Rust 42。三种触发**都能真的跑一轮整合**（ADR-015）：**轮数**由编排层在每轮问答结束后问引擎「该整合了吗」（后台跑，不挡回答）；**空闲**由后台看门狗每分钟看一次时钟（没人问问题到阈值就跑一轮——不然「空闲」只能被下一个问题发现，那不叫空闲）；**手动**是 `POST /api/v1/memory/consolidate`。阈值沿用已接线的 `YUANWORK_REFLECTION_TRIGGER_TURNS`（10）/ `YUANWORK_REFLECTION_TRIGGER_IDLE_MINUTES`（30）。跑完一轮后轮数归零、空闲时钟重置。**修掉一个真 bug**：手动触发原来自己 new 一个引擎，**没有模型网关**——TASK-021 的归纳在手动触发下永远退化成模式匹配（规律一条都归纳不出来）；现在改用应用里那个活着的引擎（设计 §1.2：整合层依赖关系库与模型网关）。记忆工程层关掉时端点照常返回并说明「已关闭」。两轮不会同时跑（轮数触发与空闲看门狗可能同时看到同一个理由），用锁串起来
+
+### [x] TASK-023: 登记归纳结果的来源情景事件
+
+- **描述**: 每条归纳出的实体、规律与页面更新都记录来源情景事件标识，使结论可回溯
+- **输入**: `yuanwork/consolidation/engine.py`
+- **输出**: 语义记录的来源字段与回溯接口
+- **验收标准**: 覆盖 AC-F-017
+- **依赖**: TASK-021
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_consolidation_provenance.py -q`
+- **验证结果**: 13 passed（2026-11-15）；全量回归后端 1358 passed / 前端 63 / Rust 42。**来源字段**（TASK-021 已写入，这里逐条钉死）：实体、规律、页面要点三类结果都带 `source_event_ids`，没有一条是空的——空来源的结论就是猜。模型指明来自哪几条就记哪几条（提示词里的事件编号映射回真实 id），没指明就记**整个窗口**——它确实是从整个窗口读出来的；同一实体再次归纳时来源**合并**。**回溯接口**：`ConsolidationEngine.provenance(event_id)` 回答「这一次交互引出了什么」——本次交互、归纳出的实体、待审的规律、页面要点，以及这些结论背后的那些交互；存储层另有 `list_entities_by_source_event` / `list_page_updates_by_source_event` / `get_episodic_event` 三个查询（用 SQLite 的 `json_each` 展开来源列表）
+
+### M4 wiki 形态与桌面端
+
+### [x] TASK-024: 实现页面编辑端点与段落级合并
+
+- **描述**: 编译页面正文按段落记录归属（模型或用户）；新增页面编辑端点，用户改过的段落标为用户所有；重编译时只替换模型生成的段落，用户所有的段落原样保留
+- **输入**: `yuanwork/wiki/page_generator.py`、`yuanwork/wiki/linker.py`、`yuanwork/db/sqlite.py`、wiki 路由
+- **输出**: 页面块表与归属字段、编辑端点、按块合并的重编译逻辑
+- **验收标准**: 覆盖 AC-F-013、AC-F-027
+- **依赖**: TASK-025
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_wiki_user_edit.py -q`
+- **验证结果**: 18 passed（2026-11-15）；全量回归后端 1387 passed / 前端 63 / Rust 42。新增 `wiki_page_blocks` 表（块正文、页内顺序、归属 `model`/`user`、可空的结论关联）与 `wiki_pages.user_edited` 标记。**编辑端点** `PUT /api/v1/wiki/pages/{page_id}`：改过的段落归用户，**没改的段落保持原归属**（按块文本比对，不是整页都算用户的——否则用户改一段，整页就再也刷不出来了）。**重编译按块合并**：只替换模型的块，用户的块留在原位，用户占的那个位置模型新写的内容被丢掉；页面因此多出来的段落接在末尾。页面的来源、分类、标签不受用户编辑影响。顺带修掉一处：`[[来源:文件名 页码]]` 出处标记本来会被当成 wiki 链接建边，现在跳过
+
+### [x] TASK-025: 拆分编译页面正文为标题、摘要、要点与出处
+
+- **描述**: 页面结构从单一 markdown 拆成标题、摘要、要点列表与出处 4 个部分，页面列表与图谱按新结构工作
+- **输入**: `yuanwork/wiki/page_generator.py`
+- **输出**: 页面结构与其读写路径
+- **验收标准**: 覆盖 AC-F-012
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_wiki_page_structure.py -q`
+- **验证结果**: 11 passed（2026-11-15）；全量回归后端 1369 passed / 前端 63 / Rust 42。编译出的页面现在是**四个部分**：标题、摘要、要点、出处（AC-F-012）。新增 `wiki_pages.key_points` 列（要点列表，老库带加列迁移），要点从页面的「## 要点」小节里读出来——模型把要点写别处也有（页面里第一批列表项就是它的要点）。提示词与无模型时的兜底模板都改成四段式：兜底页面每条切片一个要点并带上出处标记，末尾列出来源清单。页面列表与图谱都按新结构工作：列表项带要点，图谱的页面节点带要点（实体节点没有）。摘要仍截到 300 字
+
+### [x] TASK-026: 建立页面之间与页面到原文的双向链接
+
+- **描述**: 页面之间与页面到原文之间建立链接，并提供反向链接查询
+- **输入**: `yuanwork/wiki/linker.py`
+- **输出**: 链接的建立与查询
+- **验收标准**: 覆盖 AC-F-014
+- **依赖**: TASK-025
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_wiki_links.py -q`
+- **验证结果**: 8 passed（2026-11-15）；全量回归后端 1398 passed / 前端 63 / Rust 42。链接表与查询本来就有，缺的是**把链接建起来**这一步：编译页面时原来只写「页面→切片」，现在补齐三类——**页面→切片**（derived_from）、**页面→来源文档**（derived_from，读者能从页面找到原文件）、**页面→页面**（正文里的 `[[页面名]]`，之前 `auto_link_page` 写好了却没人调用，是段死代码，现在接到编译路径上）。反向链接照旧从另一头查（`get_wiki_backlinks`），端点返回的每条链接**带上另一头的名字**——只给一个页面 id 读者是没法用的。出处标记 `[[来源:...]]` 不算链接
+
+### [x] TASK-027: 实现点击引用打开原文并定位到锚点
+
+- **描述**: 前端把引用渲染为可点击，点击后按锚点类型调用系统默认程序打开该文件并定位（PDF 定位到页、PPT 定位到幻灯片、Excel 定位到工作表）；引用展示为「文件名 + 可读位置」，让任何使用者都能看懂
+- **输入**: `src/app/src/components/ChatWindow.tsx`、`src/app/src-tauri/src/commands.rs`
+- **输出**: 引用跳转的桌面端命令与前端交互
+- **验收标准**: 覆盖 AC-F-006
+- **依赖**: TASK-002, TASK-012
+- **验证命令**: `cargo test --manifest-path src/app/src-tauri/Cargo.toml open_at_anchor`
+- **验证结果**: 7 passed（2026-11-15）；全量回归后端 1398 passed / 前端 72 / Rust 49。新增桌面端命令 `open_at_anchor`（命令清单 16 → 17，`commands_contract.rs` 的清单同步更新）。**按格式分别定位**（ADR-017）：PDF 用 `#page=N` 片段（Edge/Acrobat 认）；PPT/PPTX 与 Excel/XLSX 走 Office 自己的自动化（PowerShell 调 COM：选中第 N 张幻灯片、激活工作表并滚到第 N 行）；其余格式就用默认程序打开。**引用可读**：「文件名 · 第 12 页」「合同.pdf · 进度表 第 7 行」，锚点缺失时不编位置。前端把引用渲染成可点击按钮，打不开时明确说「打不开这个文件：…」而不是毫无反应。Rust 桥接层原先把 `anchor`/`sheet`/`row`/`location` 字段裁掉了，前端拿不到位置——现在这几个字段带过来了（`Citation` 结构补齐）。锚点与位置的换算抽成纯函数 `api/citations.ts`（可单测，前端 63 → 72）
+
+### [x] TASK-028: 实现对话取消通道
+
+- **描述**: 实现取消通道：桌面端与浏览器端都能中止进行中的生成，后端同步停止拉取模型输出
+- **输入**: `src/app/src/api/backend.ts`、`src/app/src-tauri/src/commands.rs`、`yuanwork/api/routes/chat.py`
+- **输出**: 取消端点与两条链路的接线
+- **验收标准**: 覆盖 AC-F-006
+- **依赖**: 无
+- **验证命令**: `npm --prefix src/app test`
+- **验证结果**: 前端 74 passed / Rust 49 passed / 后端全量 1410 passed（2026-11-15）。新增 `yuanwork/orchestrator/cancel.py`（按会话登记的取消事件表）：生成开始时登记，步骤之间与 token 之间检查，取消了就**不再向模型要下一个 token**（后端同步停止拉取模型输出）；阻塞式那条链路（`/chat`）把模型调用放进任务里从外面取消，所以中断也是真的中断。端点 `POST /chat/cancel/{session_id}` 从桩变成真的：停得下就返回 `cancelled: true`，停不下（没有在跑的生成）就明说「这个会话没有正在进行的生成」，不假装。**两条链路都接上**：浏览器路径用 `AbortController` 中断自己的请求并同时通知后端；桌面端路径新增 Rust 命令 `cancel_chat`（命令清单 17 → 18），它设置读取标志让读取循环停下来，并把取消告诉后端。前端聊天框在生成时出现「停止」按钮；**取消不是失败**——已经生成的内容留着，末尾标「（已停止生成）」，不套失败提示的措辞
+
+### [x] TASK-029: 实现手动编译 Wiki
+
+- **描述**: 手动编译端点改为真正执行一次编译，返回页面标识与标题
+- **输入**: `yuanwork/api/routes/wiki.py`
+- **输出**: 手动编译的实现
+- **验收标准**: 覆盖 AC-F-012
+- **依赖**: TASK-025
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_memory_contract_routes.py -q`
+- **验证结果**: 新增 `test_wiki_manual_compile.py` 8 passed；后端全量 1418 passed（2026-11-15）。端点 `POST /api/v1/wiki/compile/{topic}` 从桩变成真的：检索该主题的证据（取 8 条）→ 调 `WikiPageGenerator.compile_page()` → 返回 `page_id` 与 `title`。**写的是自动触发会写的那个页面**（`auto/` 前缀加标题的 slug）——否则手动编译会堆出第二个页面而不是更新已有的那个（页面 id 的生成规则抽成 `page_generator.slugify()`，两边共用一套）。**失败有明确说法**：没有证据（`no_evidence`）、检索失败（`search_failed`）、编译失败（`compile_failed`），**响应里不回显异常原文**（本地路径、上游端点都不外泄，细节只进日志——ADR-021）
+
+### [x] TASK-030: 补前端错误边界并修掉 wiki 字段裁剪导致的白屏
+
+- **描述**: 前端加错误边界，任何渲染期异常都不再导致整棵组件树卸载；同时把 wiki 页面的字段在桥接层补齐，消除筛选时的字段缺失
+- **输入**: `src/app/src/App.tsx`、`src/app/src-tauri/src/commands.rs`
+- **输出**: 错误边界与字段补齐
+- **验收标准**: 覆盖 AC-F-006
+- **依赖**: 无
+- **验证命令**: `npm --prefix src/app test`
+- **验证结果**: 前端 80 passed / Rust 50 passed / 后端全量 1418 passed（2026-11-15）。**白屏的根因找到了**：Rust 桥接层的 `WikiPage` 结构只带 4 个字段，前端按 `tags` 筛选页面时拿到 `undefined` → 渲染期异常 → 整棵组件树卸载（白屏）。**两处都修**：桥接层补齐 `tags`/`source_doc_ids`/`chunk_count`/`version`（缺字段时给空值，旧后端也能解析），前端筛选再加一道保险。**错误边界**（新增 `components/ErrorBoundary.tsx`）：侧边栏、对话、Wiki 页面、图谱、右侧面板、页面树各自包一层，某一块渲染期炸了只坏那一块，其余照常用，还能点「重试」；提示文案抽成纯函数 `api/errorNotice.ts`（可单测，前端 74 → 80）
+
+### [x] TASK-031: 测试三条产品承诺的端到端验收
+
+- **描述**: 写一组端到端用例，覆盖「能定位到原文」「知识库优先并显式提醒」「证据不足直接拒答并给出位置与建议」这三条承诺
+- **输入**: 目标态的各模块
+- **输出**: 端到端验收用例与其回放脚本
+- **验收标准**: 覆盖 AC-F-005、AC-F-007、AC-F-008、AC-F-009、AC-F-010、AC-F-013、AC-F-014、AC-F-015
+- **依赖**: TASK-013, TASK-021, TASK-026
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/e2e/test_product_promises.py -q`
+- **验证结果**: 12 passed（2026-11-15）；后端全量 1430 passed。新增 `src/backend/tests/e2e/`：**只有模型是假的**，存储、检索、编排、编译、图谱都走真模块——这是「端到端」的意义。覆盖：答案带文件名与位置锚点的引用（AC-F-005）、证据定位不了或太少就拒答（AC-F-007）、模型自评闸拒答（AC-F-008）、拒答给出可能位置与建议且不带结论（AC-F-009）、冲突时以知识库为准且开头显式标注分歧（AC-F-010）、分歧写进冲突记录（AC-F-011）、用户改过的段落不被重编译覆盖（AC-F-013）、实体与关系进图谱（AC-F-015）。**验收回放脚本** `src/backend/tests/e2e/replay.py`：把三条承诺各跑一遍并打印用户会看到的东西，逐条判「承诺成立/不成立」，全过才退出 0——里程碑收尾时跑它，看输出就知道承诺还在不在
+
+### M5 文档分层：核心层写入时编译，长尾层查询时检索
+
+### [x] TASK-032: 实现文档分层判定器
+
+- **描述**: 新增分层判定器，按文档特征（路径、类型、体量）与用户显式指定判定一份文档属核心层还是长尾层；判定结果与判定来源落库，用户显式指定的分层不被改写
+- **输入**: `yuanwork/ingestion/tier.py`、`yuanwork/db/sqlite.py`
+- **输出**: 分层记录表、分层判定逻辑与覆盖入口
+- **验收标准**: 覆盖 AC-F-021
+- **依赖**: TASK-001
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_tier_classifier_contract.py -q`
+- **验证结果**: 13 passed（2026-11-15）；后端全量 1443 passed。新增 `yuanwork/ingestion/tier.py`（`TierClassifier`）与 `doc_tiers` 分层记录表（分层、判定来源、判定时刻、源哈希、编译状态、是否过期、段数）。**判定顺序**：①**用户说了算**（显式指定后规则与模型都不许改写，存储层也拦一道）；②**规则**（路径里有「合同/制度/流程/规范/条例…」→ 核心层；体量够大 → 核心层）；③**模型**（规则说不准、且文档大到可能有自己结论时才问——一份两页的会议纪要不值得一次模型调用）；④**判不出来就归长尾层**并记下原因，不阻断建库。判定结果与来源落库（看不见的判定是没人能纠正的判定）。**覆盖入口**：`POST /api/v1/kb/files/{doc_id}/tier`（用户指定）+ `GET /api/v1/kb/tiers`（看分层现状）；摄入流水线在索引后自动判定。两个阈值走配置（`YUANWORK_CORE_MIN_CHARS` / `YUANWORK_TIER_MODEL_MIN_CHARS`）
+
+### [x] TASK-033: 实现核心层文档的写入时编译
+
+- **描述**: 核心层文档在摄入时由模型通读原文，产出实体页、概念页、对比表三类页面中的至少一类；编译不挂在提问的关键路径上
+- **输入**: `yuanwork/wiki/core_compiler.py`、`yuanwork/ingestion/pipeline.py`
+- **输出**: 写入时编译链路与三类页面的产出
+- **验收标准**: 覆盖 AC-F-022、AC-P-008
+- **依赖**: TASK-032, TASK-025
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_core_compile_contract.py -q`
+- **验证结果**: 18 passed（2026-11-15）；后端全量 1461 passed。新增 `yuanwork/wiki/core_compiler.py`（`CoreCompiler.compile`）：模型一次读完原文，输出 JSON（实体页 / 概念页 / 对比表三类），逐类落库——页面带 `page_type`（entity/concept/comparison）与 `tier='core'`，页内按段落拆块（`wiki_page_blocks`），用户的段落重编译时一字不动（ADR-037，合并逻辑提取为 `wiki/page_generator.merge_blocks`，与 `WikiPageGenerator` 共用一份）。**编译挂在摄入路径上，不在提问路径上**：分层判定为 core 才编译，长尾层文档一次模型都不问；`CoreCompiler` 不被 chat/orchestrator 引用（有契约测试钉住）。**超时**：`asyncio.wait_for` 包住整次编译，默认 240 秒（`YUANWORK_CORE_COMPILE_TIMEOUT_SECONDS`，配置项上限 300 秒——五分钟是承诺，不能被配置掉）；超时或失败不阻断建库，文件标记为 `pending_recompile`（AC-E-014 的标记语义在 TASK-038 落细）。编译状态落库到 `doc_tiers.compile_status`，段数落 `segment_count`。`wiki_pages` 新增 `page_type` 与 `tier` 两列（含迁移）
+
+### [x] TASK-034: 实现页面结论的出处锚点
+
+- **描述**: 编译页面的每条结论都记录它在原文中的出处锚点（文件与页码），并支持从结论回跳到原文；锚点缺失的结论不进入作答证据
+- **输入**: `yuanwork/wiki/core_compiler.py`、`yuanwork/utils/chunk_meta.py`
+- **输出**: 结论与出处锚点的存储、读取与回跳
+- **验收标准**: 覆盖 AC-F-023
+- **依赖**: TASK-002, TASK-033
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_conclusion_anchor_contract.py -q`
+- **验证结果**: 9 passed（2026-11-15）；后端全量 1470 passed / 前端 80 / Rust 52。新表 `page_conclusions`（结论正文、锚点、来源文档、来源哈希、段号、矛盾分组、是否生效）；存储层 `upsert_page_conclusion` / `list_page_conclusions` / `list_active_conclusions` / `delete_page_conclusions_except`。**锚点怎么来的**：编译时文档按解析块切成「段」，每段带解析器给的锚点（PDF 的页码、Excel 的表行、Markdown 的标题路径），模型给每条结论报它来自第几段；**先按结论原文在原文里找，找不到再信模型报的段号**——模型指错了段，文字自己知道它在哪儿。**锚点缺失的结论不落库**（一条没法核验的说法不配当证据）；`list_active_conclusions` 再按 `has_anchor` 过滤一道，生效版本之外的也不进证据。**回跳**：`GET /api/v1/wiki/pages/{page_id}/conclusions` 返回锚点 + 位置措辞（「第 12 页」）+ 文件路径；桌面端新增命令 `list_page_conclusions`（命令清单 18→19），页面视图在正文下方列出「结论与出处」，点位置即调 `open_at_anchor` 打开原文到那一页
+
+### [x] TASK-035: 实现摄入时的矛盾检测与双版本保留
+
+- **描述**: 核心层文档摄入时与已有页面结论比对，发现矛盾则标记矛盾并生成对比表，新旧两个版本都保留，不静默覆盖旧结论
+- **输入**: `yuanwork/wiki/core_compiler.py`、`yuanwork/db/sqlite.py`
+- **输出**: 矛盾标记、对比表生成与版本保留
+- **验收标准**: 覆盖 AC-F-024
+- **依赖**: TASK-033
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_contradiction_versions_contract.py -q`
+- **验证结果**: 7 passed（2026-11-15）；后端全量 1477 passed。**怎么发现矛盾**：重编译同一页面前，先把该页已有的结论与新编译出的结论一起给模型，问「同一件事两种说法能不能同时成立」（`CONFLICT_PROMPT`；措辞不同不算矛盾）。模型答出矛盾对（old_index/new_index + 话题 + 理由）。**怎么保留**：存储层 `mark_page_conflict()` 把两条结论归到同一个 `conflict_group`，**新版生效、旧版保留但不生效**（组内至多一条为真）——旧结论不被删，只是不再进证据；被新版本取代又没矛盾的结论照常清理。**对比表**：自动生成 `core/对比-` 加话题的 slug 作页面 id（`page_type='comparison'`），表里两行并排写「旧版/新版 + 出处（《文件名》第 12 页）」。**检查失败 ≠ 没矛盾**：矛盾判定这一调用挂了或读不懂时，旧结论一律保留（只是不标记），绝不静默覆盖——这是本任务的核心不变量
+
+### [x] TASK-036: 实现核心层与长尾层的分层检索
+
+- **描述**: 提问时先检索核心层页面，核心层结论不足时才检索长尾层切片；核心层结论足够时不再触发长尾层检索；两层结论不一致时以核心层为准并在答案中标注
+- **输入**: `yuanwork/retrieval/tiered.py`、`yuanwork/orchestrator/steps/extract.py`
+- **输出**: 两层检索编排、短路逻辑与不一致标注
+- **验收标准**: 覆盖 AC-F-025、AC-P-009、AC-E-016
+- **依赖**: TASK-002, TASK-033
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_tiered_retrieval_contract.py -q`
+- **验证结果**: 15 passed（2026-11-15）；后端全量 1492 passed。新增 `yuanwork/retrieval/tiered.py`（`TieredRetriever.search`）：**核心层先查**——读的是编译出来的结论（`page_conclusions` 里生效且有锚点的那些），不是切片；匹配用中文字符二元组 + 拉丁词 + 数字做词项重合（共用两个词才算同一件事，一个词只是巧合；停用词不算词项）。**短路**：核心层结论够（默认 ≥ 2 条）就直接返回，**长尾层一次都不搜**（AC-P-009 的两秒预算因此守住）——长尾只在核心层不够时才由 `HybridRetriever` 搜（带候选文件过滤）。**降级**：没有关系库（`optional_sqlite_store`）或核心层读不出来时，直接查长尾层（design §3.2）。**两层不一致**：核心层结论与长尾切片讲同一件事但数字不同（旧的修订前条款还躺在长尾里）→ 判定为矛盾，**核心层为准**（排在证据第一位），长尾那一条打上 `tier_conflict` 标记，答案开头由提示词要求写明「⚠ 注意：核心层与长尾层结论不一致，已以核心层为准」（提示词新增「层间分歧」一节，`conflict_note()` 生成）
+
+### [x] TASK-037: 实现超长核心层文档的分段读取
+
+- **描述**: 核心层文档超出模型单次可读长度时按段落分段读取，并在页面结论上标明该结论来自全文的哪一段
+- **输入**: `yuanwork/wiki/core_compiler.py`
+- **输出**: 分段读取逻辑与段落来源标注
+- **验收标准**: 覆盖 AC-E-013
+- **依赖**: TASK-033
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_core_compile_segmented_contract.py -q`
+- **验证结果**: 8 passed（2026-11-15）；后端全量 1500 passed。**怎么分段**：文档按解析块切成「段」，一次能读的量由 `YUANWORK_CORE_READ_CHARS`（默认 60000 字）定；超了就按段切成若干「窗口」，**一个窗口一次模型调用**（`CoreCompiler._windows`）。**段号是全文的段号**——第二个窗口的提示词里第一个段就是「【第 2 段】」，模型报的段号直接对得上原文，锚点也照旧查得到。**同一页面的结论合并**（`_merge_pages`）：合同开头和结尾都会提到甲方，分几次读出来的同一个页面并成一页，要点不重复写。**页面上标明出处段**：多段文档的结论写成 `- 验收期限写在第 2 段里（第 2 段）`，单段文档不标（没有可指的）；结论入库时也带 `segment_index`
+
+### [x] TASK-038: 实现核心层编译失败的文件标记
+
+- **描述**: 核心层文档编译失败时把该文件标记为「待重编译」并继续处理其余文件；提问时不检索该文件的内容
+- **输入**: `yuanwork/ingestion/pipeline.py`、`yuanwork/db/sqlite.py`
+- **输出**: 编译状态字段与失败分支
+- **验收标准**: 覆盖 AC-E-014
+- **依赖**: TASK-032, TASK-033
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_core_compile_failure_contract.py -q`
+- **验证结果**: 4 passed（2026-11-15）；后端全量 1504 passed。**标记**：编译失败（模型挂了 / 超时 / 一条页面都没写出来）→ `doc_tiers.compile_status='pending_recompile'`（可重编译），文件本身照常入索引，**建库继续处理其余文件**（一个坏文件不拖垮整批）。**提问时不检索它**：存储层 `list_docs_needing_recompile()` 列出待重编译的文件，`TieredRetriever` 把它交给长尾检索的排除名单（`HybridRetriever.search(exclude_doc_ids=...)` → 过滤表达式 `doc_id NOT IN (...)`）——理由是页面写的是一套、文件写的是另一套，让读者去核对只会看到一处他解释不了的矛盾
+
+### [x] TASK-039: 实现源文件变更后的页面标注
+
+- **描述**: 核心层页面编译完成后其源文件被修改时保留旧页面并标注源文件已变更，直到用户显式触发重编译
+- **输入**: `yuanwork/wiki/core_compiler.py`、`yuanwork/ingestion/pipeline.py`
+- **输出**: 源文件变更检测与页面标注
+- **验收标准**: 覆盖 AC-E-015
+- **依赖**: TASK-033
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_core_stale_marker_contract.py -q`
+- **验证结果**: 6 passed（2026-11-15）；后端全量 1510 / 前端 80 / Rust 53。**怎么发现变更**：摄入时发现同一路径的文件内容哈希变了，本来就只「跳过、不替换」（旧版仍在索引里），现在顺手把旧文档的 `doc_tiers.stale` 置真（`_mark_stale`）——**页面保留**（页面写的是文档当时说的话），**标注源文件已变更**。**标注到哪儿**：页面列表与页面详情都带 `stale` 字段（`WikiPageInfo.stale`，由页面的 `source_doc_ids` 对上 `doc_tiers.stale` 得出），桌面端桥接层补上 `stale` 字段（前端筛选/显示要用，桥接层裁字段的老坑不能再踩），页面树里该页后面挂一个「源文件已变更」标记。**直到用户显式触发**：变更本身**不会**重编译（模型不会被再叫一次），只有用户强制重建（`force=True`）才重编译出新版本，旧记录留作历史
+
+### [x] TASK-040: 实现长尾层批量索引的性能达标
+
+- **描述**: 长尾层批量索引按批写入并限流，控制核心层文档数量上限，保证 5000 个文件规模的长尾层索引在时限内完成
+- **输入**: `yuanwork/ingestion/pipeline.py`、`yuanwork/memory/semantic.py`
+- **输出**: 批量写入逻辑与核心层文档数量上限配置
+- **验收标准**: 覆盖 AC-P-007
+- **依赖**: TASK-001, TASK-003
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_ingest_performance_contract.py -q`
+- **验证结果**: 9 passed（2026-11-15）；后端全量 1519 passed。**按批写**：目录建库不再一个文件一次写入，而是攒够一批再写（`ChunkBatch`，批大小 `YUANWORK_INDEX_BATCH_SIZE`，默认 256）——一次嵌入调用顶一次，省掉的是每文件一次的开销；向量库内部再按 `YUANWORK_INDEX_WRITE_BATCH_SIZE`（默认 256 行）分片写，峰值内存与写延迟有界。**限流**：`YUANWORK_INDEX_RATE_LIMIT`（每秒切片上限，默认 0 = 不限）——按批之间的实际用时补足等待，平均速率不超限。**核心层上限**：`YUANWORK_CORE_MAX_DOCS`（默认 200）——超过上限的文档**仍然入索引**，只是不再算核心层（照旧当长尾层切片检索），理由是「几千份文档的核心层」已经不是任何东西的摘要了；**用户显式指定的分层不受这个上限管**。另补一处分层漏洞：长尾层检索现在**排除核心层自己的文档**（切片），否则同一份核心文档的切片会和它编译出的结论一起出现在答案里
+
+### [x] TASK-041: 测试分层形态的端到端验收
+
+- **描述**: 写一组端到端用例，覆盖「核心层页面结论能回溯到原文页码」「两层结论不一致时以核心层为准」「核心层结论足够时不触发长尾层检索」这三条分层承诺
+- **输入**: 目标态的分层、编译与检索模块
+- **输出**: 端到端验收用例与其回放脚本
+- **验收标准**: 覆盖 AC-F-022、AC-F-023、AC-F-024、AC-F-025、AC-E-016
+- **依赖**: TASK-035, TASK-036
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/e2e/test_tiered_product.py -q`
+- **验证结果**: 7 passed（2026-11-15）；后端全量 1526 passed（`test_fts.py` 那条是既有 flake，单独跑必过）。新增 `src/backend/tests/e2e/test_tiered_product.py` 与回放脚本 `src/backend/tests/e2e/replay_tiers.py`（跑一次打印用户看到的东西，任何一条承诺不成立就退出码非零）。**除了模型都是真的**：真 PDF（手搓字节，`ingestion_fixtures.make_pdf_file`）、真解析器、真流水线、真编译器、真检索、真编排；模型按 `task_type` 分别应答。走通的三条链路：①一份两页合同进工作域 → 分层判为 core → 编译成 `core/验收期限` 概念页 → 结论带「第 1 页」锚点；②提问「验收期限是多久」→ 证据来自核心层结论（**长尾层检索次数 0**）→ 答案引用带页码；③合同改版重编译 → 旧结论保留不生效、新结论生效、同一矛盾组 → 自动生成《对比：验收期限》表并列出两版出处。测试替身（`TieredLLM`/`RecordingSemantic`/`RecordingLongTail`/`make_tiered_agent`）统一放进 `e2e/harness.py`，回放脚本与用例共用一份
+
+### M6 性能：让建库时间收敛到可接受范围
+
+### [x] TASK-042: 建立建库性能基准与验收脚本
+
+- **描述**: 建立两层性能基准。合成层：固定随机种子的基准集生成器，按结构画像产出 PDF、PPT、Word、Excel、Markdown 与图片（PDF 用 reportlab、其余用已装的 python-docx、python-pptx、openpyxl、PIL），数据集可重建不入库，跑批产出总时长、分段耗时占比、吞吐率与峰值内存，并留下回归基线文件；真实层：结构画像采集器只统计页数、段落数、表格数、图片占比与体量分布，不读内容不落原文，供真实工作域的全量验收脚本取数
+- **输入**: `yuanwork/ingestion/pipeline.py`、`pyproject.toml`、新增的基准脚本目录
+- **输出**: 合成基准集生成器、结构画像采集器、跑批与报告脚本、回归基线文件、真实工作域全量验收脚本
+- **验收标准**: 覆盖 AC-P-001、AC-P-007、AC-F-026、AC-P-010、AC-P-011、AC-P-012
+- **依赖**: TASK-001
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_perf_benchmark_contract.py -q`
+- **验证结果**: 18 passed（2026-11-15）；后端全量 1544 passed。新增 `scripts/bench/`（`corpus.py` 合成集生成器 / `profile.py` 结构画像 / `run.py` 跑批与报告 / `accept_workspace.py` 真实工作域全量验收 / `baseline.json` 回归基线），pyproject 加 reportlab 依赖与两个入口（`yuanwork-bench`、`yuanwork-accept-workspace`）。**合成层**：固定种子的结构画像生成器，一次生成 PDF/PPT/Word/Excel/Markdown/图片六种，同一个种子两次生成的字节完全一致（可重建、不入库）。**真实层**：`profile_workspace()` 只数结构（页数/段落/表格/图片占比/体量分布），**不读原文、不落原文**。**分段耗时**：流水线与语义记忆各记各的阶段耗时（parse/chunk/embed/write/compile），报告给出各段占比、三项吞吐（解析文件/分、嵌入切片/秒、落库切片/秒）与峰值内存（psutil 采样）。**回归门**：基线文件记下本次的机器信息（CPU/内存/torch/CUDA）与各项数字，下次跑快过 10% 以内不算退步，超过即报退步并退出码非零。**没测到的环节不算数**：本机装不上嵌入模型（huggingface.co 不可达），嵌入与落库两段标为「没测到」，不参与退步判断、也不算违背承诺——基线文件里写明了这一点。顺带修掉一个真 bug：图片里识别不出一行字时 `detections` 是 `None`，`for det in detections` 直接崩掉（现在按空列表处理）
+
+### [x] TASK-043: 实现 GPU 嵌入与批量提交
+
+- **描述**: 依赖改为 CUDA 版 torch，嵌入走 GPU 并用 fp16；单条嵌入输入截断到 512 token；批量大小可配置；没有 NVIDIA 显卡时自动回落 CPU 并写明回落原因
+- **输入**: `yuanwork/memory/semantic.py`、`yuanwork/config.py`、`pyproject.toml`
+- **输出**: GPU 嵌入路径、截断与批量配置、回落分支
+- **验收标准**: 覆盖 AC-P-011
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_embedding_device_contract.py -q`
+- **验证结果**: 10 passed（2026-11-15）；后端全量 1554 passed。**设备自己选**：`YUANWORK_EMBEDDING_DEVICE` 默认从 `cpu` 改成 `auto`——有 NVIDIA 显卡就用显卡，没有就用 CPU。**回落要写明原因**（`SemanticMemory.device_fallback_reason`）：「这台机器上没有可用的 NVIDIA 显卡，按 CPU 处理」/「配置要求用 CUDA，但这台机器上没有可用的 NVIDIA 显卡」/「torch 不可用」——**健康检查端点把设备与回落原因一起报出来**（`embedding_device` / `embedding_device_reason`），建库慢却看不出为什么，是那种让人白搭一下午的坑。**fp16 只在显卡上开**（CPU 上 fp16 更慢）；**单条截断 512 token**（`YUANWORK_EMBEDDING_MAX_TOKENS`，构造模型时传 `max_length`）；批量大小仍走 `YUANWORK_EMBEDDING_BATCH_SIZE`。pyproject 里写明 CUDA 版 torch 不在默认索引上（`pip install torch --index-url https://download.pytorch.org/whl/cu121`），并留了 `gpu` 附加依赖位
+
+### [x] TASK-044: 引入 C 库 PDF 解析主路径
+
+- **描述**: PDF 解析主路径改用 PyMuPDF 取文本与页码锚点，pdfplumber 降级为表格与复杂版式的兜底路径；两条路径产出的锚点结构保持一致
+- **输入**: `yuanwork/ingestion/parser/pdf_parser.py`、`pyproject.toml`
+- **输出**: 双路径 PDF 解析器与快慢路径的选用规则
+- **验收标准**: 覆盖 AC-P-010
+- **依赖**: TASK-002
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_parser_fastpath_contract.py -q`
+- **验证结果**: 9 passed（2026-11-15）；后端全量 1563 passed。`PDFParser` 改成双路径：**主路径 PyMuPDF**（C 库 MuPDF）取文本与页码锚点，**兜底 pdfplumber** 负责表格与复杂版式。**选路规则**：①主路径一个字都没读到（版式 MuPDF 读不了，或整份文档是扫描件）→ 整份走兜底；②某页有表格的**横竖线**（`page.get_drawings()` 找线，极快）或正文看着像表格 → 该文档走兜底补表格（主路径已经读到的正文**不重读**）。**两条路径出的锚点结构一致**（都是 `{kind:'page', page:N}`），读者跳到第 12 页时不必关心是哪条路径读的。**实测（本机 40 份 12 页 PDF）**：PyMuPDF 取正文 **6829 文件/分钟**，pdfplumber 取正文 **258 文件/分钟**——**快 26 倍**；但 **PyMuPDF 自带的表格查找慢到不能用**（`find_tables` 16 文件/分钟，比 pdfplumber 慢十几倍），所以表格宁可交给 pdfplumber：带表格的文档总耗时与从前持平（218 文件/分钟），**不带表格的文档快 26 倍**。基准集里的 PDF 也改成画了表格线的真表格
+
+### [x] TASK-045: 实现并行化批量摄取
+
+- **描述**: 批量摄取改为多进程解析加批量嵌入，带并发限流与断点续跑；建库完成的判据是长尾层切片可检索，核心层页面在后台逐份产出，不阻塞建库完成
+- **输入**: `yuanwork/ingestion/pipeline.py`、新增的批量摄取模块
+- **输出**: 并行批量摄取、限流与断点续跑、建库完成判据
+- **验收标准**: 覆盖 AC-P-001、AC-F-026、AC-P-012
+- **依赖**: TASK-043, TASK-044
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_ingest_parallel_contract.py -q`
+- **验证结果**: 17 passed（2026-11-15）；全量回归后端 1580 passed / 前端 80 / Rust 53。新增 `ingestion/batch.py`（`BatchIngestor`）：**多进程解析**（`ProcessPoolExecutor`，默认 4 个工人，不超过 CPU 数；解析函数 `parse_one` 必须是模块级函数才能被送到子进程）、**并发限流**（在飞的解析文件不超过 `max_in_flight`，默认 16——再多就是白占内存攒切片）、**批量写入**（走 `ChunkBatch`，一批一次嵌入调用，限速可配）、**断点续跑**（已入库的文件跳过；文件在盘上改过则保留旧版本并打上「源文件已变更」标记，不偷偷换掉）、**后台编译核心层页面**（建库完成的判据是长尾层切片可检索，核心层页面在后台逐份产出，不阻塞建库完成，AC-F-026）。管线新增 `build_directory()`（批量建库，路由 `/ingest/dir` 走它），原来的 `ingest_directory()` 保持「本进程内一次一个文件」的旧契约不动。**契约测试逮到一个真 bug**：并行时文件元数据取自派活的循环变量，几份文件会被记到别人的路径和 doc_id 底下——现在解析结果连同「这是哪个文件的」一起回来
+
+### M7 开放问题落地：编辑合并、事件保留、待审、判定前置、术语上下文
+
+### [x] TASK-046: 实现情景事件的保留期与容量上限
+
+- **描述**: 情景事件按 5000 条与 180 天双上限淘汰，先到先淘汰；淘汰时记录被淘汰的数量，不保留原文副本；清理在记录事件后按触发条件执行，失败只写日志
+- **输入**: `yuanwork/memory/episodic.py`、`yuanwork/db/sqlite.py`
+- **输出**: 淘汰逻辑与被淘汰数量统计
+- **验收标准**: 覆盖 AC-E-017
+- **依赖**: TASK-017
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_episodic_retention_contract.py -q`
+- **验证结果**: 14 passed（2026-11-15）；全量回归后端 1594 passed / 前端 80 / Rust 53。**淘汰落在 `EpisodicRecorder` 上**（设计 §3.2 点的就是它，`memory/episodic.py` 里那个 `EpisodicMemory` 管的是对话表，不动）：`prune()` 按**双上限**淘汰——条数超 5000 就砍掉最老的，超过 180 天的直接砍掉，**先到先淘汰**；淘汰后**只把「淘汰了多少条」写进统计**（新表 `episodic_prune_stats`，字段只有 `pruned_at` 与 `pruned_count`），**事件本身连同原话一起没了，不留副本**——留一份就等于把清理这件事又变成了新的原文副本（ADR-038）。**触发时机**：记录事件之后检查（条数超限、或最老的一条已经太老），满足条件才清；**清不动的时候只写日志**，记录照常成功，不影响用户那一次交互。**上限是构造参数**（`EpisodicRecorder(store, max_events=..., max_age_days=...)`），默认就是 5000 / 180 天。存储层新增 `prune_episodic_events` / `record_episodic_prune` / `list_episodic_prune_stats` / `total_pruned_events` / `oldest_episodic_event`。关系库表清单由 18 张变 19 张、索引由 30 个变 31 个（`test_storage_contract_sqlite_schema.py` 同步更新）
+
+### [x] TASK-047: 实现规律待审与确认入口
+
+- **描述**: 整合层归纳出的规律以待审状态入库，未经用户确认不计入作答证据；实体照常自动生效；提供列出待审规律与确认生效的接口
+- **输入**: `yuanwork/consolidation/engine.py`、`yuanwork/db/sqlite.py`、记忆路由
+- **输出**: 生效状态字段、待审查询与确认接口
+- **验收标准**: 覆盖 AC-F-028
+- **依赖**: TASK-021
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_consolidation_review_contract.py -q`
+- **验证结果**: 14 passed（2026-11-15）；全量回归后端 1608 passed / 前端 80 / Rust 53。**分级生效落地（ADR-039）**：实体照旧自动生效（`status=active`），**规律一律以待审入库**（`status=pending`）——一条规律是跨事件推断出来的结论，可能是错的，错的规律直接进答案会伤准确度承诺。**待审的不计入作答证据**：规律分两张名单，`list_active_rules()`（用户确认过、算数的那批）与 `list_pending_rules()`（还在等的），归纳层的写入按 `status` 过滤，不确认就进不了前者。**确认入口**：`ConsolidationEngine.approve(entity_id)`（设计 §3.2 点的接口）把一条待审规律转为生效，**来源情景事件列表原样留着**（可回溯，ADR-030）；目标不存在或不是待审状态就返回错误（`UnknownRule` / `RuleNotPending`）。**记忆路由**新增两个端点：`GET /api/v1/memory/rules/pending`（列出待审规律）与 `POST /api/v1/memory/rules/{entity_id}/approve`（确认生效，重复确认返回 400，不存在返回 404）。**用户确认过的规律不会被下一轮打回待审**（存储层的状态只进不退）。端点清单由 33 个变 35 个、memory 分组由 5 个变 7 个（`test_api_contract_routes.py` 同步更新）
+
+### [x] TASK-048: 实现冲突判定的前置规则与高风险强制
+
+- **描述**: 冲突判定前先做规则筛选：答案含数字、日期、金额或「规定、应当、必须」等规范措辞，或所问内容涉及制度、合同、金额时强制判定，其余跳过并记录跳过原因
+- **输入**: `yuanwork/consolidation/conflict.py`、`yuanwork/orchestrator/agent.py`
+- **输出**: 前置筛选规则与跳过分支
+- **验收标准**: 覆盖 AC-F-029
+- **依赖**: TASK-013
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_conflict_prefilter_contract.py -q`
+- **验证结果**: 15 passed（2026-11-15）；全量回归后端 1623 passed / 前端 80 / Rust 53。新增 `ConflictJudge.should_judge(answer, question)`（设计 §3.2 点的接口）：**命中即强制判定**——①**答案含数字**（阿拉伯数字，或中文数字带单位/序数：「万分之三」「五百元」「第十条」「百分之五」；光有「一旦」「第三方」不算）；②**答案含规范措辞**（规定、应当、必须、不得、禁止、至少、最多、不超过、不低于、适用于、有效期、生效、失效）；③**所问内容涉及制度、合同、金额**（制度、规章、规范、流程、标准、合同、契约、协议、条款、金额、费用、价格、报价、付款、结算、报销、预算、上限、下限、阈值）。**其余跳过**：答案不含具体断言、问的也不是制度合同金额——这种答案没有能和知识库互相矛盾的地方，白花一次模型调用还占掉判定预算（AC-P-004）。**跳过要留痕**：跳过理由写进 `state.trace` 的 `check_conflicts` 条目（`skipped` / `skip_reason`），跳过**不等于**发现冲突——答案照常不作改写，冲突列表为空。**规则读不出来时按需要判定处理**（宁可多查一次，也不放过一次）
+
+### [x] TASK-049: 实现术语原文上下文查询接口
+
+- **描述**: 新增术语上下文查询接口，返回该术语在知识库原文中的上下文片段及其位置；查不到时返回空结果并明确标记未找到，不生成任何解释
+- **输入**: `yuanwork/retrieval/hybrid.py`、`yuanwork/orchestrator/steps/answer.py`
+- **输出**: 术语上下文查询接口
+- **验收标准**: 覆盖 AC-F-030
+- **依赖**: TASK-002, TASK-012
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_term_context_contract.py -q`
+- **验证结果**: 14 passed（2026-11-15）；全量回归后端 1637 passed / 前端 80 / Rust 53。**术语上下文取自原文，不生成解释（ADR-041）**：新接口 `GET /api/v1/kb/terms/{term}/context` → `{term, found, contexts[]}`，每个 context 带**原文片段**与**位置**（文件名 + 「第 12 页」这样的锚点）。**查不到就查不到**：`found=false`、列表为空，**一个字都不编**——模型写的术语解释是产品里第一段无法核验的文字，而产品的全部价值就建立在「答案可核验」上。检索侧新增 `HybridRetriever.search_term()`（混合检索拿候选，**只留真正含该词的切片**——讲别的东西的段落不是这个词的上下文）与 `TermContext.lookup()`（设计 §3.2 点的接口）。**片段是整句**：词所在的句子优先，句子太长才在词两侧裁剪并加省略号。**答案带上自己的术语**：作答结果新增 `terms` 字段——知识库里认识、且出现在答案里的词（实体名与页面标题，即知识库自己的词汇表；长的优先，「履约保证金」不会被「保证金」顶掉），前端据此把这些词做成可点的（点开就是上面的原文上下文）。端点清单由 35 个变 36 个、kb 分组由 5 个变 6 个（`test_api_contract_routes.py` 同步更新）
+
+### [x] TASK-050: 实现前端页面编辑与术语点击
+
+- **描述**: 前端为编译页面提供编辑入口并按段落显示归属，区分模型写的段落与用户写的段落；答案中的专业术语可点开，展示该术语的原文上下文与位置
+- **输入**: `src/app/src/components/Wiki/WikiPageView.tsx`、`src/app/src/components/ChatWindow.tsx`、`src/app/src/api/backend.ts`
+- **输出**: 页面编辑交互、段落归属展示、术语点击查看上下文
+- **验收标准**: 覆盖 AC-F-027、AC-F-030
+- **依赖**: TASK-024, TASK-049
+- **验证命令**: `npm --prefix src/app test`
+- **验证结果**: 98 passed（2026-11-15）；全量回归后端 1648 passed / 前端 98 / Rust 61，`npm --prefix src/app run build` 干净。**页面编辑**：页面头部多一个「编辑」按钮，点开是正文文本框加「保存 / 取消」；保存走已有的 `PUT /wiki/pages/{page_id}`，**归属由后端判定**（改过的段落归用户），保存后页面与段落都重新读一遍，界面上显示的归属是**记录下来的**归属不是猜的。**按段落显示归属**：正文按段落渲染，每段标着「模型生成」还是「你写的」——归属的记录在 `wiki_page_blocks` 表里，为此新增 `GET /wiki/pages/{page_id}/blocks`（端点清单 37 个，wiki 分组 8 个）。**术语点击**：答案里的术语（知识库自己认识的词）点得开，点开是一块面板：原文片段 + 出处（「《采购合同.md》第 12 页」），**知识库里没有就明说没有，一个字都不解释**（ADR-041）；新纯模块 `src/app/src/api/terms.ts`（`markTerms` 最长优先、原文一字不改；`termContextSummary` 只说位置）+ 18 个新测试。桌面端新增 3 个 Tauri 命令（`list_page_blocks` / `update_wiki_page` / `get_term_context`，COMMAND_NAMES 19→22），`ChatResponse` 补上 `terms` 字段。**对抗审查逮到两个真 bug 并修掉**：①**用户自己写的段落会被重编译悄悄弄丢**——核心层编译（`core_compiler.py`）写页面正文时用的是模型的文本，用户的段落只留在归属表里，于是「正文」与「归属」对不上，下一次编辑按正文提交就把用户的字删了；现在正文改回由合并后的段落渲染（与手动编译一致），编辑框也从**记录的段落**起笔而不是从正文起笔，并补了回归测试（去掉修复该测试确实会红）；②保存成功但回读失败时**谎报保存失败**——用户被告知字丢了，其实没丢；现在保存成功就关编辑器、回读失败只记日志
+
+### M8 桌面端接入工作域
+
+### [x] TASK-051: 实现桌面端的工作域接入与工作域驱动的建库
+
+- **描述**: 桌面端的「选择文件夹」与「加入文件」改为写入工作域（POST /workspace/folders 与 POST /workspace/files）；新增 POST /ingest/rebuild 端点按工作域条目触发建库并复用现有的任务进度查询；侧栏清单改为读工作域条目（GET /workspace/entries），移除条目改用 DELETE /workspace/entries/{id}
+- **输入**: `src/app/src/api/backend.ts`、`src/app/src/components/Sidebar.tsx`、`src/app/src/components/Onboarding.tsx`、`src/app/src-tauri/src/commands.rs`、`yuanwork/api/routes/ingest.py`
+- **输出**: 桌面端工作域接入、工作域驱动的建库端点与侧栏工作域清单
+- **验收标准**: 覆盖 AC-F-001、AC-F-002
+- **依赖**: TASK-001
+- **验证命令**: `npm --prefix src/app test`
+- **验证结果**: 127 passed（2026-11-15）；全量回归后端 1661 passed / 前端 127 / Rust 68，`npm --prefix src/app run build` 干净。**建库由工作域驱动**：新端点 `POST /api/v1/ingest/rebuild` 按**工作域条目**建库（文件夹展开 + 手动加入的单文件，同一文件只算一次），复用现有的 `GET /ingest/status/{job_id}` 查进度——任务形状与目录建库一致，不另起一套（端点清单 37→38，ingest 分组 3→4）。管线上新增 `IngestionPipeline.build_workspace(force, on_progress)`，走的是目录建库同一套并行批量摄取（`BatchIngestor.ingest(files=...)`），所以工作域建库也是多进程解析、批量写入、可续跑。**不能索引的文件不静默丢**：不受支持的文件按 AC-E-004 列出文件与原因，超出体积上限的按 AC-E-006 跳过并说明上限，已在库里的跳过；**进度分母是工作域覆盖的文件数**（只报告不索引的文件也算完成，否则进度条永远走不满）。**桌面端**：新增 5 个 Tauri 命令（`list_workspace_entries` / `add_workspace_folder` / `add_workspace_file` / `remove_workspace_entry` / `rebuild_workspace`，命令清单 22→27，带状态码检查的命令 6→11）；侧栏清单**改读工作域条目**（不再列索引出来的文件），每行可移除——移除走 `DELETE /workspace/entries/{id}`，后端一并清掉它带入索引的内容，措辞说清「文件仍在磁盘上」；侧栏多出「+ 文件夹」「+ 文件」「重建」三个动作，加入工作域后自动按工作域重建并轮询进度。**首次启动的判断改成看工作域**（AC-F-001）：`App.tsx` 改用 `workspaceLoaded` / `workspaceEntries.length` / `workspaceError` 决定要不要出引导页，不再看知识库文件数——空知识库只说明还没建库，空工作域才是「不知道该做什么」。**对抗扫描（逐条对照契约读三端）逮到并修掉四个问题**：①**进度分子漏计「已在库被跳过」的文件**——工作域 10 个文件、8 个已入库时，进度条停在 20% 直到结束才跳到 100%（而同样没入库的不支持/超限文件却计入分子，两类处理不一致）；现在批量摄取把跳过的文件计入完成数，分母是它看过的全部文件，回归测试去掉修复确实会红；②**首次启动页在文件夹加入工作域的瞬间卸载，长建库没有取消按钮**（引导页是唯一带「取消」的地方，侧栏三个按钮在建库期间全是禁用的）——侧栏进度条旁现在有「取消」；③**`included` 请求字段被接受又被丢弃**（前端发 `included:true`，客户端传 `false` 会得到 `true` 且无提示）——现在真的生效；④design.md §3.2 把「移除条目时一并清索引」写在 `Workspace.remove_path` 名下，实际清索引在路由里（只有路由同时握着关系库与语义记忆）——规范改成写清分工。**规范同步**：design.md §1.1 模块表把「索引触发与重建」划归摄取路由（新增 1 行），§3.2 补 `IngestionPipeline.build_workspace()` 的接口签名并订正 `Workspace.remove_path` 的分工，§8 记一条变更。**已知遗留**：①TASK-001 的串行版 `IngestionPipeline.ingest_workspace()` 现在只有测试在用（生产路径走并行的 `build_workspace()`），两者进度回调与结果字段不同，合并要改 TASK-001 的契约测试，本次没动；②被跳过文件（不支持/超限）的原因只在建库结果里，作业状态里没有，桌面端看不到——目录建库同样如此，不是这次引入的，要修得给作业状态加字段（契约变更，另立任务）
+
+## 2. 依赖关系图
+
+```mermaid
+graph TD
+  TASK-001[工作域条目与接口] --> TASK-002[可扩展位置锚点]
+  TASK-002 --> TASK-009[证据闸硬规则]
+  TASK-009 --> TASK-010[证据闸模型自评]
+  TASK-009 --> TASK-011[拒答输出]
+  TASK-002 --> TASK-012[引用校验]
+  TASK-012 --> TASK-013[冲突判定与改写]
+  TASK-001 --> TASK-018[交互事件接入]
+  TASK-017[情景事件表] --> TASK-018
+  TASK-017 --> TASK-019[语义实体存储]
+  TASK-019 --> TASK-020[实体抽取]
+  TASK-018 --> TASK-021[整合归纳]
+  TASK-020 --> TASK-021
+  TASK-021 --> TASK-022[整合三触发]
+  TASK-021 --> TASK-023[归纳来源可回溯]
+  TASK-025[页面结构四部分] --> TASK-024[用户编辑优先]
+  TASK-025 --> TASK-026[双向链接]
+  TASK-012 --> TASK-027[引用跳转]
+  TASK-002 --> TASK-027
+  TASK-025 --> TASK-029[手动编译]
+  TASK-013 --> TASK-031[端到端验收]
+  TASK-026 --> TASK-031
+  TASK-001 --> TASK-032[文档分层判定]
+  TASK-032 --> TASK-033[核心层写入时编译]
+  TASK-025 --> TASK-033
+  TASK-002 --> TASK-034[结论出处锚点]
+  TASK-033 --> TASK-034
+  TASK-033 --> TASK-035[矛盾标记与双版本]
+  TASK-033 --> TASK-036[分层检索]
+  TASK-002 --> TASK-036
+  TASK-033 --> TASK-037[分段读取]
+  TASK-032 --> TASK-038[编译失败标记]
+  TASK-033 --> TASK-038
+  TASK-033 --> TASK-039[源文件变更标注]
+  TASK-035 --> TASK-041[分层端到端验收]
+  TASK-036 --> TASK-041
+  TASK-001 --> TASK-042[性能基准与验收脚本]
+  TASK-002 --> TASK-044[C库PDF解析主路径]
+  TASK-043[嵌入切GPU] --> TASK-045[并行批量摄取]
+  TASK-044 --> TASK-045
+  TASK-017 --> TASK-046[事件保留与淘汰]
+  TASK-021 --> TASK-047[规律待审与确认]
+  TASK-013 --> TASK-048[冲突判定前置规则]
+  TASK-002 --> TASK-049[术语上下文接口]
+  TASK-012 --> TASK-049
+  TASK-024 --> TASK-050[前端编辑与术语点击]
+  TASK-049 --> TASK-050
+  TASK-001 --> TASK-051[桌面端接入工作域]
+```
+
+## 3. 推荐执行顺序
+
+```
+批次 M1（可并行 [P]）：TASK-001, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007, TASK-008
+批次 M2（可并行 [P]）：TASK-009, TASK-014, TASK-015, TASK-016
+        依赖 TASK-009：TASK-010, TASK-011
+        依赖 TASK-012：TASK-013
+批次 M3（可并行 [P]）：TASK-017, TASK-019
+        依赖 TASK-018 与 TASK-020：TASK-021
+        依赖 TASK-021：TASK-022, TASK-023
+批次 M4（可并行 [P]）：TASK-025, TASK-027, TASK-028, TASK-030
+        依赖 TASK-025：TASK-024, TASK-026, TASK-029
+        依赖 TASK-013 与 TASK-021 与 TASK-026：TASK-031
+批次 M5（可并行 [P]）：TASK-032, TASK-040
+        依赖 TASK-032 与 TASK-025：TASK-033
+        依赖 TASK-033：TASK-034, TASK-035, TASK-036, TASK-037, TASK-038, TASK-039
+        依赖 TASK-035 与 TASK-036：TASK-041
+批次 M6（与 M1 并行推进 [P]）：TASK-042, TASK-043, TASK-044
+        依赖 TASK-043 与 TASK-044：TASK-045
+批次 M7（可并行 [P]）：TASK-046, TASK-047, TASK-048, TASK-049
+        依赖 TASK-024 与 TASK-049：TASK-050
+批次 M8：TASK-051
+```
+
+## 4. 追溯矩阵
+
+| AC | 覆盖的 Task |
+|----|-------------|
+| AC-F-001 | TASK-001, TASK-051 |
+| AC-F-002 | TASK-001, TASK-002, TASK-003, TASK-051 |
+| AC-F-003 | TASK-002 |
+| AC-F-004 | TASK-014, TASK-015 |
+| AC-F-005 | TASK-012 |
+| AC-F-006 | TASK-027 |
+| AC-F-007 | TASK-009 |
+| AC-F-008 | TASK-010 |
+| AC-F-009 | TASK-011 |
+| AC-F-010 | TASK-013 |
+| AC-F-011 | TASK-013 |
+| AC-F-012 | TASK-025 |
+| AC-F-013 | TASK-024 |
+| AC-F-014 | TASK-026 |
+| AC-F-015 | TASK-019, TASK-020 |
+| AC-F-016 | TASK-017, TASK-018 |
+| AC-F-017 | TASK-021 |
+| AC-F-018 | TASK-022 |
+| AC-F-019 | TASK-004, TASK-005, TASK-008 |
+| AC-F-020 | TASK-012, TASK-016 |
+| AC-P-001 | TASK-001, TASK-003, TASK-042, TASK-045 |
+| AC-P-002 | TASK-014, TASK-015 |
+| AC-P-003 | TASK-010, TASK-013 |
+| AC-P-004 | TASK-009, TASK-010, TASK-013 |
+| AC-P-005 | TASK-007 |
+| AC-P-006 | TASK-002, TASK-003 |
+| AC-E-001 | TASK-001 |
+| AC-E-002 | TASK-001, TASK-003 |
+| AC-E-003 | TASK-001 |
+| AC-E-004 | TASK-001 |
+| AC-E-005 | TASK-001, TASK-006 |
+| AC-E-006 | TASK-001 |
+| AC-E-007 | TASK-009 |
+| AC-E-008 | TASK-009, TASK-010 |
+| AC-E-009 | TASK-006, TASK-013 |
+| AC-E-010 | TASK-013 |
+| AC-E-011 | TASK-009 |
+| AC-E-012 | TASK-001 |
+| AC-F-021 | TASK-032 |
+| AC-F-022 | TASK-033 |
+| AC-F-023 | TASK-034 |
+| AC-F-024 | TASK-035 |
+| AC-F-025 | TASK-036 |
+| AC-F-026 | TASK-042, TASK-045 |
+| AC-F-027 | TASK-024, TASK-050 |
+| AC-F-028 | TASK-047 |
+| AC-F-029 | TASK-048 |
+| AC-F-030 | TASK-049, TASK-050 |
+| AC-P-007 | TASK-040, TASK-042, TASK-045 |
+| AC-P-008 | TASK-033 |
+| AC-P-009 | TASK-036 |
+| AC-E-013 | TASK-037 |
+| AC-E-014 | TASK-038 |
+| AC-E-015 | TASK-039 |
+| AC-E-016 | TASK-036 |
+| AC-E-017 | TASK-046 |
+| AC-P-010 | TASK-042, TASK-044 |
+| AC-P-011 | TASK-042, TASK-043 |
+| AC-P-012 | TASK-042, TASK-045 |
+
+## 5. 变更记录
+
+| 日期 | 版本 | 变更 | 原因 | 影响 |
+|------|------|------|------|------|
+| 2026-11-09 | v0.1 | 从零撰写目标态任务拆解 | 原任务表是现状测试的实施记录，不是目标路径 | 确立 4 个里程碑、31 个任务，覆盖全部 38 条验收标准 |
+| 2026-11-10 | v0.1 | 拆出文档分层的第 5 个里程碑 | 对照 proposal 的分层形态修订，原任务表没有覆盖写入时编译这条路径 | 新增 10 个任务、12 条验收标准落到具体任务，任务总数 41 |
+| 2026-11-10 | v0.1 | 按通用用户定位收紧两处输出表述 | 使用者普遍缺少自行判读能力，位置与引用要让人读得懂 | 拒答位置与引用展示改为可读表述；任务数量与范围不变 |
+| 2026-11-14 | v0.1 | 拆出性能里程碑并补三个提速任务 | 端到端建库指标没有基准机与分段口径，现状配置下不成立 | 新增 4 个任务：基准脚本、GPU 嵌入、C 库解析主路径、并行批量摄取；4 条性能验收落到具体任务 |
+| 2026-11-14 | v0.1 | 明确基准数据集的两层来源与判据分工 | 合成文档结构比真实文档简单，吞吐会偏乐观，合成集上的数字不能冒充验收结论 | TASK-042 拆出合成集生成器与结构画像采集器；绝对值指标改由真实工作域判定，合成集只做不退化 10% 的回归门 |
+| 2026-11-14 | v0.1 | 五个开放问题拆成任务落地 | 开放问题拍板后落到设计与任务，否则决策只停在文档里 | TASK-024 升级为段落级合并加编辑端点；新增 TASK-046 到 TASK-050，任务总数 50 |
+| 2026-11-14 | v0.1 | 补 TASK-051：桌面端接入工作域 | TASK-001 交付了工作域接口，但桌面端仍在调旧的 /ingest/dir，工作域在实际使用中是空的 | 新增第 8 个里程碑与 1 个任务；AC-F-001 与 AC-F-002 的追溯补上它，任务总数 51 |
+| 2026-11-14 | v0.1 | TASK-002 落地：位置锚点结构与五类锚点 | 规范要求位置可回溯到页码、幻灯片号、章节、工作表行与标题路径 | 向量表用 anchor 一列取代三列固定定位；五个解析器各自产出锚点；Excel 改为按行出块 |
