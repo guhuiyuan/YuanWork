@@ -38,8 +38,56 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-#: How many files are parsed at the same time.
+#: How many files are parsed at the same time when nothing says
+#: otherwise. This used to be a flat 4 — back then the embedding was
+#: the slow part, and four readers were plenty. With the GPU doing the
+#: embedding the parsing is what needs the cores, and the readers were
+#: left sitting idle waiting for the writer (AC-P-010).
 DEFAULT_WORKERS = 4
+
+#: How many of the machine's physical cores the readers may have when
+#: nothing is configured. Half: the writing side wants the CPU too
+#: (jieba cuts the words, tantivy writes the index), and a build that
+#: takes every core leaves the machine unusable.
+WORKER_CORE_SHARE = 0.5
+
+
+def default_workers() -> int:
+    """How many files to parse at the same time, from the machine.
+
+    Half of the physical cores. The logical count is not the right
+    number: the extra threads are the hyper-threaded halves of the same
+    cores, and two readers on one core do not do twice the work.
+    """
+    try:
+        from yuanwork.config import get_settings
+
+        settings = get_settings()
+        configured = int(getattr(settings, "ingest_workers", 0) or 0)
+        if configured > 0:
+            return configured
+    except Exception:  # noqa: BLE001 - the default is enough
+        pass
+
+    physical = _physical_cores()
+    if physical <= 1:
+        return 1
+    return max(1, int(physical * WORKER_CORE_SHARE))
+
+
+def _physical_cores() -> int:
+    """How many physical cores the machine has."""
+    try:
+        import psutil
+
+        count = psutil.cpu_count(logical=False)
+        if count:
+            return int(count)
+    except Exception:  # noqa: BLE001 - the logical count is the fallback
+        pass
+    import os
+
+    return max(1, os.cpu_count() or 1)
 
 #: How many parsed files wait for the writer at most. More than this
 #: and the memory goes on building slices nobody is going to read yet.
@@ -99,9 +147,7 @@ class BatchIngestor:
         executor: Any | None = None,
     ):
         self.pipeline = pipeline
-        self.workers = workers or min(
-            DEFAULT_WORKERS, max(1, os.cpu_count() or 1)
-        )
+        self.workers = workers or default_workers()
         self.max_in_flight = max_in_flight or DEFAULT_MAX_IN_FLIGHT
         #: The worker pool. A test can hand in its own.
         self.executor = executor

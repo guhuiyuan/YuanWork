@@ -182,6 +182,40 @@ async def test_the_number_of_workers_follows_the_machine():
     assert 1 <= ingestor.workers <= max(1, os.cpu_count() or 1)
 
 
+async def test_the_workers_are_half_of_the_physical_cores():
+    """The readers get half the physical cores, not all of them.
+
+    The writing side wants the CPU too — jieba cuts the words and
+    tantivy writes the index — and a build that takes every core
+    leaves the machine unusable while it runs.
+    """
+    from yuanwork.ingestion.batch import _physical_cores
+
+    ingestor = BatchIngestor(pipeline=None)
+    physical = _physical_cores()
+    assert ingestor.workers == max(1, int(physical * 0.5))
+
+
+async def test_the_number_of_workers_can_be_configured(monkeypatch):
+    """The machine decides by default; the user can say otherwise."""
+    from yuanwork.config import YuanWorkSettings
+    import yuanwork.config as config_module
+
+    settings = YuanWorkSettings(data_dir=Path("."), ingest_workers=3)
+    monkeypatch.setattr(config_module, "_settings", settings)
+    try:
+        ingestor = BatchIngestor(pipeline=None)
+        assert ingestor.workers == 3
+    finally:
+        config_module.reset_settings()
+
+
+async def test_a_number_of_workers_given_to_the_ingestor_wins():
+    """What the caller asks for is what it gets."""
+    ingestor = BatchIngestor(pipeline=None, workers=7)
+    assert ingestor.workers == 7
+
+
 # --------------------------------------------------------------------------
 # the writing
 # --------------------------------------------------------------------------

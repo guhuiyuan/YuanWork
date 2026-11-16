@@ -32,7 +32,7 @@
 | 解析与索引 | `ImageParser` | 用 OCR 识别图片文字，产出逐行块加全文块 | 不描述图片内容；不应用 EXIF 方向 | rapidocr-onnxruntime |
 | 解析与索引 | `StructuralChunker` | 把块按字符上限切为切片并保留块元数据 | 不做语义切分；不做短块合并 | 无 |
 | 解析与索引 | `IngestionPipeline` | 串行编排解析、分层、切块、向量写入与元数据落库 | 不做增量更新；不限制文件大小；不编译长尾层文档 | 分发器、切块器、分层判定器、语义记忆 |
-| 解析与索引 | `BatchIngestor` | 并行批量摄取：多进程解析、批量嵌入、限流与断点续跑 | 不做跨工作域并行；不改变单个文件的摄取语义 | 解析器、语义记忆 |
+| 解析与索引 | `BatchIngestor` | 并行批量摄取：多进程解析（工人数按机器的物理核数定）、批量嵌入、限流与断点续跑 | 不做跨工作域并行；不改变单个文件的摄取语义 | 解析器、语义记忆 |
 | 解析与索引 | `TierClassifier` | 判定一份文档属核心层还是长尾层 | 不做内容语义分类模型；不改写用户显式指定的分层 | 配置、模型网关 |
 | 检索 | `HybridRetriever` | 编排两路召回、融合与截断 | 不打分；不设置超时 | 语义记忆 |
 | 检索 | `TieredRetriever` | 先查核心层页面再查长尾层切片，核心层结论足够时短路 | 不做两层之间的分值融合；不静默丢弃长尾层证据 | 语义记忆、`HybridRetriever` |
@@ -1004,7 +1004,7 @@ Markdown 与 Word 记录多级标题路径。图片没有页码，按 OCR 行号
 | AC-F-030 | §1.1 `AgentLoop` / ADR-041 / §3.2 `TermContext.lookup` |
 | AC-E-017 | §1.1 `EpisodicRecorder` / ADR-038 / §3.2 `EpisodicRecorder.prune` |
 | AC-F-026 | §4.1 性能 / §1.1 `CoreCompiler` / §1.1 `BatchIngestor` |
-| AC-P-010 | §4.1 性能 / §1.1 `PdfParser` / ADR-036 |
+| AC-P-010 | §4.1 性能 / §1.1 `PdfParser` / ADR-036 / §1.1 `BatchIngestor` |
 | AC-P-011 | §4.1 性能 / ADR-035 / ADR-042 / §1.1 `BatchIngestor` |
 | AC-P-012 | §4.1 性能 / ADR-043 / §1.1 `SemanticStore` |
 

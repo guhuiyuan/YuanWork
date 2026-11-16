@@ -170,6 +170,12 @@ class YuanWorkSettings(BaseSettings):
     # limit. The cap keeps the build from starving the rest of the
     # machine (AC-P-007).
     index_rate_limit: float = Field(default=0.0, ge=0)
+    # How many files are parsed at the same time. Zero = decide by the
+    # machine: half of the physical cores, leaving room for the writing
+    # side (jieba and tantivy want the CPU too). The number was 4 back
+    # when the embedding was the slow part; with the GPU doing the
+    # embedding, the parsing is what needs the cores (AC-P-010).
+    ingest_workers: int = Field(default=0, ge=0)
     # How many documents may sit in the core layer. A core layer with
     # thousands of documents is not a summary of anything any more
     # (AC-P-007).
