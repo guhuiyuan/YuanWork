@@ -31,9 +31,12 @@ dependencies = [
     "sentence-transformers>=2.6.0",
     # torch itself comes with FlagEmbedding. On a machine with an
     # NVIDIA card the CUDA build is what makes the embedding fast
-    # (ADR-035) - it is not on PyPI's default index, so it is installed
-    # separately:
-    #   pip install torch --index-url https://download.pytorch.org/whl/cu121
+    # (ADR-035) - on Windows the wheel on PyPI's default index is the
+    # CPU one, so the CUDA build is installed separately:
+    #   pip install "torch==2.14.1+cu130" --index-url \
+    #     https://mirror.sjtu.edu.cn/pytorch-wheels/cu130
+    # (the official index works too, but it is slow here:
+    #  https://download.pytorch.org/whl/cu130)
     # Without it the embedding falls back to the CPU, and the reason is
     # written down in the health endpoint.
 

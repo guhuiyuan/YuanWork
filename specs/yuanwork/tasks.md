@@ -455,6 +455,7 @@
 - **依赖**: 无
 - **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_embedding_device_contract.py -q`
 - **验证结果**: 10 passed（2026-11-15）；后端全量 1554 passed。**设备自己选**：`YUANWORK_EMBEDDING_DEVICE` 默认从 `cpu` 改成 `auto`——有 NVIDIA 显卡就用显卡，没有就用 CPU。**回落要写明原因**（`SemanticMemory.device_fallback_reason`）：「这台机器上没有可用的 NVIDIA 显卡，按 CPU 处理」/「配置要求用 CUDA，但这台机器上没有可用的 NVIDIA 显卡」/「torch 不可用」——**健康检查端点把设备与回落原因一起报出来**（`embedding_device` / `embedding_device_reason`），建库慢却看不出为什么，是那种让人白搭一下午的坑。**fp16 只在显卡上开**（CPU 上 fp16 更慢）；**单条截断 512 token**（`YUANWORK_EMBEDDING_MAX_TOKENS`，构造模型时传 `max_length`）；批量大小仍走 `YUANWORK_EMBEDDING_BATCH_SIZE`。pyproject 里写明 CUDA 版 torch 不在默认索引上（`pip install torch --index-url https://download.pytorch.org/whl/cu121`），并留了 `gpu` 附加依赖位
+- **补记（2026-11-16）：GPU 路线真的装上了** —— 上面那条「装 CUDA 版 torch」当时只是写进了文档，**这台机器上装的其实一直是 CPU 版**（`torch 2.14.1+cpu`）。原因查清楚了：**Windows 的 PyPI 版 torch 就是 CPU 版**（阿里云镜像上的 torch-2.14.1 是 118 MB，与官方 +cpu wheel 同尺寸），而官方 PyTorch CDN 在这个网络下只有 **0.07 MB/s**（2.7 GB 的 wheel 要 621 分钟）。**当时据此下了「CUDA 装不上」的结论——只查了官方 CDN 与 PyPI 镜像，漏了中国的 pytorch-wheels 镜像**。上海交大镜像 `https://mirror.sjtu.edu.cn/pytorch-wheels/cu130/torch/` 有 **`torch 2.14.1+cu130`**（1898 MB，同版本、只换 CUDA），实测 **11 MB/s → 2.9 分钟**装完。装上后：设备自动认到 `cuda`、fp16 自动开、显存峰值 1243 MB / 6 GB，同一批真实切片的嵌入吞吐从 CPU 的 **1.09 切片/秒**到 **78.9 切片/秒**。**这台机器就是规范里的基准机**（i7-12700H + RTX 3060 Laptop 6 GB + 16 GB），所以 ADR-035 的目标状态到此才第一次真的成立
 
 ### [x] TASK-044: 引入 C 库 PDF 解析主路径
 
