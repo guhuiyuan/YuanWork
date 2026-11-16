@@ -710,8 +710,11 @@ class SemanticMemory:
         # The texts are batched by length, not by position. A batch
         # pads to its longest text, so a batch of mixed lengths spends
         # a good part of its work on padding - and the slices of a
-        # document run from a sentence to a page. The order is put
-        # back afterwards; the caller does not care how it was batched.
+        # document run from a sentence to a page. The batches are cut
+        # into windows of similar length, so a big batch does not reach
+        # into the long tail and make everybody pay for it. The order
+        # is put back afterwards; the caller does not care how it was
+        # batched.
         batches = _batches_by_length(texts, max(1, int(batch_size)))
 
         dense_ordered: list[tuple[int, Any]] = []
@@ -727,7 +730,6 @@ class SemanticMemory:
             # the answers match the questions.
             for offset, position in enumerate(positions):
                 dense_ordered.append((position, dense[offset]))
-            for offset, position in enumerate(positions):
                 if offset < len(sparse):
                     sparse_ordered.append((position, sparse[offset]))
 
