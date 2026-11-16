@@ -217,6 +217,11 @@ async def test_add_chunks_stores_the_anchor_from_the_nested_shape(monkeypatch):
     monkeypatch.setattr(
         SemanticMemory, "embed_texts", _fake_embed_texts
     )
+    # The writer asks for the vectors as arrays - that is the path that
+    # does not turn them into Python objects on the way (ADR-044).
+    monkeypatch.setattr(
+        SemanticMemory, "embed_arrays", _fake_embed_arrays
+    )
     monkeypatch.setattr(SemanticMemory, "_index_sparse", _fake_index_sparse, raising=False)
 
     await semantic.add_chunks([CHUNKER_SHAPE])
@@ -230,6 +235,12 @@ async def test_add_chunks_stores_the_anchor_from_the_nested_shape(monkeypatch):
 
 async def _fake_embed_texts(self, texts, return_sparse=False):
     return [[0.0] * 1024 for _ in texts], [None for _ in texts]
+
+
+async def _fake_embed_arrays(self, texts, batch_size=None):
+    import numpy as np
+
+    return np.zeros((len(texts), 1024), dtype=np.float32)
 
 
 async def _fake_index_sparse(self, *args, **kwargs):

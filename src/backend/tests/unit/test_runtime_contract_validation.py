@@ -69,9 +69,11 @@ def test_the_model_defaults(tmp_path: Path):
     # "auto" means the GPU when there is one, the CPU otherwise - and
     # the reason for the fallback is written down (ADR-035).
     assert settings.embedding_device == "auto"
-    # The batch size is the biggest lever on how long a build takes,
-    # and the default is the measured one (TASK-056).
-    assert settings.embedding_batch_size == 32
+    # The batch size is the biggest lever on how long a build takes.
+    # The default is zero - "the device decides": the batch is cut by
+    # what the machine can hold, measured while it runs (ADR-044).
+    # A number in the settings is a cap, not a plan (TASK-062).
+    assert settings.embedding_batch_size == 0
     assert settings.embedding_max_tokens == 512
     assert settings.embedding_use_fp16 is True
     # The bge-m3 sparse channel is not read by the retrieval side (the

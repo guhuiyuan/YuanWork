@@ -160,6 +160,9 @@ async def test_the_new_version_of_a_chunk_survives_the_flush(sem_with_fts):
     is the one that goes. If the order were the other way round, a
     re-indexed document would disappear from the full-text index while
     still being in the vector store.
+
+    The flush is the build's job (TASK-064): the write leaves the
+    documents in the index's hands, and the build ends with one flush.
     """
     await sem_with_fts.add_chunks(
         [{"id": "c1", "doc_id": "d1", "chunk_idx": 0, "text": "第一版 金额 1280"}]
@@ -167,11 +170,50 @@ async def test_the_new_version_of_a_chunk_survives_the_flush(sem_with_fts):
     await sem_with_fts.add_chunks(
         [{"id": "c1", "doc_id": "d1", "chunk_idx": 0, "text": "第二版 金额 1280"}]
     )
+    await sem_with_fts.flush_fts()
 
     fts = sem_with_fts._get_fts_index()
     assert fts.count() == 1, "the chunk was written twice"
     assert fts.search("第二版", top_k=5), "the new version is not findable"
     assert not fts.search("第一版", top_k=5), "the old version is still there"
+
+
+@pytest.mark.asyncio
+async def test_a_single_file_is_searchable_right_away(sem_with_fts, temp_dir: Path):
+    """A file indexed on its own has to be findable right away.
+
+    The index keeps the documents in its hands until it decides to
+    flush them (ADR-043) - a build flushes once when it is done
+    (TASK-064). A single file has no build to wait for: it is
+    indexed, and then it has to be searchable.
+    """
+    from yuanwork.db.sqlite import SQLiteStore
+    from yuanwork.ingestion.parser.base import RawBlock
+    from yuanwork.ingestion.pipeline import IngestionPipeline
+
+    store = SQLiteStore(temp_dir / "store.db")
+    await store.initialize()
+    pipeline = IngestionPipeline(
+        sqlite_store=store, semantic_memory=sem_with_fts, llm_gateway=None
+    )
+    blocks = [
+        RawBlock(
+            block_id="b1",
+            doc_id="d9",
+            content="合同金额 9999元",
+            type="paragraph",
+            meta={},
+        )
+    ]
+    document = temp_dir / "合同.md"
+    document.write_text("合同金额 9999元", encoding="utf-8")
+    await pipeline.index_blocks(
+        document, "d9", "hash1", blocks, batch=None, compile_now=False
+    )
+
+    fts = sem_with_fts._get_fts_index()
+    assert fts.search("9999", top_k=5), "the file is not searchable yet"
+    await store.close()
 
 
 # ---- The flush (TASK-058) ----
@@ -325,8 +367,11 @@ async def test_semantic_memory_migrates_existing_fts(sem_with_fts, temp_dir: Pat
         {"id": "c2", "doc_id": "d1", "chunk_idx": 1, "text": "项目 2024-Q4 总结"},
     ]
     await sem_with_fts.add_chunks(chunks)
-    # Now wipe the FTS index to simulate a v3 → v4 upgrade
+    # Now wipe the FTS index to simulate a v3 → v4 upgrade.
+    # The flush comes first: the documents are in the writer's hands
+    # until the index decides to flush them (TASK-064).
     import shutil
+    await sem_with_fts.flush_fts()
     fts_dir = sem_with_fts._fts_index_dir
     shutil.rmtree(fts_dir)
     # Reset the lazy state so a new FTSIndex is created

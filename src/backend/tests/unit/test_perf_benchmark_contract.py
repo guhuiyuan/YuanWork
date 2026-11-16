@@ -26,7 +26,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from bench.corpus import DEFAULT_PROFILE, StructureProfile, generate_corpus
-from bench.profile import profile_workspace
+from bench.workspace_profile import profile_workspace
 from bench.run import (
     BASELINE_PATH,
     REGRESSION_TOLERANCE,

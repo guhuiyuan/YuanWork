@@ -105,6 +105,27 @@ MAX_CONCURRENT_COMPILES = 2
 BACKGROUND: set[asyncio.Task] = set()
 
 
+#: The parsers of this process, built once.
+#:
+#: Building them is not free: the image parser loads the OCR engine and
+#: its models - **measured at 21 seconds** - and a worker that builds
+#: them again for every file pays that again and again. The real
+#: workspace has 105 images, so that was 2200 seconds of the build's
+#: parsing time. One set per worker process is the fix.
+_PARSERS: dict[str, Any] = {}
+
+
+def _dispatcher() -> Any:
+    """The parser dispatcher of this process - built once."""
+    dispatcher = _PARSERS.get("dispatcher")
+    if dispatcher is None:
+        from yuanwork.ingestion.parser.dispatcher import ParserDispatcher
+
+        dispatcher = ParserDispatcher()
+        _PARSERS["dispatcher"] = dispatcher
+    return dispatcher
+
+
 def parse_one(job: tuple[str, str, str]) -> tuple[str, str, str, list[Any], str | None, float]:
     """Parse one file.
 
@@ -117,9 +138,15 @@ def parse_one(job: tuple[str, str, str]) -> tuple[str, str, str, list[Any], str 
     """
     path, doc_id, file_hash = job
 
-    from yuanwork.ingestion.parser.dispatcher import ParserDispatcher
+    # One thread per worker. The OCR engine's ONNX session opens as
+    # many threads as the machine has cores, and seven workers doing
+    # that is 98 threads on 14 cores - they spin, they fight, and the
+    # whole build slows down. This has to be set before onnxruntime is
+    # imported, and the engine is the one that imports it.
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-    parser = ParserDispatcher().get_parser(Path(path))
+    parser = _dispatcher().get_parser(Path(path))
     if parser is None:
         return path, doc_id, file_hash, [], "没有可用的解析器", 0.0
 
@@ -327,6 +354,17 @@ class BatchIngestor:
         # be searchable when the build says it is done.
         await self.pipeline.flush_batch()
         self.pipeline._batch = previous_batch
+
+        # The full-text index is written in the background - it does not
+        # hold up the build - but the long tail has to be searchable
+        # when the build says it is done (AC-F-026). So the build ends
+        # with one flush.
+        flush_fts = getattr(self.pipeline.semantic, "flush_fts", None)
+        if flush_fts is not None:
+            try:
+                await flush_fts()
+            except Exception as e:  # noqa: BLE001 - a failed flush is not a failed build
+                logger.warning(f"The full-text index was not flushed: {e!r}")
 
         self._record_timings(batch)
         results["compiled_in_background"] = len(self.background)

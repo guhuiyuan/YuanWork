@@ -42,7 +42,7 @@ for _path in (str(_BACKEND), str(_SCRIPTS)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from bench.profile import profile_workspace  # noqa: E402
+from bench.workspace_profile import profile_workspace  # noqa: E402
 from bench.run import TARGETS, check_targets, parse_rates, unmeasured  # noqa: E402
 
 

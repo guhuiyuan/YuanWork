@@ -332,6 +332,15 @@ class IngestionPipeline:
             await writer.add(chunks)
         else:
             await self.semantic.add_chunks(chunks)
+            # A single file is indexed on its own - there is no build
+            # to end with a flush. The full-text index keeps the
+            # documents in its hands until it decides to flush them
+            # (ADR-043), so this one has to say "now they are
+            # searchable" - otherwise the file would be in the vector
+            # store and missing from the text search.
+            flush_fts = getattr(self.semantic, "flush_fts", None)
+            if flush_fts is not None:
+                await flush_fts()
 
         # Update SQLite record
         await self.upsert_file(doc_id, file_path, file_hash, len(chunks), meta)

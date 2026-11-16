@@ -74,12 +74,14 @@ class YuanWorkSettings(BaseSettings):
     # auto = the GPU when there is one, the CPU otherwise. The reason
     # for the fallback is written down when the model is loaded.
     embedding_device: str = Field(default="auto")  # auto / cpu / cuda
-    # How many slices the model reads at once. A bigger batch is
-    # markedly faster on the CPU - the work per batch is the same, but
-    # the call overhead and the padding are spread over more slices
-    # (measured on real slices: 8 at a time gives 4 a second, 32
-    # gives 13, 64 gives 16).
-    embedding_batch_size: int = Field(default=32, gt=0)
+    # How many slices the model reads at once. Zero means "the device
+    # decides": the batch is cut by what the machine can hold, measured
+    # while it runs (ADR-044). A number here is a cap the device may go
+    # smaller than but never bigger. A bigger batch is markedly faster
+    # - the work per batch is the same, but the call overhead and the
+    # padding are spread over more slices (measured on real slices: 8 at
+    # a time gives 4 a second, 32 gives 13, 64 gives 16).
+    embedding_batch_size: int = Field(default=0, ge=0)
     # How many tokens one piece of text may have. bge-m3 reads 8192,
     # but the long documents are cut into pieces anyway - and a shorter
     # read is a faster one (ADR-035).

@@ -461,7 +461,7 @@ YUANWORK_PREWARM_EMBEDDING=1 python -m yuanwork
 | 融合权重曾是硬编码常量 | 已改为配置项（`YUANWORK_FUSION_ALPHA` / `YUANWORK_FUSION_BETA`），可以随语料重新标定 |
 | 重排模型在聊天链路从未启用 | `use_reranker` / `reranker_model` / `top_k_rerank` 三个配置项全是死配置 |
 | 置信度阈值配置未接线 | `confidence_threshold_high/low` 改了不生效，打分器用内置的 0.7 / 0.4 |
-| 嵌入批大小配置未接线 | `embedding_batch_size` 改了不生效，实际恒为 8 |
+| 嵌入批大小已接线，但不再是「计划」而是「上限」 | `YUANWORK_EMBEDDING_BATCH_SIZE` 默认 **0 = 设备自己定**：批按设备实测的预算切（显卡看显存、CPU 看核数），填一个数就是不超过这么多（ADR-044） |
 | 无相关性下限 | 与问题完全无关的查询照样返回满额证据 |
 | 全文通道按**词元**匹配，不是子串 | jieba 把「合同条款」切成一个词，查询「合同」就找不到它 |
 | 稠密通道对退化查询不短路 | 空串、纯空白、纯标点的查询仍会返回最近邻（只有全文通道会短路） |

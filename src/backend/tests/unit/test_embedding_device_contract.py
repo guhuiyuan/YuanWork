@@ -144,7 +144,10 @@ def test_one_piece_of_text_is_at_most_512_tokens(memory: SemanticMemory):
 
 
 def test_the_batch_size_is_configuration(memory: SemanticMemory):
-    assert memory.embedding_batch_size >= 1
+    """Zero means "the device decides" - the batch is then cut by what
+    the machine can hold, measured while it runs (ADR-044). A number is
+    a cap the device may go smaller than but never bigger."""
+    assert memory.embedding_batch_size >= 0
 
 
 def test_half_precision_is_only_worth_it_on_the_gpu():

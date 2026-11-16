@@ -432,12 +432,15 @@ class RecordingFTS:
         self.commits += 1
 
 
-async def test_the_write_flushes_the_full_text_index_once(tmp_path: Path):
-    """One batch, one flush.
+async def test_the_write_does_not_flush_the_full_text_index_per_batch(tmp_path: Path):
+    """The write does not hold the build up - and it does not flush either.
 
     The delete of the old version and the write of the new one used to
-    be two flushes - two disk writes for one batch. A commit is the
-    expensive part of the write path, so they share one.
+    be two flushes - two disk writes for one batch. Then it became one
+    flush per batch. Now the index decides when to flush (ADR-043) and
+    the build flushes once when it is done (TASK-064): the flush is a
+    disk write, and a build that does one per batch pays for one per
+    batch.
     """
     from yuanwork.memory.semantic import SemanticMemory
 
@@ -454,7 +457,11 @@ async def test_the_write_flushes_the_full_text_index_once(tmp_path: Path):
         ]
     )
 
-    assert fts.commits == 1, "the batch was flushed more than once"
+    # The batch is on its way into the index, but it is not flushed:
+    # the build has not said it is done yet.
+    await memory.flush_fts()
+
+    assert fts.commits == 1, "the index was flushed more than once"
     assert fts.deleted == [["c1", "c2"]]
     assert [doc["id"] for doc in fts.added[0]] == ["c1", "c2"]
 

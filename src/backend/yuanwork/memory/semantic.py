@@ -26,6 +26,7 @@ from typing import Any
 
 import numpy as np
 
+from yuanwork.memory.encoder import SlicedEncoder
 from yuanwork.utils.chunk_meta import chunk_meta
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,12 @@ def _import_flag_embedding():
 #: How many rows the vector store takes in one write, when the setting
 #: is not around.
 DEFAULT_WRITE_BATCH_SIZE = 256
+
+#: How many documents the full-text index keeps in the writer's hands
+#: before it flushes on its own is the index's own business
+#: (`DEFAULT_COMMIT_THRESHOLD` in the retrieval layer, ADR-043): the
+#: flush is a disk write, and a build that flushes per batch pays for
+#: one per batch.
 
 #: The batch size the embedding timeout was written for. The timeout is
 #: a budget for a full batch of this many slices; a bigger batch gets
@@ -182,6 +189,8 @@ class SemanticMemory:
     #: the safe value is the one that asks for less work.
     _sparse_enabled: bool = False
     write_batch_size: int = DEFAULT_WRITE_BATCH_SIZE
+    _embedder: Any = None
+    _encoder: "SlicedEncoder | None" = None
 
     def __init__(
         self,
@@ -210,7 +219,10 @@ class SemanticMemory:
             getattr(settings, "embedding_quantize", "none") or "none"
         ).strip().lower()
         # The embedding batch size is configuration: it is the biggest
-        # lever on how long the first build takes.
+        # lever on how long the first build takes. Zero means "the
+        # device decides" - the batch is then cut by what the machine
+        # can hold, measured at runtime (ADR-044). A number here is a
+        # cap the device may not go past.
         self.embedding_batch_size = settings.embedding_batch_size
         # How many rows the vector store takes in one write. A build
         # hands over a whole batch; the store writes it in pieces so
@@ -232,6 +244,9 @@ class SemanticMemory:
         self._db = None
         self._table = None
         self._embedder = None
+        #: The encoder that cuts the batches by what the device can take.
+        #: Made when the model is loaded.
+        self._encoder: SlicedEncoder | None = None
         self._embedding_dim: int | None = None
         # Set to True while a background prewarm is in flight so callers
         # (e.g. /health) can report "loading" instead of pretending the
@@ -368,9 +383,10 @@ class SemanticMemory:
     async def flush_fts(self) -> None:
         """Make everything written to the full-text index searchable.
 
-        A commit is a disk flush. The write path does one per batch -
-        the delete and the add share it (TASK-058) - so a build does
-        one flush per batch instead of two.
+        The write path leaves the documents in the index's own hands
+        (ADR-043): it decides when to flush them to the disk. This is
+        the flush that the build ends with - after it, the long tail is
+        searchable (AC-F-026).
         """
         try:
             fts = self._get_fts_index()
@@ -422,9 +438,21 @@ class SemanticMemory:
         )
         if self.embedding_quantize == "int8":
             self._embedder = _quantize_int8(self._embedder)
+        # The encoder cuts the batches by what this device can take. It
+        # is made here, when the model and the device are both known.
+        self._encoder = SlicedEncoder(
+            self._embedder,
+            self.embedding_device,
+            self.embedding_max_tokens,
+        )
+        if self.embedding_batch_size:
+            # A number in the settings is a cap: the device may go
+            # smaller on its own, never bigger.
+            self._encoder.set_sequence_cap(self.embedding_batch_size)
         logger.info(
             "Embedding model loaded"
             + (" (int8)" if self.embedding_quantize == "int8" else "")
+            + f" on {self._encoder.profile.note}"
         )
 
     async def load_embedding_model_async(self) -> None:
@@ -687,6 +715,40 @@ class SemanticMemory:
             sparse = list(result.get("lexical_weights") or [])
         return dense, sparse
 
+    async def embed_arrays(
+        self, texts: list[str], batch_size: int | None = None
+    ) -> np.ndarray:
+        """Embed texts and hand back the vectors as arrays.
+
+        This is the path the writer uses: the vectors go straight into
+        Arrow, and turning 1024 floats per slice into Python objects and
+        back again on the way is pure waste.
+
+        The batch is cut by the encoder - by what the device can take,
+        measured while it runs - so the caller does not have to know
+        whether it is talking to a card or to a processor. A
+        ``batch_size`` given here caps it.
+        """
+        if self._embedder is None:
+            await self.load_embedding_model_async()
+
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+
+        encoder = self._encoder
+        if encoder is None or not encoder.can_encode_here():
+            # The library's own path - for an embedder whose internals
+            # do not look the way the encoder expects.
+            dense, _ = await self._embed_through_library(
+                texts, batch_size=batch_size
+            )
+            return np.asarray(dense, dtype=np.float32)
+
+        return await asyncio.wait_for(
+            asyncio.to_thread(encoder.encode, texts, batch_size),
+            timeout=self._batch_timeout(len(texts)),
+        )
+
     async def embed_texts(
         self,
         texts: list[str],
@@ -702,20 +764,44 @@ class SemanticMemory:
         if self._embedder is None:
             await self.load_embedding_model_async()
 
-        if batch_size is None:
-            batch_size = self.embedding_batch_size
         if return_sparse is None:
             return_sparse = self._sparse_enabled
 
-        # The texts are batched by length, not by position. A batch
-        # pads to its longest text, so a batch of mixed lengths spends
-        # a good part of its work on padding - and the slices of a
-        # document run from a sentence to a page. The batches are cut
-        # into windows of similar length, so a big batch does not reach
-        # into the long tail and make everybody pay for it. The order
-        # is put back afterwards; the caller does not care how it was
-        # batched.
-        batches = _batches_by_length(texts, max(1, int(batch_size)))
+        if not return_sparse and not texts:
+            return [], None
+
+        # The sparse channel is the library's own - the fast path does
+        # not compute lexical weights, and the retrieval side does not
+        # read them anyway (the full-text index is the FTS one).
+        if return_sparse:
+            return await self._embed_through_library(
+                texts, return_sparse=True, batch_size=batch_size
+            )
+
+        vectors = await self.embed_arrays(texts, batch_size=batch_size)
+        return [vector.tolist() for vector in vectors], None
+
+    async def _embed_through_library(
+        self,
+        texts: list[str],
+        return_sparse: bool = False,
+        batch_size: int | None = None,
+    ) -> tuple[list[list[float]], list[dict[str, float]] | None]:
+        """The embedding library's own path.
+
+        The texts are batched by length, not by position. A batch
+        pads to its longest text, so a batch of mixed lengths spends
+        a good part of its work on padding - and the slices of a
+        document run from a sentence to a page. The batches are cut
+        into windows of similar length, so a big batch does not reach
+        into the long tail and make everybody pay for it. The order
+        is put back afterwards; the caller does not care how it was
+        batched.
+        """
+        if batch_size is None:
+            batch_size = self.embedding_batch_size
+        batch_size = max(1, int(batch_size or 32))
+        batches = _batches_by_length(texts, batch_size)
 
         dense_ordered: list[tuple[int, Any]] = []
         sparse_ordered: list[tuple[int, dict[str, float]]] = []
@@ -768,9 +854,19 @@ class SemanticMemory:
         # costs real time on every slice.
         texts = [c["text"] for c in chunks]
         embed_started = time.perf_counter()
-        embeddings, sparse_vecs = await self.embed_texts(
-            texts, return_sparse=self._sparse_enabled
-        )
+        if self._sparse_enabled:
+            # The sparse channel is the library's own; the vectors come
+            # back as Python lists and are turned into arrays here.
+            embeddings, sparse_vecs = await self.embed_texts(
+                texts, return_sparse=True
+            )
+            embeddings = [np.asarray(e, dtype=np.float32) for e in embeddings]
+        else:
+            # The vectors go straight into Arrow - no Python objects on
+            # the way (a build of fifty thousand slices would otherwise
+            # build fifty million of them).
+            embeddings = await self.embed_arrays(texts)
+            sparse_vecs = None
         embed_seconds = time.perf_counter() - embed_started
 
         from datetime import datetime
@@ -854,6 +950,14 @@ class SemanticMemory:
         # Mirror into the FTS index. Best-effort: if tantivy/jieba are
         # missing or fail, dense-only retrieval still works (we just lose
         # the literal-token rescue channel). We log and continue.
+        #
+        # The mirror does not hold up the build: the next batch's
+        # embedding starts while this one is still being written into
+        # the full-text index (TASK-064). The index itself decides when
+        # to flush - it keeps the documents in the writer's hands until
+        # there are enough of them (ADR-043) - and the build flushes it
+        # once at the end, so the long tail is searchable when the build
+        # says it is done (AC-F-026).
         try:
             fts = self._get_fts_index()
             # The migration check inside _get_fts_index() runs once and
@@ -873,19 +977,28 @@ class SemanticMemory:
                 {"id": c["id"], "doc_id": c["doc_id"], "text": c["text"]}
                 for c in chunks
             ]
-            # The delete and the add share one flush. A commit is a
-            # disk write, and the two of them used to be two of them
-            # for every batch - twice the flushes for the same result
-            # (TASK-058). The order inside the writer is kept: the
-            # delete comes first, so the new version of a chunk is the
-            # one that survives.
+
             def _write_fts() -> None:
+                # The delete and the add share one flush, and the flush
+                # is the index's own decision (ADR-043): the documents
+                # stay in the writer's hands until there are enough of
+                # them, and the build flushes once at the end. The order
+                # inside the writer is kept: the delete comes first, so
+                # the new version of a chunk is the one that survives.
                 fts.delete_by_ids(existing_ids, commit=False)
                 fts.add_documents(fts_docs, commit=False)
-                fts.commit()
 
-            # FTS add is sync (tantivy is fast). Run in a thread so we
-            # don't block the event loop for big batches.
+            # The write is sync (tantivy is fast). It runs in a thread
+            # so it does not block the event loop.
+            #
+            # It is **not** moved to a thread of its own: jieba's
+            # segmentation is Python code, and on a machine whose cores
+            # are already busy with the parsing workers it takes the
+            # embedding's own time away (measured: the embedding went
+            # from 371 to 460 seconds, and the build got slower even
+            # though the write left the critical path). The flush is
+            # what is worth deferring - that one is a disk write, not
+            # CPU.
             await asyncio.to_thread(_write_fts)
         except Exception as e:
             logger.warning(f"FTS index add failed (dense-only fallback): {e!r}")

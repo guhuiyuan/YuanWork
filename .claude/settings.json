@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"d:/prep for work/Projects/YuanWork/.venv/Scripts/python.exe\" \"d:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"d:/prep for work/Projects/YuanWork/.venv/Scripts/python.exe\" \"d:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"d:/prep for work/Projects/YuanWork/.venv/Scripts/python.exe\" \"d:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
