@@ -26,7 +26,9 @@ Lifecycle:
 
 Performance notes:
   - tantivy writer needs `commit()` to make changes searchable
-  - Each commit is fsync-heavy; we batch commits per add_chunks call
+  - Each commit is fsync-heavy; a build that commits per batch pays
+    for a flush per batch. The writer holds what is not committed and
+    flushes when it has enough, or when the build asks it to (TASK-058)
   - For ≤10k chunks, search is sub-millisecond
   - For >100k chunks, switch to tantivy's `loaders` for incremental
     indexing; current implementation is sufficient for personal KB
@@ -40,6 +42,13 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: How many documents the writer may hold before it commits on its own.
+#: A commit is a disk flush, so a build that commits every batch pays
+#: for a flush per batch - but the writer cannot hold a whole build in
+#: memory either. This is the middle: the flush is cheap enough to
+#: happen often, the memory is bounded.
+DEFAULT_COMMIT_THRESHOLD = 1024
 
 
 # Lazy imports — tantivy is a heavy native module; jieba prints a
@@ -82,15 +91,27 @@ class FTSIndex:
     text, so queries should also be pre-segmented via `_segment()`.
     """
 
-    def __init__(self, index_dir: Path | str, heap_size: int = 50_000_000):
+    def __init__(
+        self,
+        index_dir: Path | str,
+        heap_size: int = 50_000_000,
+        commit_threshold: int = DEFAULT_COMMIT_THRESHOLD,
+    ):
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.heap_size = heap_size
+        #: How many documents may wait before the writer flushes on its
+        #: own. A flush is a disk write, and a build that flushes per
+        #: batch pays for a flush per batch; but the writer cannot
+        #: hold a whole build in memory either.
+        self.commit_threshold = max(1, int(commit_threshold))
         self._lock = threading.Lock()
         self._index: Any = None
         self._writer: Any = None
         self._schema: Any = None
         self._needs_reload: bool = False
+        #: How many documents have been written since the last commit.
+        self._pending: int = 0
         self._open()
 
     def _open(self) -> None:
@@ -108,8 +129,33 @@ class FTSIndex:
         if self._writer is None:
             self._writer = self._index.writer(self.heap_size)
 
-    def add_documents(self, docs: list[dict[str, str]]) -> int:
+    def _commit_locked(self) -> None:
+        """Flush the writer. The lock must be held."""
+        if self._writer is None:
+            return
+        self._writer.commit()
+        self._pending = 0
+        self._needs_reload = True
+
+    def commit(self) -> None:
+        """Make everything written so far searchable.
+
+        tantivy only sees the documents of a committed segment, so a
+        build that writes without committing has to commit before the
+        index is of any use.
+        """
+        with self._lock:
+            self._commit_locked()
+
+    def add_documents(self, docs: list[dict[str, str]], commit: bool = True) -> int:
         """Add or update documents. Each doc must have {id, doc_id, text}.
+
+        `commit=False` leaves the documents in the writer's hands: they
+        are not searchable until `commit()` is called. A commit is a
+        disk flush, so a build that writes a thousand batches pays for
+        a thousand flushes - one flush at the end of the build is one
+        flush. The writer still flushes on its own once it holds
+        enough documents, so the memory stays bounded.
 
         Returns the number of documents added.
         """
@@ -128,11 +174,13 @@ class FTSIndex:
                         text=[_segment(doc.get("text", ""))],
                     )
                 )
-            self._writer.commit()
+            self._pending += len(docs)
+            if commit or self._pending >= self.commit_threshold:
+                self._commit_locked()
             self._needs_reload = True
         return len(docs)
 
-    def delete_by_ids(self, ids: list[str]) -> int:
+    def delete_by_ids(self, ids: list[str], commit: bool = True) -> int:
         """Delete documents by chunk id. Returns count attempted."""
         if not ids:
             return 0
@@ -144,7 +192,8 @@ class FTSIndex:
                 # delete_documents_by_term / _by_query. The term version
                 # is the right tool for an exact id match.
                 self._writer.delete_documents_by_term("id", cid)
-            self._writer.commit()
+            if commit:
+                self._writer.commit()
             self._needs_reload = True
         return len(ids)
 

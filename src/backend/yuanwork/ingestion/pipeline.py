@@ -475,27 +475,15 @@ class IngestionPipeline:
             files = [f for f in dir_path.glob("*") if f.is_file()]
         return [f for f in files if f.suffix.lower().lstrip(".") in supported]
 
-    async def build_workspace(
-        self,
-        force: bool = False,
-        on_progress: Callable[[int, int, str], None] | None = None,
-    ) -> dict:
-        """Build the knowledge base from the workspace, in parallel.
+    def partition_workspace_files(
+        self, files: list[Path]
+    ) -> tuple[list[Path], list[dict], list[dict]]:
+        """Sort the workspace's files into: to read, not supported, too big.
 
-        The same build a folder gets - the files are read in worker
-        processes, the slices are written in batches - over the files
-        the workspace covers: the folders it holds, expanded, plus the
-        files added by hand, each counted once (TASK-051).
-
-        The files that cannot be indexed are reported with the reason -
-        an unsupported file type (AC-E-004) and a file above the size
-        limit (AC-E-006) are never dropped silently. A file that is
-        already indexed is skipped: the build can be resumed.
+        The three groups are what the build makes of a workspace, and
+        they are told apart the same way everywhere - the job that says
+        how much work there is, and the build that does the work.
         """
-        from yuanwork.ingestion.batch import BatchIngestor
-
-        entries = await self.workspace.list_entries(included_only=True)
-        files = await self.workspace.list_files(included_only=True)
         supported = set(self.dispatcher.supported_extensions())
 
         ready: list[Path] = []
@@ -526,22 +514,61 @@ class IngestionPipeline:
 
             ready.append(file_path)
 
-        total = len(files)
-        # The files that are reported instead of indexed still count:
-        # the progress bar's denominator is what the workspace covers.
-        reported = len(unsupported) + len(oversized)
-        handled = unsupported + oversized
+        return ready, unsupported, oversized
+
+    async def workspace_build_size(self) -> int:
+        """How many files the workspace build will actually work on.
+
+        The workspace covers far more files than can be indexed - a
+        code project is mostly source. The progress bar and the job
+        count the work, not the files that are merely there.
+        """
+        files = await self.workspace.list_files(included_only=True)
+        ready, _unsupported, oversized = self.partition_workspace_files(files)
+        return len(ready) + len(oversized)
+
+    async def build_workspace(
+        self,
+        force: bool = False,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> dict:
+        """Build the knowledge base from the workspace, in parallel.
+
+        The same build a folder gets - the files are read in worker
+        processes, the slices are written in batches - over the files
+        the workspace covers: the folders it holds, expanded, plus the
+        files added by hand, each counted once (TASK-051).
+
+        The files that cannot be indexed are reported with the reason -
+        an unsupported file type (AC-E-004) and a file above the size
+        limit (AC-E-006) are never dropped silently. A file that is
+        already indexed is skipped: the build can be resumed.
+        """
+        from yuanwork.ingestion.batch import BatchIngestor
+
+        entries = await self.workspace.list_entries(included_only=True)
+        files = await self.workspace.list_files(included_only=True)
+        ready, unsupported, oversized = self.partition_workspace_files(files)
+
+        # The progress bar counts the work, not the workspace. A
+        # workspace is mostly files nobody can index - a code project,
+        # an archive - and counting them would put the bar at 97%
+        # before the first document is read. The files that are only
+        # reported (too big) count as done: the build will not come
+        # back to them.
+        total = len(ready) + len(oversized)
+        reported = len(oversized)
 
         async def _progress(done: int, _total: int, current: str) -> None:
             await self._report_progress(
                 on_progress, reported + done, total, Path(current)
             )
 
-        if handled:
+        if oversized:
             # The files that are reported are done: the build will not
             # come back to them.
             await self._report_progress(
-                on_progress, reported, total, Path(handled[0]["path"])
+                on_progress, reported, total, Path(oversized[0]["path"])
             )
 
         ingestor = BatchIngestor(self)

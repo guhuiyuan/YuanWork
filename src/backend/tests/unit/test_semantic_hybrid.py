@@ -180,8 +180,16 @@ async def test_embed_texts_sparse_optional(fake_semantic_memory):
 
 
 @pytest.mark.asyncio
-async def test_add_chunks_persists_sparse_str(fake_semantic_memory):
-    """add_chunks writes the sparse vector as a JSON string in the table."""
+async def test_add_chunks_leaves_the_sparse_column_empty_by_default(
+    fake_semantic_memory,
+):
+    """The bge-m3 sparse channel is not read by the retrieval side.
+
+    The sparse channel of the retrieval is the full-text index (BM25),
+    so the weights are not computed on the way in - and the column
+    stays empty. Computing them on every slice was a big part of the
+    embedding bill on the CPU (TASK-055).
+    """
     sm = fake_semantic_memory
     chunks = [
         {"id": "c1", "doc_id": "d1", "chunk_idx": 0, "text": "金额:1280元"},
@@ -191,12 +199,28 @@ async def test_add_chunks_persists_sparse_str(fake_semantic_memory):
     # Inspect the underlying table rows
     table = sm.get_or_create_chunks_table()
     # LanceTable: use to_pandas() for full scan
-    import pyarrow as pa
-
     rows = table.to_pandas().to_dict("records")
     assert len(rows) == 2
     by_id = {r["id"]: r for r in rows}
     assert "sparse_str" in by_id["c1"]
+    assert not by_id["c1"]["sparse_str"]
+
+
+@pytest.mark.asyncio
+async def test_the_sparse_column_is_filled_when_the_channel_is_on(
+    fake_semantic_memory,
+):
+    """One setting away from being filled again."""
+    sm = fake_semantic_memory
+    sm._sparse_enabled = True
+    chunks = [
+        {"id": "c1", "doc_id": "d1", "chunk_idx": 0, "text": "金额:1280元"},
+        {"id": "c2", "doc_id": "d1", "chunk_idx": 1, "text": "日期:2026-10-15"},
+    ]
+    await sm.add_chunks(chunks)
+    table = sm.get_or_create_chunks_table()
+    rows = table.to_pandas().to_dict("records")
+    by_id = {r["id"]: r for r in rows}
     parsed = json.loads(by_id["c1"]["sparse_str"])
     assert isinstance(parsed, dict)
     # At least one CJK char should have a weight

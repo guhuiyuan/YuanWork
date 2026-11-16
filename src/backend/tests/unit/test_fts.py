@@ -151,6 +151,101 @@ def test_fts_score_is_positive(fts_index):
         assert score > 0, f"non-positive score for {cid}: {score}"
 
 
+@pytest.mark.asyncio
+async def test_the_new_version_of_a_chunk_survives_the_flush(sem_with_fts):
+    """The delete of the old version and the write of the new one
+    share one flush - and the new one has to be the one that is left.
+
+    The delete comes first in the writer's queue, so the old version
+    is the one that goes. If the order were the other way round, a
+    re-indexed document would disappear from the full-text index while
+    still being in the vector store.
+    """
+    await sem_with_fts.add_chunks(
+        [{"id": "c1", "doc_id": "d1", "chunk_idx": 0, "text": "第一版 金额 1280"}]
+    )
+    await sem_with_fts.add_chunks(
+        [{"id": "c1", "doc_id": "d1", "chunk_idx": 0, "text": "第二版 金额 1280"}]
+    )
+
+    fts = sem_with_fts._get_fts_index()
+    assert fts.count() == 1, "the chunk was written twice"
+    assert fts.search("第二版", top_k=5), "the new version is not findable"
+    assert not fts.search("第一版", top_k=5), "the old version is still there"
+
+
+# ---- The flush (TASK-058) ----
+
+
+def test_the_documents_are_not_searchable_before_the_flush(temp_dir: Path):
+    """A commit is what makes a document findable.
+
+    Until the writer is flushed, tantivy keeps the documents to
+    itself - so a write that is not flushed yet is not searchable.
+    That is what makes the flush worth batching.
+    """
+    from yuanwork.retrieval.fts import FTSIndex
+
+    idx = FTSIndex(temp_dir / "fts")
+    try:
+        idx.add_documents(
+            [{"id": "1", "doc_id": "d1", "text": "金额 1280元"}], commit=False
+        )
+        assert not idx.search("1280", top_k=5), (
+            "the document was searchable before the flush"
+        )
+        idx.commit()
+        assert idx.search("1280", top_k=5), "the flush did not make it findable"
+    finally:
+        idx.close()
+
+
+def test_a_flush_makes_everything_findable(temp_dir: Path):
+    """Many documents, one flush."""
+    from yuanwork.retrieval.fts import FTSIndex
+
+    idx = FTSIndex(temp_dir / "fts")
+    try:
+        for batch in range(4):
+            idx.add_documents(
+                [
+                    {"id": f"{batch}-{i}", "doc_id": "d1", "text": f"金额 {batch}{i}元"}
+                    for i in range(50)
+                ],
+                commit=False,
+            )
+        idx.commit()
+        assert idx.count() == 200
+        assert idx.search("金额", top_k=10)
+    finally:
+        idx.close()
+
+
+def test_the_writer_flushes_itself_when_it_holds_enough(temp_dir: Path):
+    """The memory of the writer is bounded: it flushes on its own.
+
+    Without this a build that writes a million documents would hold
+    them all in the writer's memory.
+    """
+    from yuanwork.retrieval.fts import FTSIndex
+
+    idx = FTSIndex(temp_dir / "fts", commit_threshold=10)
+    try:
+        for batch in range(4):
+            idx.add_documents(
+                [
+                    {"id": f"{batch}-{i}", "doc_id": "d1", "text": f"金额 {batch}{i}元"}
+                    for i in range(10)
+                ],
+                commit=False,
+            )
+        # The writer flushed by itself - the documents are findable
+        # without an explicit commit.
+        assert idx.count() > 0, "the writer never flushed on its own"
+    finally:
+        idx.close()
+
+
 # ---- Integration: SemanticMemory uses FTS automatically ----
 
 

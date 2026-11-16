@@ -74,7 +74,12 @@ class YuanWorkSettings(BaseSettings):
     # auto = the GPU when there is one, the CPU otherwise. The reason
     # for the fallback is written down when the model is loaded.
     embedding_device: str = Field(default="auto")  # auto / cpu / cuda
-    embedding_batch_size: int = Field(default=8, gt=0)
+    # How many slices the model reads at once. A bigger batch is
+    # markedly faster on the CPU - the work per batch is the same, but
+    # the call overhead and the padding are spread over more slices
+    # (measured on real slices: 8 at a time gives 4 a second, 32
+    # gives 13, 64 gives 16).
+    embedding_batch_size: int = Field(default=32, gt=0)
     # How many tokens one piece of text may have. bge-m3 reads 8192,
     # but the long documents are cut into pieces anyway - and a shorter
     # read is a faster one (ADR-035).
@@ -82,6 +87,18 @@ class YuanWorkSettings(BaseSettings):
     # Half precision on the GPU. It is worth nothing on the CPU - it is
     # slower there - so it is only used when there is a GPU.
     embedding_use_fp16: bool = Field(default=True)
+    # bge-m3's own sparse (lexical) channel. The retrieval side does
+    # not use it - the sparse channel is the full-text index (BM25) -
+    # but computing it is a real cost on every slice, and on the CPU
+    # it is a big one. Off by default; turn it on to fill the column
+    # again (or to try the sparse channel out again some day).
+    embedding_sparse_channel: bool = Field(default=False)
+    # int8: the model's linear layers run in int8 (the weights become
+    # int8, the activations are quantized on the fly). On the CPU this
+    # is about twice as fast, and the vectors move a little - so it is
+    # a setting and not a default. "none" keeps the model's own
+    # precision.
+    embedding_quantize: str = Field(default="none")
 
     # ===== Reranker =====
     reranker_model: str = Field(default="BAAI/bge-reranker-v2-m3")

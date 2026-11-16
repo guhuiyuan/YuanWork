@@ -43,7 +43,7 @@ for _path in (str(_BACKEND), str(_SCRIPTS)):
         sys.path.insert(0, _path)
 
 from bench.profile import profile_workspace  # noqa: E402
-from bench.run import TARGETS, check_targets, unmeasured  # noqa: E402
+from bench.run import TARGETS, check_targets, parse_rates, unmeasured  # noqa: E402
 
 
 async def accept_workspace(workspace: Path, data_dir: Path) -> dict[str, Any]:
@@ -108,6 +108,12 @@ async def accept_workspace(workspace: Path, data_dir: Path) -> dict[str, Any]:
     embed_seconds = timings.get("embed", 0.0)
     write_seconds = timings.get("write", 0.0)
 
+    # The parsing time is the sum over the workers; the rate the build
+    # delivers divides it by the number of workers that read at the
+    # same time. A rate per core would say the build is four times
+    # slower than it is.
+    workers = int(getattr(pipeline, "build_workers", 1) or 1)
+
     report: dict[str, Any] = {
         "profile": profile,
         "measured": {
@@ -120,12 +126,10 @@ async def accept_workspace(workspace: Path, data_dir: Path) -> dict[str, Any]:
         "errors": result.get("errors", 0),
         "chunks": total_chunks,
         "elapsed_seconds": round(elapsed, 3),
+        "workers": workers,
         "timings": {k: round(v, 3) for k, v in timings.items()},
         "throughput": {
-            "parse_files_per_minute": (
-                round(result.get("indexed", 0) / parse_seconds * 60, 2)
-                if parse_seconds else 0.0
-            ),
+            **parse_rates(result.get("indexed", 0), parse_seconds, workers),
             "embed_chunks_per_second": (
                 round(total_chunks / embed_seconds, 2) if embed_seconds else 0.0
             ),

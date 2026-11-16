@@ -48,6 +48,124 @@ def _import_flag_embedding():
 #: is not around.
 DEFAULT_WRITE_BATCH_SIZE = 256
 
+#: The batch size the embedding timeout was written for. The timeout is
+#: a budget for a full batch of this many slices; a bigger batch gets
+#: proportionally more time, a smaller one less.
+EMBEDDING_TIMEOUT_REFERENCE_BATCH = 8
+
+#: How many times longer the longest slice of a batch may be than its
+#: shortest one. A batch pads to its longest slice, so a batch that
+#: mixes a one-line note with a whole page spends most of its work on
+#: padding. Measured on real slices: sorting by length and cutting
+#: into fixed-size batches of 32 makes the padding *worse* (74% against
+#: 49% for the unsorted batches of 8) - a batch of 32 reaches so much
+#: further into the long tail that every slice in it pays for it.
+#: Splitting the sorted slices into windows instead brings the padding
+#: down to 17%.
+EMBEDDING_LENGTH_RATIO = 2.0
+
+
+def _batches_by_length(
+    texts: list[str], batch_size: int, ratio: float = EMBEDDING_LENGTH_RATIO
+) -> list[list[int]]:
+    """The batches the texts go into, and where each text ends up.
+
+    The texts are sorted by length and then cut into windows: a window
+    ends when it is full, or when the next text is more than `ratio`
+    times longer than the window's shortest one. The padding a batch
+    costs is decided by its longest slice, so the batches are made of
+    slices of similar length - and a batch of 32 can then be as cheap
+    as 32 batches of 8.
+
+    The result is the positions of the texts in the original list, so
+    the caller can put the answers back where they belong.
+    """
+    order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
+
+    batches: list[list[int]] = []
+    current: list[int] = []
+    shortest = 0
+
+    for index in order:
+        length = len(texts[index])
+        if current and (
+            len(current) >= batch_size
+            or (shortest and length > shortest * ratio)
+        ):
+            batches.append(current)
+            current = []
+            shortest = 0
+        if not current:
+            shortest = length
+        current.append(index)
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _as_float_array(embedding: Any) -> np.ndarray:
+    """A vector as a flat float32 array.
+
+    The model hands back numpy arrays; the store wants float32. Going
+    through a Python list would build a million small objects on the
+    way - Arrow takes the array as it is.
+    """
+    if isinstance(embedding, np.ndarray):
+        return embedding.reshape(-1).astype(np.float32, copy=False)
+    return np.asarray(embedding, dtype=np.float32).reshape(-1)
+
+
+def _table_has_rows(table: Any) -> bool:
+    """Whether the table already holds rows.
+
+    A table that cannot say (a stand-in, a store that changed) is
+    treated as if it has rows: the delete that follows is harmless on
+    an empty table, while skipping it on a full one would leave the
+    old copy of a re-ingested document in the index.
+    """
+    counter = getattr(table, "count_rows", None)
+    if counter is None:
+        return True
+    try:
+        return int(counter()) > 0
+    except Exception:  # noqa: BLE001 - an unreadable table is a full table
+        return True
+
+
+def _quantize_int8(model: Any) -> Any:
+    """The model with its linear layers in int8.
+
+    Dynamic quantization: the weights become int8 and the activations
+    are quantized on the fly. On the CPU it is about twice as fast,
+    and the vectors move a little - so it is a setting and not a
+    default, and a model that cannot be quantized is left as it is
+    rather than failing the build.
+    """
+    import warnings
+
+    import torch
+
+    inner = getattr(model, "model", None)
+    if inner is None:
+        logger.warning("The model has no inner transformer - no int8 for it")
+        return model
+
+    try:
+        from torch.ao.quantization import quantize_dynamic
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            quantized = quantize_dynamic(
+                inner, {torch.nn.Linear}, dtype=torch.qint8, inplace=False
+            )
+    except Exception as e:  # noqa: BLE001 - a failed quantization is not a failed build
+        logger.warning(f"int8 quantization did not work, keeping the model as it is: {e}")
+        return model
+
+    model.model = quantized
+    return model
+
 # Schema versioning: when the chunks table schema evolves, bump this and
 # add a migration block in `get_or_create_chunks_table`. v1 = initial.
 # v2 = added `sparse_str` column for bge-m3 lexical weights.
@@ -58,6 +176,12 @@ class SemanticMemory:
     """LanceDB-backed semantic memory store."""
 
     CHUNKS_TABLE = "chunks"
+
+    #: Class-level defaults. An instance built without __init__ (the
+    #: tests do that to avoid loading the model) still has them - and
+    #: the safe value is the one that asks for less work.
+    _sparse_enabled: bool = False
+    write_batch_size: int = DEFAULT_WRITE_BATCH_SIZE
 
     def __init__(
         self,
@@ -81,6 +205,10 @@ class SemanticMemory:
         settings = get_settings()
         self.embedding_max_tokens = settings.embedding_max_tokens
         self.embedding_use_fp16 = settings.embedding_use_fp16
+        #: "none" or "int8" - how the model's arithmetic is done.
+        self.embedding_quantize = str(
+            getattr(settings, "embedding_quantize", "none") or "none"
+        ).strip().lower()
         # The embedding batch size is configuration: it is the biggest
         # lever on how long the first build takes.
         self.embedding_batch_size = settings.embedding_batch_size
@@ -111,9 +239,13 @@ class SemanticMemory:
         self._prewarm_in_flight: bool = False
         self._prewarm_task: asyncio.Task | None = None
         # Toggle: when True, embed_texts also asks bge-m3 for sparse
-        # vectors. Sparse is cheap (a dict of token weights per text)
-        # so we keep it on by default for Stage 3 hybrid retrieval.
-        self._sparse_enabled: bool = True
+        # vectors. Off by default: the retrieval side does not use
+        # them (the sparse channel is the full-text index), and asking
+        # bge-m3 for lexical weights costs real time on every slice -
+        # on the CPU it is a big part of the embedding bill.
+        self._sparse_enabled: bool = bool(
+            getattr(settings, "embedding_sparse_channel", False)
+        )
         # Stage 3+ full-text search index (tantivy + jieba). Replaces
         # the bge-m3 sparse channel for hybrid retrieval because
         # bge-m3 sparse scored 0.0 on pure-number / short-CJK queries.
@@ -137,6 +269,12 @@ class SemanticMemory:
         when there is one. When there is not, the reason is written
         down: a build that is slow for no visible reason is the kind
         of thing a person loses an afternoon to.
+
+        The reason says *which* thing is missing. The card may not be
+        there - or the card may be sitting in the machine with a torch
+        build that has no CUDA in it. Those two need different fixes,
+        and "no graphics card" when the card is right there sends the
+        user looking for the wrong thing.
         """
         wanted = (device or "auto").strip().lower()
         if wanted not in ("auto", "cpu", "cuda"):
@@ -144,21 +282,27 @@ class SemanticMemory:
 
         try:
             import torch
-
-            cuda = bool(torch.cuda.is_available())
         except Exception as e:  # noqa: BLE001 - torch may not be there at all
             return "cpu", f"torch 不可用（{e!r}），按 CPU 处理"
+
+        cuda = bool(torch.cuda.is_available())
+        if cuda:
+            no_cuda = ""
+        elif getattr(torch.version, "cuda", None):
+            no_cuda = "torch 找不到可用的 NVIDIA 显卡（驱动没认到这台设备）"
+        else:
+            no_cuda = "torch 是 CPU 版构建（没有 CUDA 支持），显卡用不上"
 
         if wanted == "cpu":
             return "cpu", ""
         if wanted == "cuda":
             if cuda:
                 return "cuda", ""
-            return "cpu", "配置要求用 CUDA，但这台机器上没有可用的 NVIDIA 显卡"
+            return "cpu", f"配置要求用 CUDA，但{no_cuda}"
 
         if cuda:
             return "cuda", ""
-        return "cpu", "这台机器上没有可用的 NVIDIA 显卡，按 CPU 处理"
+        return "cpu", f"{no_cuda}，按 CPU 处理"
 
     async def initialize(self) -> None:
         """Initialize LanceDB connection."""
@@ -221,8 +365,29 @@ class SemanticMemory:
             logger.warning(f"FTS reindex from LanceDB failed: {e!r}")
             return 0
 
+    async def flush_fts(self) -> None:
+        """Make everything written to the full-text index searchable.
+
+        A commit is a disk flush. The write path does one per batch -
+        the delete and the add share it (TASK-058) - so a build does
+        one flush per batch instead of two.
+        """
+        try:
+            fts = self._get_fts_index()
+            await asyncio.to_thread(fts.commit)
+        except Exception as e:  # noqa: BLE001 - a failed flush is not a failed build
+            logger.warning(f"The full-text index was not flushed: {e!r}")
+
     async def close(self) -> None:
         """Close the database (LanceDB doesn't need explicit close but be safe)."""
+        # The full-text index may still be holding documents that were
+        # not flushed - a build writes in batches, and the last one has
+        # to reach the disk before the index is closed (TASK-058).
+        try:
+            if getattr(self, "_fts_index", None) is not None:
+                await asyncio.to_thread(self._fts_index.commit)
+        except Exception as e:  # noqa: BLE001 - a failed flush is not a failed close
+            logger.warning(f"The full-text index was not flushed: {e!r}")
         self._db = None
         self._table = None
 
@@ -255,7 +420,12 @@ class SemanticMemory:
             use_fp16=bool(self.embedding_use_fp16 and self.embedding_device == "cuda"),
             max_length=self.embedding_max_tokens,
         )
-        logger.info("Embedding model loaded")
+        if self.embedding_quantize == "int8":
+            self._embedder = _quantize_int8(self._embedder)
+        logger.info(
+            "Embedding model loaded"
+            + (" (int8)" if self.embedding_quantize == "int8" else "")
+        )
 
     async def load_embedding_model_async(self) -> None:
         """Async wrapper that runs the synchronous load in a thread."""
@@ -462,6 +632,61 @@ class SemanticMemory:
             q, d = d, q
         return sum(w * d[t] for t, w in q.items() if t in d)
 
+    def _batch_timeout(self, count: int) -> float:
+        """How long a batch of this many slices may take.
+
+        The setting is a budget for a full batch of eight slices; a
+        bigger batch gets proportionally more time and a smaller one
+        less. A fixed number would either give up on a slow machine
+        or wait forever on a fast one.
+        """
+        return (
+            self.embedding_timeout
+            * max(1, int(count))
+            / EMBEDDING_TIMEOUT_REFERENCE_BATCH
+        )
+
+    async def _embed_one_batch(
+        self,
+        batch: list[str],
+        return_sparse: bool,
+        timeout: float,
+    ) -> tuple[list[Any], list[dict[str, float]]]:
+        """One batch through the model.
+
+        The timeout is a budget for a full batch of eight slices, so a
+        bigger batch gets proportionally more time and a smaller one
+        less. A fixed 60 seconds is plenty for eight slices on a GPU
+        and far too little for thirty-two on a CPU, where the same
+        work takes ten times as long - and a build that gives up
+        halfway is worse than a slow one.
+        """
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._embedder.encode,
+                    batch,
+                    return_dense=True,
+                    return_sparse=return_sparse,
+                    return_colbert_vecs=False,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"嵌入模型推理超过 {timeout:.0f} 秒"
+            ) from None
+
+        dense = result["dense_vecs"]
+        if hasattr(dense, "tolist"):
+            dense = dense.tolist()
+        sparse: list[dict[str, float]] = []
+        if return_sparse:
+            # bge-m3 key is "lexical_weights" — a list of
+            # dict[str, float], one per input text.
+            sparse = list(result.get("lexical_weights") or [])
+        return dense, sparse
+
     async def embed_texts(
         self,
         texts: list[str],
@@ -482,35 +707,39 @@ class SemanticMemory:
         if return_sparse is None:
             return_sparse = self._sparse_enabled
 
-        all_dense: list[list[float]] = []
-        all_sparse: list[dict[str, float]] | None = [] if return_sparse else None
+        # The texts are batched by length, not by position. A batch
+        # pads to its longest text, so a batch of mixed lengths spends
+        # a good part of its work on padding - and the slices of a
+        # document run from a sentence to a page. The order is put
+        # back afterwards; the caller does not care how it was batched.
+        batches = _batches_by_length(texts, max(1, int(batch_size)))
 
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._embedder.encode,
-                        batch,
-                        return_dense=True,
-                        return_sparse=return_sparse,
-                        return_colbert_vecs=False,
-                    ),
-                    timeout=self.embedding_timeout,
-                )
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"嵌入模型推理超过 {self.embedding_timeout} 秒"
-                ) from None
-            dense = result["dense_vecs"]
-            if hasattr(dense, "tolist"):
-                dense = dense.tolist()
-            all_dense.extend(dense)
-            if return_sparse and all_sparse is not None:
-                # bge-m3 key is "lexical_weights" — a list of
-                # dict[str, float], one per input text.
-                lw = result.get("lexical_weights") or []
-                all_sparse.extend(lw)
+        dense_ordered: list[tuple[int, Any]] = []
+        sparse_ordered: list[tuple[int, dict[str, float]]] = []
+
+        for positions in batches:
+            batch = [texts[position] for position in positions]
+            dense, sparse = await self._embed_one_batch(
+                batch, return_sparse, self._batch_timeout(len(batch))
+            )
+            # The answers go back where the texts came from: the caller
+            # does not care how they were batched, but it does care that
+            # the answers match the questions.
+            for offset, position in enumerate(positions):
+                dense_ordered.append((position, dense[offset]))
+            for offset, position in enumerate(positions):
+                if offset < len(sparse):
+                    sparse_ordered.append((position, sparse[offset]))
+
+        all_dense: list[Any] = [None] * len(texts)
+        for position, vector in dense_ordered:
+            all_dense[position] = vector
+
+        all_sparse: list[dict[str, float]] | None = None
+        if return_sparse:
+            all_sparse = [None] * len(texts)  # type: ignore[list-item]
+            for position, weights in sparse_ordered:
+                all_sparse[position] = weights
 
         return all_dense, all_sparse
 
@@ -531,10 +760,15 @@ class SemanticMemory:
 
         table = self.get_or_create_chunks_table()
 
-        # Embed all texts (dense + sparse)
+        # Embed all texts. The bge-m3 sparse channel is only asked for
+        # when it is switched on - the retrieval side does not read it
+        # (the sparse channel is the full-text index), and computing it
+        # costs real time on every slice.
         texts = [c["text"] for c in chunks]
         embed_started = time.perf_counter()
-        embeddings, sparse_vecs = await self.embed_texts(texts, return_sparse=True)
+        embeddings, sparse_vecs = await self.embed_texts(
+            texts, return_sparse=self._sparse_enabled
+        )
         embed_seconds = time.perf_counter() - embed_started
 
         from datetime import datetime
@@ -552,10 +786,15 @@ class SemanticMemory:
 
         records = []
         for chunk, embedding, sparse in zip(chunks, embeddings, sparse_vecs or [None] * len(chunks)):
-            # Normalize vector to fixed length (pad/truncate to 1024)
-            vec = list(embedding)[:1024]
-            while len(vec) < 1024:
-                vec.append(0.0)
+            # Normalize vector to fixed length (pad/truncate to 1024).
+            # The vector stays a numpy array: turning 1024 floats into a
+            # Python list per chunk is 26 million Python objects per
+            # thousand slices, and Arrow takes the array as it is.
+            vec = _as_float_array(embedding)[:1024]
+            if len(vec) < 1024:
+                padded = np.zeros(1024, dtype=np.float32)
+                padded[: len(vec)] = vec
+                vec = padded
 
             # The chunker keeps the parser's metadata nested under "meta",
             # so the location has to be read from there - reading the flat
@@ -591,12 +830,17 @@ class SemanticMemory:
 
         write_started = time.perf_counter()
 
-        # Delete existing chunks with same IDs (for re-ingestion)
+        # Delete existing chunks with same IDs (for re-ingestion).
+        # On a knowledge base that is still empty there is nothing to
+        # delete - and asking anyway means a scan of the table for
+        # every batch, which on a big build is a lot of scanning for
+        # nothing.
         existing_ids = [c["id"] for c in chunks]
-        try:
-            table.delete(f"id IN ({','.join(repr(i) for i in existing_ids)})")
-        except Exception:
-            pass  # Table might be empty
+        if _table_has_rows(table):
+            try:
+                table.delete(f"id IN ({','.join(repr(i) for i in existing_ids)})")
+            except Exception:
+                pass  # Table might be empty
 
         # Add new records, in pieces. One write of ten thousand rows
         # holds ten thousand vectors in memory at once; a build of
@@ -623,14 +867,24 @@ class SemanticMemory:
             # double up. This mirrors the table.delete(f"id IN (...)")
             # pattern used for LanceDB above.
             existing_ids = [c["id"] for c in chunks]
-            await asyncio.to_thread(fts.delete_by_ids, existing_ids)
             fts_docs = [
                 {"id": c["id"], "doc_id": c["doc_id"], "text": c["text"]}
                 for c in chunks
             ]
+            # The delete and the add share one flush. A commit is a
+            # disk write, and the two of them used to be two of them
+            # for every batch - twice the flushes for the same result
+            # (TASK-058). The order inside the writer is kept: the
+            # delete comes first, so the new version of a chunk is the
+            # one that survives.
+            def _write_fts() -> None:
+                fts.delete_by_ids(existing_ids, commit=False)
+                fts.add_documents(fts_docs, commit=False)
+                fts.commit()
+
             # FTS add is sync (tantivy is fast). Run in a thread so we
             # don't block the event loop for big batches.
-            await asyncio.to_thread(fts.add_documents, fts_docs)
+            await asyncio.to_thread(_write_fts)
         except Exception as e:
             logger.warning(f"FTS index add failed (dense-only fallback): {e!r}")
 
@@ -722,12 +976,12 @@ class SemanticMemory:
         if table.count_rows() == 0:
             return []
 
-        # Embed query with both channels. Note: the bge-m3 sparse
-        # channel is still requested (so the column stays populated for
-        # back-compat) but no longer drives retrieval — see Channel 2
-        # below for the Tantivy FTS path.
+        # Embed the query. The bge-m3 sparse channel is only asked for
+        # when it is switched on — it does not drive retrieval (see
+        # Channel 2 below for the Tantivy FTS path), and computing it
+        # costs time on every question.
         dense_q, sparse_q_list = await self.embed_texts(
-            [query], return_sparse=True
+            [query], return_sparse=self._sparse_enabled
         )
         dense_q = dense_q[0]
 

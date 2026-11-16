@@ -171,7 +171,21 @@ async def test_the_token_count_is_the_character_count_over_four(memory):
     assert stored["token_count"] == 100
 
 
-async def test_the_sparse_weights_are_stored_as_json(memory):
+async def test_the_sparse_column_is_empty_unless_the_channel_is_on(memory):
+    """The column is there; the weights are not computed by default.
+
+    The retrieval's sparse channel is the full-text index, so bge-m3's
+    own lexical weights are not asked for on the way in (TASK-055).
+    """
+    await add(memory, make_chunk())
+    stored = await row(memory)
+    assert "sparse_str" in stored
+    assert not stored["sparse_str"]
+
+
+async def test_the_sparse_weights_are_stored_as_json_when_asked_for(memory):
+    """Switched on, the column is filled the way it always was."""
+    memory._sparse_enabled = True
     await add(memory, make_chunk())
     stored = await row(memory)
     assert stored["sparse_str"]

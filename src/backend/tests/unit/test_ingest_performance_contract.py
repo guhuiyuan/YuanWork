@@ -4,8 +4,14 @@ One embedding call per batch instead of one per file, a capped write
 rate, and a ceiling on the core layer - a core layer with thousands of
 documents is not a summary of anything any more.
 
+The embedding itself is the slowest stage of a build, so the things
+that make it slower are pinned here too: the sparse channel nobody
+reads, and the padding that comes with batching slices of mixed
+lengths.
+
 * AC-P-007 - the long tail is written in batches at a capped rate, and
   the core layer has a ceiling
+* AC-P-011 - the embedding is fast enough (15 slices a second)
 """
 
 from __future__ import annotations
@@ -214,3 +220,272 @@ async def test_the_ceiling_is_configuration():
 
     settings = YuanWorkSettings(data_dir=Path("."), core_max_docs=42)
     assert settings.core_max_docs == 42
+
+
+# --------------------------------------------------------------------------
+# the embedding stage
+# --------------------------------------------------------------------------
+
+
+class FakeEmbedder:
+    """An embedding model that says what it was asked for."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def encode(
+        self,
+        batch,
+        return_dense=True,
+        return_sparse=False,
+        return_colbert_vecs=False,
+    ):
+        self.calls.append(
+            {"count": len(batch), "sparse": return_sparse, "texts": list(batch)}
+        )
+        n = len(batch)
+        # The first number of each vector is the length of its text -
+        # enough to tell the order of the answers apart.
+        return {
+            "dense_vecs": [[float(len(t)), 0.0] + [0.0] * 1022 for t in batch],
+            "lexical_weights": [{"x": 1.0} for _ in range(n)],
+        }
+
+
+def test_the_sparse_channel_nobody_reads_is_off_by_default(tmp_path: Path):
+    """bge-m3's lexical weights are not the sparse channel any more.
+
+    The retrieval's sparse channel is the full-text index (BM25). The
+    bge-m3 one only fills a column, for a possible reactivation some
+    day - and computing it on every slice is the build's most
+    expensive minute.
+    """
+    from yuanwork.memory.semantic import SemanticMemory
+
+    memory = SemanticMemory(tmp_path / "lancedb")
+    assert memory._sparse_enabled is False
+
+
+def test_the_sparse_channel_can_be_turned_back_on(tmp_path: Path, monkeypatch):
+    """The column is one setting away from being filled again."""
+    from yuanwork.config import YuanWorkSettings
+    from yuanwork.memory import semantic as semantic_module
+
+    settings = YuanWorkSettings(
+        data_dir=tmp_path / "data", embedding_sparse_channel=True
+    )
+    # The store reads the settings when it is built, so this is where
+    # the setting has to be replaced.
+    monkeypatch.setattr("yuanwork.config.get_settings", lambda: settings)
+
+    memory = semantic_module.SemanticMemory(tmp_path / "lancedb")
+    assert memory._sparse_enabled is True
+
+
+async def test_the_ingest_does_not_ask_for_the_sparse_channel(tmp_path: Path):
+    """The build's slowest stage must not compute what nobody reads."""
+    from yuanwork.memory.semantic import SemanticMemory
+
+    memory = SemanticMemory(tmp_path / "lancedb")
+    embedder = FakeEmbedder()
+    memory._embedder = embedder
+
+    await memory.embed_texts(["一段文字"], return_sparse=False)
+
+    assert embedder.calls, "the embedder was never called"
+    assert embedder.calls[0]["sparse"] is False
+
+
+async def test_batching_by_length_keeps_the_order(tmp_path: Path):
+    """The slices come back in the order they went in.
+
+    They are batched by length so that the padding stays small - a
+    batch pads to its longest text - and the order is put back
+    afterwards. The caller does not care how it was batched, but it
+    does care that the answers match the questions.
+    """
+    from yuanwork.memory.semantic import SemanticMemory
+
+    memory = SemanticMemory(tmp_path / "lancedb")
+    embedder = FakeEmbedder()
+    memory._embedder = embedder
+
+    texts = ["短", "中等长度的一段文字", "很长很长很长很长很长很长很长很长的一段文字"]
+    dense, _ = await memory.embed_texts(texts, return_sparse=False)
+
+    assert [vector[0] for vector in dense] == [float(len(t)) for t in texts]
+    # And they were not handed over in one batch of mixed lengths.
+    assert len(embedder.calls) >= 1
+
+
+def test_a_batch_never_mixes_a_short_slice_with_a_long_one():
+    """The padding a batch costs is decided by its longest slice.
+
+    A batch of 32 sorted slices reaches much further into the long
+    tail than a batch of 8 does, so every slice in it pays for the
+    longest one. Measured on real slices: sorting and cutting into
+    fixed batches of 32 made the padding *worse* than not sorting at
+    all (74% against 49%). The batches are cut into windows instead -
+    a window ends when the next text is much longer than the
+    window's shortest one.
+    """
+    from yuanwork.memory.semantic import _batches_by_length
+
+    texts = ["x" * 100 for _ in range(10)] + ["y" * 2000]
+    batches = _batches_by_length(texts, batch_size=32)
+
+    assert len(batches) == 2, "the long slice shared a batch with the short ones"
+    for positions in batches:
+        lengths = [len(texts[p]) for p in positions]
+        assert max(lengths) <= min(lengths) * 2
+
+
+def test_the_batches_hold_every_text_exactly_once():
+    """Nothing is lost and nothing is counted twice."""
+    from yuanwork.memory.semantic import _batches_by_length
+
+    texts = [f"文本{i}" * (i + 1) for i in range(50)]
+    batches = _batches_by_length(texts, batch_size=8)
+
+    positions = [p for batch in batches for p in batch]
+    assert sorted(positions) == list(range(len(texts)))
+
+
+def test_the_batches_respect_the_batch_size():
+    """A batch is never bigger than it is allowed to be."""
+    from yuanwork.memory.semantic import _batches_by_length
+
+    texts = ["x" * 10 for _ in range(100)]
+    batches = _batches_by_length(texts, batch_size=8)
+
+    assert all(len(batch) <= 8 for batch in batches)
+
+
+def test_a_bigger_batch_gets_proportionally_more_time(tmp_path: Path):
+    """The timeout is a budget for a full batch of eight slices.
+
+    Sixty seconds is plenty for eight slices on a GPU and far too
+    little for thirty-two on a CPU, where the same work takes ten
+    times as long. A build that gives up halfway is worse than a slow
+    one.
+    """
+    from yuanwork.memory.semantic import SemanticMemory
+
+    memory = SemanticMemory(tmp_path / "lancedb")
+
+    assert memory._batch_timeout(8) == pytest.approx(memory.embedding_timeout)
+    assert memory._batch_timeout(32) == pytest.approx(
+        memory.embedding_timeout * 4
+    )
+    assert memory._batch_timeout(4) == pytest.approx(
+        memory.embedding_timeout / 2
+    )
+
+
+def test_the_quantization_is_a_setting_and_not_a_default(tmp_path: Path):
+    """int8 is about twice as fast on the CPU - and it moves the
+    vectors a little, so it is a setting and not a default."""
+    from yuanwork.config import YuanWorkSettings
+    from yuanwork.memory import semantic as semantic_module
+
+    settings = YuanWorkSettings(data_dir=tmp_path / "data")
+    assert settings.embedding_quantize == "none"
+
+    assert semantic_module.SemanticMemory(tmp_path / "lancedb").embedding_quantize == "none"
+
+    quantized = YuanWorkSettings(data_dir=tmp_path / "data", embedding_quantize="int8")
+    assert quantized.embedding_quantize == "int8"
+
+
+def test_a_model_that_cannot_be_quantized_is_left_as_it_is():
+    """A failed quantization must not fail the build."""
+    from yuanwork.memory.semantic import _quantize_int8
+
+    class _NoInner:
+        model = None
+
+    assert _quantize_int8(_NoInner()) is not None
+
+
+# --------------------------------------------------------------------------
+# the write path
+# --------------------------------------------------------------------------
+
+
+class RecordingFTS:
+    """The full-text index, and how often it was flushed."""
+
+    def __init__(self) -> None:
+        self.commits = 0
+        self.added: list[list[dict]] = []
+        self.deleted: list[list[str]] = []
+
+    def delete_by_ids(self, ids, commit=True):
+        self.deleted.append(list(ids))
+        return len(ids)
+
+    def add_documents(self, docs, commit=True):
+        self.added.append(list(docs))
+        return len(docs)
+
+    def commit(self):
+        self.commits += 1
+
+
+async def test_the_write_flushes_the_full_text_index_once(tmp_path: Path):
+    """One batch, one flush.
+
+    The delete of the old version and the write of the new one used to
+    be two flushes - two disk writes for one batch. A commit is the
+    expensive part of the write path, so they share one.
+    """
+    from yuanwork.memory.semantic import SemanticMemory
+
+    memory = SemanticMemory(tmp_path / "lancedb")
+    await memory.initialize()
+    fts = RecordingFTS()
+    memory._fts_index = fts
+    memory._embedder = FakeEmbedder()
+
+    await memory.add_chunks(
+        [
+            {"id": "c1", "doc_id": "d1", "chunk_idx": 0, "text": "金额 1280"},
+            {"id": "c2", "doc_id": "d1", "chunk_idx": 1, "text": "日期 2026"},
+        ]
+    )
+
+    assert fts.commits == 1, "the batch was flushed more than once"
+    assert fts.deleted == [["c1", "c2"]]
+    assert [doc["id"] for doc in fts.added[0]] == ["c1", "c2"]
+
+    await memory.close()
+
+
+async def test_the_full_text_index_can_be_flushed_on_its_own(tmp_path: Path):
+    """The build flushes what is left when it is done."""
+    from yuanwork.memory.semantic import SemanticMemory
+
+    memory = SemanticMemory(tmp_path / "lancedb")
+    await memory.initialize()
+    fts = RecordingFTS()
+    memory._fts_index = fts
+
+    await memory.flush_fts()
+
+    assert fts.commits == 1
+    await memory.close()
+
+
+async def test_a_closed_store_flushes_what_is_left(tmp_path: Path):
+    """A store that is closed must not leave documents in the writer."""
+    from yuanwork.memory.semantic import SemanticMemory
+
+    memory = SemanticMemory(tmp_path / "lancedb")
+    await memory.initialize()
+    fts = RecordingFTS()
+    memory._fts_index = fts
+
+    await memory.close()
+
+    assert fts.commits == 1
+

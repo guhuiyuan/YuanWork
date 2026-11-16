@@ -7,8 +7,8 @@
 | 规范 | 路径 | 当前状态 |
 |------|------|----------|
 | 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 59 条 |
-| 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 41 条 |
-| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 51/51 完成 |
+| 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 43 条 |
+| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 60/60 完成 |
 
 **当前阶段**：Phase 5 — 验证与交付
 **下一步**：整体验收 —— 按 59 条 AC 跑回放矩阵，产出 `specs/yuanwork/acceptance-report.md`

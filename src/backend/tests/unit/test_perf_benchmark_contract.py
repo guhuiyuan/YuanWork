@@ -157,6 +157,31 @@ def report(**throughput) -> dict:
     }
 
 
+def test_the_parse_rate_is_what_the_build_delivers():
+    """Four workers read at the same time - the build delivers four
+    times what one core manages.
+
+    The promise (AC-P-010) is about what the build delivers. A rate
+    per core would say the build is four times slower than it is.
+    """
+    from bench.run import parse_rates
+
+    rates = parse_rates(100, 20.0, 4)
+
+    assert rates["parse_files_per_minute"] == 1200.0
+    assert rates["parse_files_per_minute_per_core"] == 300.0
+
+
+def test_one_worker_reads_at_the_same_rate_it_delivers():
+    from bench.run import parse_rates
+
+    rates = parse_rates(100, 20.0, 1)
+
+    assert rates["parse_files_per_minute"] == rates[
+        "parse_files_per_minute_per_core"
+    ]
+
+
 def test_a_slower_run_is_a_regression():
     baseline = report()
     slower = report(parse_files_per_minute=100.0)

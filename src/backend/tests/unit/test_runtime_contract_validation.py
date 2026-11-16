@@ -69,9 +69,18 @@ def test_the_model_defaults(tmp_path: Path):
     # "auto" means the GPU when there is one, the CPU otherwise - and
     # the reason for the fallback is written down (ADR-035).
     assert settings.embedding_device == "auto"
-    assert settings.embedding_batch_size == 8
+    # The batch size is the biggest lever on how long a build takes,
+    # and the default is the measured one (TASK-056).
+    assert settings.embedding_batch_size == 32
     assert settings.embedding_max_tokens == 512
     assert settings.embedding_use_fp16 is True
+    # The bge-m3 sparse channel is not read by the retrieval side (the
+    # sparse channel is the full-text index), so it is off unless the
+    # user asks for it (TASK-055).
+    assert settings.embedding_sparse_channel is False
+    # int8 is about twice as fast on the CPU, but it moves the vectors
+    # a little - so it is a setting and not a default (TASK-060).
+    assert settings.embedding_quantize == "none"
     assert settings.reranker_model == "BAAI/bge-reranker-v2-m3"
     # The cross-encoder costs 568 MB and 5-30 s on the first use, so it
     # is off unless the user asks for it.

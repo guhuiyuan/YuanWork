@@ -123,11 +123,14 @@ async def rebuild_workspace(
     exactly those files - poll /ingest/status/{job_id} for progress,
     the same job shape as the folder build (TASK-051).
     """
-    from yuanwork.api.deps import get_sqlite_store
-    from yuanwork.workspace import Workspace
+    from yuanwork.ingestion.pipeline import IngestionPipeline
 
-    files = await Workspace(get_sqlite_store()).list_files(included_only=True)
-    total = len(files)
+    # How much work there is - the files the build will actually read.
+    # The workspace covers many more files than that (a code project is
+    # mostly source), and the number that goes on the progress bar has
+    # to be the work, not the files that are merely there.
+    pipeline = IngestionPipeline.from_app(request.app)
+    total = await pipeline.workspace_build_size()
 
     job_id = str(uuid.uuid4())
     await _create_job(request, job_id, total)

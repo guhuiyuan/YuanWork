@@ -45,6 +45,12 @@ DEFAULT_WORKERS = 4
 #: and the memory goes on building slices nobody is going to read yet.
 DEFAULT_MAX_IN_FLIGHT = 16
 
+#: How many core-layer compilations may wait for the model at the same
+#: time. Each waiting call holds a thread, and the embedding needs
+#: threads too - a build that starts one compilation per file takes
+#: the pool away from the writing.
+MAX_CONCURRENT_COMPILES = 2
+
 #: The compilations that are still running. A module-level set keeps a
 #: strong reference to them - a task nobody holds on to can disappear
 #: halfway through its work.
@@ -103,6 +109,11 @@ class BatchIngestor:
         self.pool: Any | None = None
         #: The core layer's compilations that are still running.
         self.background: list[asyncio.Task] = []
+        #: How many core-layer compilations may wait for the model at the
+        #: same time. Each waiting call holds a thread. It is made when
+        #: the build starts - a semaphore belongs to the loop it is
+        #: used in.
+        self._semaphore: asyncio.Semaphore | None = None
 
     # --------------------------------------------------------------------------
     # the build
@@ -211,6 +222,15 @@ class BatchIngestor:
         if owned:
             pool = ProcessPoolExecutor(max_workers=self.workers)
         self.pool = pool
+
+        # How many workers this build reads with. The pipeline keeps it
+        # so that the numbers can say what the build actually delivers:
+        # a parallel build parses several files at the same time, and a
+        # rate per core is not what the user waits for.
+        try:
+            self.pipeline.build_workers = self.workers
+        except Exception:  # noqa: BLE001 - a stand-in pipeline may not allow it
+            pass
 
         # A pool of processes reads the files in other processes; a pool
         # of threads reads them here, with the pipeline's own parsers.
@@ -341,15 +361,13 @@ class BatchIngestor:
         # build is finished when the long tail is searchable, not when
         # the last contract has been read (AC-F-026).
         if str(indexed.get("tier")) == "core":
-            task = asyncio.create_task(
-                self.pipeline.compile_document(
-                    parsed_doc_id,
-                    file_path,
-                    blocks,
-                    {"tier": indexed.get("tier")},
-                    file_hash,
-                )
-            )
+            task = asyncio.create_task(self._compile_in_background(
+                parsed_doc_id,
+                file_path,
+                blocks,
+                {"tier": indexed.get("tier")},
+                file_hash,
+            ))
             self.background.append(task)
             BACKGROUND.add(task)
             task.add_done_callback(BACKGROUND.discard)
@@ -360,6 +378,33 @@ class BatchIngestor:
     # --------------------------------------------------------------------------
     # the background
     # --------------------------------------------------------------------------
+
+    async def _compile_in_background(
+        self,
+        doc_id: str,
+        file_path: Path,
+        blocks: list,
+        tier: dict,
+        file_hash: str,
+    ) -> None:
+        """Compile a core document, a few at a time.
+
+        Every compilation waits for the model, and every waiting call
+        holds a thread while it waits. One compilation per file would
+        take the thread pool away from the embedding and the writing -
+        and the build would crawl exactly when the model is slow or
+        unreachable, which is when the user can least afford it.
+        """
+        async with self._compile_slots():
+            await self.pipeline.compile_document(
+                doc_id, file_path, blocks, tier, file_hash
+            )
+
+    def _compile_slots(self) -> asyncio.Semaphore:
+        """The slots the compilations take, made once per build."""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_COMPILES)
+        return self._semaphore
 
     async def wait_for_background(self) -> None:
         """Wait for the core layer's pages."""

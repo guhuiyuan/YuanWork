@@ -300,10 +300,16 @@ async def test_a_file_above_the_size_limit_is_skipped(
     assert await store.list_files() == []
 
 
-async def test_the_progress_counts_the_files_that_cannot_be_indexed(
+async def test_the_progress_counts_the_work_not_the_workspace(
     pipeline: IngestionPipeline, store: SQLiteStore, docs: Path
 ):
-    """The denominator is what the workspace covers."""
+    """The bar counts the files the build works on.
+
+    A workspace is mostly files nobody can index - a code project, an
+    archive. Counting those would put the bar at 97% before the first
+    document was read, and the number on it would say nothing about
+    how much work is left.
+    """
     make_file(docs, "a.md")
     (docs / "note.xyz").write_text("unsupported", encoding="utf-8")
     await Workspace(store).add_path(docs)
@@ -314,8 +320,30 @@ async def test_the_progress_counts_the_files_that_cannot_be_indexed(
     )
 
     assert seen, "the build said nothing about its progress"
-    assert {total for _, total in seen} == {2}
-    assert seen[-1][0] == 2
+    assert {total for _, total in seen} == {1}, (
+        "the file nobody can index was counted as work"
+    )
+    assert seen[-1][0] == 1
+
+
+async def test_the_job_counts_the_work_not_every_file_in_the_workspace(
+    client: TestClient, store: SQLiteStore, docs: Path
+):
+    """The number the job carries is the number of files to read.
+
+    A workspace holds far more files than can be indexed; the job says
+    how much work there is, not how much material is lying around.
+    """
+    make_file(docs, "a.md")
+    (docs / "note.xyz").write_text("unsupported", encoding="utf-8")
+    await Workspace(store).add_path(docs)
+
+    body = client.post("/api/v1/ingest/rebuild").json()
+
+    assert body["files_queued"] == 1, "the file nobody can index was counted"
+
+    job = await store.get_ingest_job(body["job_id"])
+    assert job["files_total"] == 1
 
 
 async def test_the_progress_counts_the_files_that_are_already_indexed(
@@ -362,7 +390,11 @@ async def test_a_single_file_entry_remembers_its_document(
 async def test_the_build_reports_the_files_it_could_not_index(
     client: TestClient, store: SQLiteStore, docs: Path
 ):
-    """The job finishes even when a file in the workspace cannot be read."""
+    """The job finishes even when a file in the workspace cannot be read.
+
+    The file nobody can index is not work - it goes into the result's
+    list of reasons, not into the denominator of the progress (TASK-052).
+    """
     make_file(docs, "a.md")
     (docs / "note.xyz").write_text("unsupported", encoding="utf-8")
     await Workspace(store).add_path(docs)
@@ -371,5 +403,5 @@ async def test_the_build_reports_the_files_it_could_not_index(
 
     status = client.get(f"/api/v1/ingest/status/{job_id}").json()
     assert status["status"] == "completed"
-    assert status["files_total"] == 2
+    assert status["files_total"] == 1
     assert len(await store.list_files()) == 1

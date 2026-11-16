@@ -45,7 +45,51 @@ def test_the_device_is_chosen_by_whether_there_is_a_gpu(memory: SemanticMemory):
         assert memory.embedding_device == "cpu"
         # The reason is written down.
         assert memory.device_fallback_reason
-        assert "显卡" in memory.device_fallback_reason
+        try:
+            import torch
+
+            cuda_build = bool(getattr(torch.version, "cuda", None))
+        except Exception:
+            cuda_build = False
+        if cuda_build:
+            # The card is the one that is missing.
+            assert "显卡" in memory.device_fallback_reason
+        else:
+            # The card may be sitting in the machine - the torch build
+            # is the thing without CUDA in it.
+            assert "torch" in memory.device_fallback_reason
+
+
+def test_a_cpu_only_torch_does_not_blame_a_missing_card(monkeypatch):
+    """The card may be right there; the torch build has no CUDA in it.
+
+    Saying "no graphics card" when the card is in the machine sends
+    the user looking for the wrong thing - the fix is a different torch
+    build, not a different computer.
+    """
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.version, "cuda", None, raising=False)
+
+    device, reason = SemanticMemory._resolve_device("auto")
+
+    assert device == "cpu"
+    assert "torch" in reason
+    assert "没有可用的 NVIDIA 显卡" not in reason
+
+
+def test_a_card_the_driver_does_not_see_says_so(monkeypatch):
+    """A torch build with CUDA in it, and no card it can reach."""
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.version, "cuda", "12.6", raising=False)
+
+    device, reason = SemanticMemory._resolve_device("auto")
+
+    assert device == "cpu"
+    assert "驱动" in reason
 
 
 def test_the_cpu_can_be_asked_for(memory: SemanticMemory):
