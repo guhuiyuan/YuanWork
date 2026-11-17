@@ -117,7 +117,7 @@ def _task():
 async def test_gateway_stream_yields_deltas_in_order(gw, monkeypatch):
     """Deltas are yielded one by one, in the order the provider produced them."""
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion",
+        "litellm.completion",
         lambda **kwargs: _fake_stream(["He", "llo", " world"]),
     )
 
@@ -135,7 +135,7 @@ async def test_gateway_stream_does_not_block_event_loop(gw, monkeypatch):
     the whole generation was over.
     """
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion",
+        "litellm.completion",
         lambda **kwargs: _fake_stream(["a", "b", "c", "d", "e"], delay=0.05),
     )
 
@@ -182,7 +182,7 @@ async def test_gateway_stream_does_not_buffer_until_the_end(gw, monkeypatch):
         return _gen()
 
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion", _completion
+        "litellm.completion", _completion
     )
 
     arrival_at: list[float] = []
@@ -219,7 +219,7 @@ async def test_gateway_stream_propagates_provider_error(gw, monkeypatch):
 
         return _gen()
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _boom)
+    monkeypatch.setattr("litellm.completion", _boom)
 
     received = []
     with pytest.raises(RuntimeError, match="provider exploded"):
@@ -239,7 +239,7 @@ async def test_gateway_stream_audit_written_once(gw, monkeypatch, temp_dir: Path
     gw.audit_logger = audit
 
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion",
+        "litellm.completion",
         lambda **kwargs: _fake_stream(["Hi", " there"]),
     )
 
@@ -267,7 +267,7 @@ async def test_gateway_stream_audit_written_on_error(gw, monkeypatch, temp_dir: 
 
         return _gen()
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _boom)
+    monkeypatch.setattr("litellm.completion", _boom)
 
     with pytest.raises(RuntimeError):
         async for _ in gw.stream(_task()):
@@ -296,7 +296,7 @@ async def test_gateway_stream_passes_a_bounded_timeout(gw, monkeypatch):
         seen.update(kwargs)
         return _fake_stream(["ok"])
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _completion)
+    monkeypatch.setattr("litellm.completion", _completion)
 
     async for _ in gw.stream(_task()):
         pass
@@ -316,7 +316,7 @@ async def test_gateway_task_timeout_overrides_the_default(gw, monkeypatch):
         seen.update(kwargs)
         return _fake_stream(["ok"])
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _completion)
+    monkeypatch.setattr("litellm.completion", _completion)
 
     task = LLMTask(
         task_type="answer",
@@ -340,7 +340,7 @@ async def test_gateway_complete_passes_a_bounded_timeout(gw, monkeypatch):
         seen.update(kwargs)
         return _FakeNonStreamResponse("done")
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _completion)
+    monkeypatch.setattr("litellm.completion", _completion)
 
     await gw.complete(_task())
 
@@ -801,7 +801,7 @@ async def test_gateway_stream_closes_the_provider_response(gw, monkeypatch):
             yield _FakeChunk(" there")
 
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion",
+        "litellm.completion",
         lambda **kwargs: _FakeWrapper(),
     )
 

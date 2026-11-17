@@ -93,3 +93,30 @@ def test_the_guard_is_reported_as_active(started):
     _captured, capsys = started
     out = capsys.readouterr().out
     assert "Network guard: ACTIVE" in out or "Network guard: disabled" in out
+
+
+def test_importing_the_gateway_does_not_import_litellm():
+    """The provider SDKs are not needed until a question is sent.
+
+    `import litellm` costs **8 seconds** - it pulls in a dozen provider
+    SDKs. The backend has to be ready to take a question within 8
+    seconds (AC-P-005), so importing the gateway must not pay for
+    them. A subprocess, because this test process may have litellm
+    loaded already.
+    """
+    import subprocess
+
+    backend = Path(__file__).resolve().parents[2]
+    code = (
+        "import sys; sys.path.insert(0, %r); "
+        "import yuanwork.llm.gateway; "
+        "print('litellm' in sys.modules)" % str(backend)
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False"

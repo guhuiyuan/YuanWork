@@ -204,7 +204,7 @@ async def test_llm_call_is_audited(gw_with_audit, monkeypatch):
     from yuanwork.llm.gateway import LLMMessage, LLMTask
 
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion",
+        "litellm.completion",
         lambda **kw: _fake_litellm_response("Hello there", 12, 4),
     )
 
@@ -243,7 +243,7 @@ async def test_llm_call_audits_failure(gw_with_audit, monkeypatch):
         raise RuntimeError("upstream 503")
 
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion",
+        "litellm.completion",
         _explode,
     )
 
@@ -283,7 +283,7 @@ routing:
     gw = LLMGateway(settings, audit_logger=None)  # explicitly None
 
     monkeypatch.setattr(
-        "yuanwork.llm.gateway.litellm.completion",
+        "litellm.completion",
         lambda **kw: _fake_litellm_response("ok"),
     )
 

@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -23,7 +24,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-import litellm
 import yaml
 
 from yuanwork.config import NetworkMode, YuanWorkSettings
@@ -42,9 +42,29 @@ logger = logging.getLogger(__name__)
 DEFAULT_REQUEST_TIMEOUT = 120.0
 
 
-# Suppress litellm's noisy logs
-litellm.suppress_debug_info = True
-litellm.set_verbose = False
+#: litellm, imported on first use rather than at import time.
+#:
+#: `import litellm` costs **8 seconds** - it pulls in a dozen provider
+#: SDKs. The backend has to be ready to take a question within 8 seconds
+#: (AC-P-005), and those SDKs are not needed until a question is actually
+#: sent somewhere. Importing the gateway must not pay for them.
+_litellm: Any = None
+
+
+def _litellm_module() -> Any:
+    """litellm, imported the first time it is really needed."""
+    global _litellm
+    module = sys.modules.get("litellm")
+    if module is None:
+        import litellm as module
+
+    # Suppress litellm's noisy logs - before any call, not after.
+    if getattr(module, "suppress_debug_info", None) is not False:
+        module.suppress_debug_info = True
+    if getattr(module, "set_verbose", None) is not False:
+        module.set_verbose = False
+    _litellm = module
+    return module
 
 
 def _query_hash(messages: list["LLMMessage"]) -> str:
@@ -311,7 +331,7 @@ class LLMGateway:
         usage: dict[str, int] = {}
         error: BaseException | None = None
         try:
-            response = await asyncio.to_thread(litellm.completion, **kwargs)
+            response = await asyncio.to_thread(_litellm_module().completion, **kwargs)
             content = response.choices[0].message.content
             usage = {
                 "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
@@ -442,7 +462,7 @@ class LLMGateway:
             # block below.
             produced: list[str] = []
             try:
-                response = litellm.completion(**kwargs)
+                response = _litellm_module().completion(**kwargs)
                 # An explicit iterator, so `stop` is checked BEFORE the
                 # next chunk is pulled. A plain `for` pulls first and then
                 # runs the body, which would fetch one extra chunk from the

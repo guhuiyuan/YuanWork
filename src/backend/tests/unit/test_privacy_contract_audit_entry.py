@@ -233,7 +233,7 @@ def test_the_gateway_writes_a_hash_and_a_length(tmp_path: Path, monkeypatch):
 
         return _Resp()
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _fake)
+    monkeypatch.setattr("litellm.completion", _fake)
 
     task = LLMTask(
         task_type="answer",

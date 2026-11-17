@@ -62,7 +62,7 @@ def install_stream(monkeypatch, stream):
         assert kwargs["stream"] is True
         return stream
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
 
 
 def collect(gateway, count: int | None = None) -> list[str]:
@@ -109,7 +109,7 @@ def test_the_stream_flag_is_set(tmp_path: Path, monkeypatch):
         captured.update(kwargs)
         return FakeStream([FakeChunk("好")])
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
     gateway = make_gateway(tmp_path)
     collect(gateway)
 
@@ -194,7 +194,7 @@ def test_a_provider_failure_is_raised_to_the_consumer(tmp_path: Path, monkeypatc
     def boom(**kwargs):
         raise RuntimeError("provider 挂了")
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", boom)
+    monkeypatch.setattr("litellm.completion", boom)
     gateway = make_gateway(tmp_path)
 
     with pytest.raises(RuntimeError):
@@ -260,7 +260,7 @@ def test_the_stream_runs_on_a_worker_thread(tmp_path: Path, monkeypatch):
         seen.append(threading.get_ident())
         return FakeStream([FakeChunk("好")])
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
     gateway = make_gateway(tmp_path)
 
     async def run():

@@ -40,7 +40,7 @@ def fake_completion(monkeypatch, response=None):
         captured.update(kwargs)
         return response
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", _call)
+    monkeypatch.setattr("litellm.completion", _call)
     return captured
 
 
@@ -220,7 +220,7 @@ def test_a_failure_is_raised_to_the_caller(tmp_path: Path, monkeypatch):
     def boom(**kwargs):
         raise RuntimeError("provider 挂了")
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", boom)
+    monkeypatch.setattr("litellm.completion", boom)
 
     with pytest.raises(RuntimeError):
         asyncio.run(gateway.complete(LLMTask(
@@ -244,7 +244,7 @@ def test_both_success_and_failure_are_audited(tmp_path: Path, monkeypatch):
     def boom(**kwargs):
         raise RuntimeError("挂了")
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", boom)
+    monkeypatch.setattr("litellm.completion", boom)
     with pytest.raises(RuntimeError):
         asyncio.run(gateway.complete(LLMTask(
             task_type="answer", messages=[LLMMessage(role="user", content="你好")]

@@ -172,7 +172,7 @@ def capture(monkeypatch, gateway: LLMGateway, response=None) -> dict:
         captured.update(kwargs)
         return response or FakeResponse()
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
     asyncio.run(gateway.complete(
         LLMTask(task_type="answer", messages=[LLMMessage(role="user", content="你好")])
     ))
@@ -204,7 +204,7 @@ def test_the_max_tokens_reaches_the_provider(gateway, monkeypatch):
         captured.update(kwargs)
         return FakeResponse()
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
     asyncio.run(gateway.complete(LLMTask(
         task_type="answer",
         messages=[LLMMessage(role="user", content="你好")],
@@ -225,7 +225,7 @@ def test_the_json_mode_becomes_a_response_format(gateway, monkeypatch):
         captured.update(kwargs)
         return FakeResponse()
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
     asyncio.run(gateway.complete(LLMTask(
         task_type="understand",
         messages=[LLMMessage(role="user", content="你好")],
@@ -246,7 +246,7 @@ def test_the_response_is_wrapped(gateway, monkeypatch):
         captured.update(kwargs)
         return FakeResponse(content="答案")
 
-    monkeypatch.setattr("yuanwork.llm.gateway.litellm.completion", fake_completion)
+    monkeypatch.setattr("litellm.completion", fake_completion)
     response = asyncio.run(gateway.complete(LLMTask(
         task_type="answer", messages=[LLMMessage(role="user", content="你好")]
     )))
