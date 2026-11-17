@@ -15,6 +15,8 @@ import logging
 import os
 from typing import Any
 
+from yuanwork.utils.model_load import load_model_offline_first
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +57,10 @@ class Reranker:
 
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         logger.info(f"Loading reranker {self.model_name} on {self.device}...")
-        self._model = FlagReranker(
+        # From the local cache first: the model is there, and asking
+        # the Hub anyway costs a hanging connection (ADR-045).
+        self._model = load_model_offline_first(
+            FlagReranker,
             self.model_name,
             use_fp16=self.use_fp16,
             device=self.device,

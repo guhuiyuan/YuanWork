@@ -28,6 +28,7 @@ import numpy as np
 
 from yuanwork.memory.encoder import SlicedEncoder
 from yuanwork.utils.chunk_meta import chunk_meta
+from yuanwork.utils.model_load import load_model_offline_first
 
 logger = logging.getLogger(__name__)
 
@@ -430,10 +431,13 @@ class SemanticMemory:
         # Half precision is worth it on the GPU and nothing on the CPU.
         # The token budget belongs to the model: one piece of text is
         # at most this many tokens (ADR-035).
-        self._embedder = BGEM3FlagModel(
+        self._embedder = load_model_offline_first(
+            BGEM3FlagModel,
             self.embedding_model_name,
             devices=self.embedding_device,
-            use_fp16=bool(self.embedding_use_fp16 and self.embedding_device == "cuda"),
+            use_fp16=bool(
+                self.embedding_use_fp16 and self.embedding_device == "cuda"
+            ),
             max_length=self.embedding_max_tokens,
         )
         if self.embedding_quantize == "int8":
