@@ -176,7 +176,8 @@ async def column_names(store: SQLiteStore, table: str) -> list[str]:
 async def test_the_files_table_columns(store):
     assert await column_names(store, "files") == [
         "doc_id", "file_name", "file_path", "file_hash", "file_type",
-        "size_bytes", "chunk_count", "indexed_at", "last_modified", "meta",
+        "size_bytes", "chunk_count", "indexed_at", "last_modified",
+        "chunk_version", "meta",
     ]
 
 

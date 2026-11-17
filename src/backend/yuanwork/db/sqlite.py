@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS files (
     chunk_count INTEGER NOT NULL DEFAULT 0,
     indexed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_modified TIMESTAMP NOT NULL,
+    -- Which rules the file was cut with. When the rules change, what
+    -- was cut with the old ones is stale - and a build has to cut it
+    -- again instead of skipping it (ADR-046).
+    chunk_version TEXT NOT NULL DEFAULT '',
     meta TEXT DEFAULT '{}'  -- JSON
 );
 
@@ -413,7 +417,27 @@ class SQLiteStore:
         await self._migrate_conflicts_table()
         await self._migrate_entities_table()
         await self._migrate_wiki_pages_table()
+        await self._migrate_files_table()
         logger.info(f"SQLite initialized at {self.db_path}")
+
+    async def _migrate_files_table(self) -> None:
+        """Add the columns an older database does not have yet.
+
+        The chunk version is the important one: a file that was cut with
+        the old rules has to be cut again, not skipped (ADR-046).
+        """
+        try:
+            async with self._conn.execute("PRAGMA table_info(files)") as cursor:
+                rows = await cursor.fetchall()
+        except Exception:  # noqa: BLE001 - a missing table is not a failure
+            return
+
+        existing = {row[1] for row in rows}
+        if "chunk_version" not in existing:
+            await self._conn.execute(
+                "ALTER TABLE files ADD COLUMN chunk_version TEXT NOT NULL DEFAULT ''"
+            )
+            await self._conn.commit()
 
     async def _migrate_wiki_pages_table(self) -> None:
         """Add the columns an older database does not have yet.
@@ -569,6 +593,7 @@ class SQLiteStore:
         file_type: str,
         size_bytes: int,
         chunk_count: int = 0,
+        chunk_version: str = "",
         meta: dict | None = None,
     ) -> None:
         """Insert or update a file record."""
@@ -576,8 +601,9 @@ class SQLiteStore:
         await self.conn.execute(
             """
             INSERT INTO files (doc_id, file_name, file_path, file_hash, file_type,
-                               size_bytes, chunk_count, indexed_at, last_modified, meta)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               size_bytes, chunk_count, indexed_at, last_modified,
+                               chunk_version, meta)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(doc_id) DO UPDATE SET
                 file_name = excluded.file_name,
                 file_path = excluded.file_path,
@@ -587,10 +613,11 @@ class SQLiteStore:
                 chunk_count = excluded.chunk_count,
                 indexed_at = excluded.indexed_at,
                 last_modified = excluded.last_modified,
+                chunk_version = excluded.chunk_version,
                 meta = excluded.meta
             """,
             (doc_id, file_name, file_path, file_hash, file_type, size_bytes,
-             chunk_count, now, now, json.dumps(meta or {})),
+             chunk_count, now, now, chunk_version, json.dumps(meta or {})),
         )
         await self.conn.commit()
 

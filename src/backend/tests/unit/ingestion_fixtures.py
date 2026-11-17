@@ -367,7 +367,9 @@ class RecordingSQLite:
     """Stand-in for the file-metadata store.
 
     ``existing`` is what a lookup by content hash should return; set it
-    to simulate "this content is already indexed".
+    to simulate "this content is already indexed". A record that has no
+    ``chunk_version`` counts as "cut with unknown rules" - the index
+    then cuts it again (ADR-046).
     """
 
     def __init__(self, existing: dict | None = None, events: list[str] | None = None):
@@ -379,7 +381,11 @@ class RecordingSQLite:
     async def get_file_by_hash(self, file_hash: str) -> dict | None:
         self.events.append("hash_lookup")
         self.hash_lookups.append(file_hash)
-        return self.existing
+        if self.existing is None:
+            return None
+        found = dict(self.existing)
+        found.setdefault("chunk_version", "recording-v1")
+        return found
 
     async def upsert_file(self, **kwargs) -> str:
         self.events.append("upsert")
@@ -428,6 +434,10 @@ class RecordingParser(BaseParser):
 
 class RecordingChunker:
     """A chunker that returns one fixed chunk and records its call."""
+
+    #: Which rules it cuts with - the index compares it, so that a
+    #: change of the rules cuts the file again (ADR-046).
+    version = "recording-v1"
 
     def __init__(self, events: list[str] | None = None):
         self.events = events if events is not None else []

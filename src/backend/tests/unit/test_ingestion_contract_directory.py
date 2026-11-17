@@ -246,7 +246,9 @@ async def test_the_summary_counts_each_outcome(temp_dir: Path):
     pipeline.dispatcher = ParserDispatcher([SlowParser(events)])
 
     # 'a.md' is already known -> skipped
-    store.existing = {"doc_id": "known"}
+    # already indexed *with the rules in use now* - otherwise the
+    # build would cut it again (ADR-046)
+    store.existing = {"doc_id": "known", "chunk_version": pipeline.chunker.version}
     result = await pipeline.ingest_directory(temp_dir)
     assert result["skipped"] == 2
     assert result["indexed"] == 0

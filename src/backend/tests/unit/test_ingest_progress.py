@@ -141,6 +141,9 @@ class _FakeEmbedder:
 
 
 class _FakeChunker:
+    #: Which rules it cuts with (the index compares it - ADR-046).
+    version = "fake-v1"
+
     def chunk(self, blocks, doc_id: str) -> list[dict[str, Any]]:
         return [
             {

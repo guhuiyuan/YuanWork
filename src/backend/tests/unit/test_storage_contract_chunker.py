@@ -10,12 +10,28 @@ A too-short slice is now folded into its neighbour instead.
 * AC-F-002 — the whole document ends up in the index
 * AC-E-002 — a removed file leaves nothing behind
 * AC-E-003 — a changed file keeps its old version until a rebuild
+
+**The limit is in tokens** (ADR-046): it is the embedding model's read
+length. These tests use a counter that says "one character, one token",
+so the numbers are exact and do not depend on a tokenizer.
 """
 
 from __future__ import annotations
 
 from yuanwork.ingestion.chunker.structural_chunker import StructuralChunker
 from yuanwork.ingestion.parser.base import RawBlock
+
+LIMIT = 510
+
+
+class OneTokenPerChar:
+    """One character, one token - so the numbers are exact."""
+
+    def count(self, text: str) -> int:
+        return len(text)
+
+    def boundary(self, text: str, limit: int) -> int:
+        return min(limit, len(text))
 
 
 def make_block(content: str, block_id: str = "b1", doc_id: str = "d1") -> RawBlock:
@@ -25,7 +41,8 @@ def make_block(content: str, block_id: str = "b1", doc_id: str = "d1") -> RawBlo
 
 
 def chunk_text(content: str) -> list[dict]:
-    return StructuralChunker().chunk([make_block(content)], "d1")
+    chunker = StructuralChunker(max_tokens=LIMIT, token_counter=OneTokenPerChar())
+    return chunker.chunk([make_block(content)], "d1")
 
 
 def chunked_text(content: str) -> str:
@@ -40,7 +57,7 @@ def chunked_text(content: str) -> str:
 
 def test_a_short_tail_is_not_dropped():
     """The tail of a document is often a short sentence."""
-    text = "A" * 1950 + "。" + "B" * 10
+    text = "A" * 490 + "。" + "B" * 10
 
     chunks = chunk_text(text)
 
@@ -55,23 +72,24 @@ def test_a_whitespace_heavy_block_keeps_its_content():
     chunks = chunk_text(text)
 
     assert chunks
-    assert "x" in chunks[0]["text"]
-    assert "y" in chunks[0]["text"]
+    kept = "".join(c["text"] for c in chunks)
+    assert "x" in kept
+    assert "y" in kept
 
 
 def test_every_character_of_the_document_is_kept():
     """The whole point: no content disappears."""
-    text = "A" * 1950 + "。" + "B" * 10 + "C" * 40
+    text = "A" * 490 + "。" + "B" * 10 + "C" * 40
 
     kept = chunked_text(text)
 
-    assert "A" * 1950 in kept
+    assert "A" * 490 in kept
     assert "B" * 10 in kept
     assert "C" * 40 in kept
 
 
 def test_a_short_slice_between_two_long_ones_survives():
-    text = "A" * 1200 + "\n\n" + "B" * 20 + "\n\n" + "C" * 1200
+    text = "A" * 300 + "\n\n" + "B" * 20 + "\n\n" + "C" * 300
 
     chunks = chunk_text(text)
 
@@ -79,7 +97,7 @@ def test_a_short_slice_between_two_long_ones_survives():
 
 
 def test_a_short_first_slice_survives():
-    text = "A" * 10 + "\n\n" + "B" * 2000
+    text = "A" * 10 + "\n\n" + "B" * 600
 
     chunks = chunk_text(text)
 
@@ -97,22 +115,22 @@ def test_no_chunk_exceeds_the_limit_after_merging():
     chunks = chunk_text(text)
 
     assert len(chunks) > 1
-    assert all(len(c["text"]) <= StructuralChunker.MAX_CHARS for c in chunks)
+    assert all(len(c["text"]) <= LIMIT for c in chunks)
 
 
 def test_a_merged_chunk_does_not_exceed_the_limit():
     """A short chunk is merged only when there is room for it."""
-    text = "A" * 1999 + "。" + "B" * 10
+    text = "A" * 499 + "。" + "B" * 10
 
     chunks = chunk_text(text)
 
-    assert all(len(c["text"]) <= StructuralChunker.MAX_CHARS for c in chunks)
+    assert all(len(c["text"]) <= LIMIT for c in chunks)
     assert "B" * 10 in "".join(c["text"] for c in chunks)
 
 
 def test_a_full_chunk_keeps_a_short_neighbour_on_its_own():
     """When there is no room, the short chunk stays - but it stays."""
-    text = "A" * 2000 + "B" * 10
+    text = "A" * LIMIT + "B" * 10
 
     chunks = chunk_text(text)
 

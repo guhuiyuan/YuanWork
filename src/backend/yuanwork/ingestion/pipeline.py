@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from yuanwork.ingestion.chunker.structural_chunker import StructuralChunker
+from yuanwork.ingestion.chunker.token_counter import TokenCounter, content_token_limit
 from yuanwork.ingestion.parser.dispatcher import ParserDispatcher
 from yuanwork.workspace import Workspace
 
@@ -142,7 +143,18 @@ class IngestionPipeline:
         self.sqlite = sqlite_store
         self.semantic = semantic_memory
         self.dispatcher = ParserDispatcher()
-        self.chunker = StructuralChunker()
+        # The chunk length is the embedding model's read length: the two
+        # use one number, so they cannot disagree. A chunk the model
+        # cannot read in full is a chunk whose tail nobody can find
+        # again (ADR-046).
+        self.chunker = StructuralChunker(
+            max_tokens=content_token_limit(
+                getattr(semantic_memory, "embedding_max_tokens", 512)
+            ),
+            token_counter=TokenCounter(
+                getattr(semantic_memory, "embedding_model_name", None)
+            ),
+        )
         self.workspace = Workspace(sqlite_store)
         self.max_file_size = max_file_size
         # The tier judgement may ask the model about the documents the
@@ -240,6 +252,7 @@ class IngestionPipeline:
 
         # The resume: what the index already knows about this file
         # decides whether it is read at all.
+        stale_doc_id: str | None = None
         if not force:
             state = await self.resume_state(file_path, file_hash)
             if state["state"] == "already_indexed":
@@ -249,6 +262,16 @@ class IngestionPipeline:
                     "reason": "already_indexed",
                     "doc_id": state["doc_id"],
                 }
+            if state["state"] == "stale":
+                # The content is in the index, but it was cut with the
+                # old rules - and the old rules cut off the tail of the
+                # long ones. It is cut again, under the same id, so the
+                # old chunks are replaced rather than left behind
+                # (ADR-046).
+                stale_doc_id = state["doc_id"]
+                logger.info(
+                    "Re-cutting %s - it was cut with the old rules", file_path.name
+                )
             if state["state"] == "modified":
                 # The file changed on disk. The indexed version is kept as
                 # it is until the user asks for a rebuild - silently
@@ -266,6 +289,8 @@ class IngestionPipeline:
         doc_id = hashlib.sha256(
             f"{file_path}|{file_hash}".encode()
         ).hexdigest()[:16]
+        if stale_doc_id:
+            doc_id = stale_doc_id
 
         # An explicit rebuild replaces the indexed version of this file -
         # otherwise the old one would stay searchable next to the new one.
@@ -306,8 +331,12 @@ class IngestionPipeline:
             return {"status": "skipped", "reason": "no_content", "doc_id": doc_id}
 
         # Chunk
+        # In a thread: the first chunk of a build loads the tokenizer,
+        # and that means importing transformers - which takes seconds
+        # and holds the GIL. In the event loop that would stall the
+        # whole backend; in a thread it only makes it slower (ADR-046).
         started = time.perf_counter()
-        chunks = self.chunker.chunk(blocks, doc_id)
+        chunks = await asyncio.to_thread(self.chunker.chunk, blocks, doc_id)
         self._record("chunk", time.perf_counter() - started)
 
         # Add metadata from parser
@@ -784,8 +813,11 @@ class IngestionPipeline:
     async def resume_state(self, file_path: Path, file_hash: str) -> dict[str, Any]:
         """What the index already knows about this file.
 
-        * ``already_indexed`` - the very same content is in the index.
-          A build skips it and goes on (the resume).
+        * ``already_indexed`` - the very same content is in the index,
+          cut with the rules that are in use now. A build skips it and
+          goes on (the resume).
+        * ``stale`` - the content is in the index, but it was cut with
+          **other rules**. It is cut again (ADR-046).
         * ``modified`` - the file changed on disk. The indexed version
           is kept and marked; it is not replaced without being asked
           (AC-E-015).
@@ -793,7 +825,9 @@ class IngestionPipeline:
         """
         same = await self.sqlite.get_file_by_hash(file_hash)
         if same:
-            return {"state": "already_indexed", "doc_id": same.get("doc_id")}
+            if same.get("chunk_version") == self.chunker.version:
+                return {"state": "already_indexed", "doc_id": same.get("doc_id")}
+            return {"state": "stale", "doc_id": same.get("doc_id")}
 
         previous = await self._indexed_version_at(file_path)
         if previous is not None:
@@ -847,6 +881,9 @@ class IngestionPipeline:
             file_type=file_path.suffix.lower().lstrip("."),
             size_bytes=file_path.stat().st_size,
             chunk_count=chunk_count,
+            # Which rules the file was cut with - so that a change of
+            # the rules cuts it again instead of skipping it (ADR-046).
+            chunk_version=self.chunker.version,
             meta=meta,
         )
 

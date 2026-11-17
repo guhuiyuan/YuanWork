@@ -249,6 +249,14 @@ class BatchIngestor:
                         }
                     )
                     continue
+                if state["state"] == "stale":
+                    # The content is in the index, but it was cut with
+                    # the old rules - it is cut again, under the same id,
+                    # so the old chunks are replaced (ADR-046).
+                    doc_id = state.get("doc_id") or doc_id
+                    logger.info(
+                        "Re-cutting %s - it was cut with the old rules", path.name
+                    )
                 if state["state"] == "modified":
                     # The file changed on disk. The indexed version is
                     # kept and marked - it is not replaced without
