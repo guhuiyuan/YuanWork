@@ -58,10 +58,22 @@ def test_the_data_directory_is_created_even_when_it_is_missing(tmp_path: Path):
     assert nested.is_dir()
 
 
-def test_the_default_data_directory_is_under_the_home(tmp_path: Path, monkeypatch):
-    """The default is `~/.yuanwork`."""
+def test_the_default_data_directory_is_data_under_the_root(
+    tmp_path: Path, monkeypatch
+):
+    """The default is `data/` under the root.
+
+    The root is the project root (the checkout the backend was started
+    from), or `~/.yuanwork` when there is no checkout to speak of. The
+    data directory used to be `~/.yuanwork` itself - ADR-045 gave the
+    root a `data/` and a `models/` under it, so that the models this
+    project downloads have a place of their own.
+    """
+    from yuanwork import paths
+
     monkeypatch.delenv("YUANWORK_DATA_DIR", raising=False)
     # the working directory's .env would otherwise supply a value
     monkeypatch.chdir(tmp_path)
     settings = YuanWorkSettings()
-    assert settings.data_dir.name == ".yuanwork"
+    assert settings.data_dir.name == "data"
+    assert settings.data_dir.parent == paths.root_dir()

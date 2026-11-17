@@ -100,6 +100,7 @@ def main() -> None:
 
     print(f"Starting YuanWork backend at http://{host}:{port}")
     print(f"   Data dir: {settings.data_dir}")
+    print(f"   Model cache: {settings.model_cache_dir}")
     print(f"   Network mode: {settings.network_mode.name}")
     print(f"   Log level: {log_level}")
 

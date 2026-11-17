@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from yuanwork import __version__
+from yuanwork import paths
 from yuanwork.api.deps import (
     set_consolidation_engine,
     set_episodic_memory,
@@ -48,11 +49,7 @@ def _dotenv_candidates() -> list[Path]:
     with cwd = ``src/backend``, so a cwd-relative lookup alone would miss
     the file and the LLM key would never reach os.environ.
     """
-    candidates = [Path.cwd() / ".env"]
-    package_root = Path(__file__).resolve().parent.parent
-    for parent in package_root.parents[:6]:
-        candidates.append(parent / ".env")
-    return candidates
+    return paths.dotenv_candidates()
 
 
 def _load_dotenv_into_environ() -> None:
@@ -64,26 +61,7 @@ def _load_dotenv_into_environ() -> None:
     helper searches the project root for a .env file and applies the
     key=value pairs without overwriting already-set variables.
     """
-    import os
-
-    try:
-        from dotenv import dotenv_values
-    except ImportError:
-        # python-dotenv not installed; nothing to do
-        return
-
-    loaded = 0
-    for path in _dotenv_candidates():
-        if not path.is_file():
-            continue
-        for key, value in dotenv_values(path).items():
-            if value is None:
-                continue
-            # Don't clobber a value the user already exported.
-            if key not in os.environ and key.upper() not in os.environ:
-                os.environ[key] = value
-                os.environ.setdefault(key.upper(), value)
-                loaded += 1
+    loaded = paths.load_dotenv_into_environ()
     if loaded:
         logger.info(f"Loaded {loaded} env var(s) from .env into os.environ")
 
@@ -95,6 +73,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Initializing YuanWork components...")
     logger.info(f"   Data dir: {settings.data_dir}")
+    logger.info(f"   Model cache: {settings.model_cache_dir}")
     logger.info(f"   Network mode: {settings.network_mode.name}")
 
     # Load .env into os.environ so downstream libraries (litellm, httpx) can

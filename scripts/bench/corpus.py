@@ -20,6 +20,7 @@ not a thousand contracts.
 from __future__ import annotations
 
 import random
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -181,15 +182,56 @@ def _write_docx(path: Path, profile: StructureProfile, rng: random.Random) -> No
 
 def _write_xlsx(path: Path, profile: StructureProfile, rng: random.Random) -> None:
     """A workbook with the profile's number of sheets."""
+    import datetime
+
     from openpyxl import Workbook
 
     workbook = Workbook()
+    # The workbook's own properties carry the moment it was created,
+    # and that text is compressed into the file - so two runs of the
+    # same seed differ by a byte or two, which is enough to make a
+    # benchmark compare two different corpora. Both timestamps are
+    # pinned: the creation time here, the modification time by the
+    # clock below (the writer sets it again on the way out).
+    workbook.properties.created = datetime.datetime(2020, 1, 1)
     workbook.remove(workbook.active)
     for sheet_number in range(max(1, profile.tables)):
         sheet = workbook.create_sheet(title=f"Sheet{sheet_number + 1}")
         for row in range(profile.rows):
             sheet.append([_sentence(rng)[:20] for _ in range(3)])
-    workbook.save(str(path))
+    with _frozen_workbook_clock():
+        workbook.save(str(path))
+
+
+@contextmanager
+def _frozen_workbook_clock():
+    """Stop openpyxl from stamping the time of the write into the file.
+
+    The workbook's properties carry the moment it was saved, and that
+    text is compressed into the archive - so two runs of the same seed
+    could differ by a byte or two, which is enough to make a benchmark
+    compare two different corpora. The clock the writer reads is
+    replaced with a fixed one for the length of the save.
+    """
+    import datetime as _dt
+
+    import openpyxl.writer.excel as excel_writer
+
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2020, 1, 1)
+
+    class _Shim:
+        datetime = _FixedDateTime
+        timezone = _dt.timezone
+
+    original = excel_writer.datetime
+    excel_writer.datetime = _Shim
+    try:
+        yield
+    finally:
+        excel_writer.datetime = original
 
 
 def _write_md(path: Path, profile: StructureProfile, rng: random.Random) -> None:

@@ -116,10 +116,18 @@ pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::erro
             // directory would be ~/.yuanwork - an empty knowledge base,
             // not the project's data/. Point it at the project's data
             // directory unless the user set one themselves.
-            if std::env::var_os("YUANWORK_DATA_DIR").is_none() {
+            //
+            // "One themselves" includes the .env at the project root:
+            // YUANWORK_HOME moves the whole thing (the index *and* the
+            // model cache), and pointing the index at the project's
+            // data/ while the models live under the user's root would
+            // split the two apart (ADR-045).
+            if std::env::var_os("YUANWORK_DATA_DIR").is_none()
+                && std::env::var_os("YUANWORK_HOME").is_none()
+            {
                 if let Some(project_root) = project_root_of(&cwd) {
                     let data_dir = project_root.join("data");
-                    if data_dir.is_dir() {
+                    if data_dir.is_dir() && !env_file_sets_the_location(&project_root) {
                         c.env("YUANWORK_DATA_DIR", &data_dir);
                         log::info!("Backend data dir: {}", data_dir.display());
                     }
@@ -236,6 +244,31 @@ fn find_backend_module_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// The layout is `<root>/src/backend`, so the root is two levels up.
 fn project_root_of(backend_dir: &std::path::Path) -> Option<PathBuf> {
     backend_dir.parent()?.parent().map(|p| p.to_path_buf())
+}
+
+/// Whether the project's .env decides where the backend keeps its data.
+///
+/// The .env is a file, not an environment variable, so the shell cannot
+/// see it by looking at its own environment. But the backend reads it,
+/// and a YUANWORK_HOME in there moves the index *and* the model cache
+/// to one place - pointing the index at the project's data/ on top of
+/// that would split the two apart.
+fn env_file_sets_the_location(project_root: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(project_root.join(".env")) else {
+        return false;
+    };
+    text.lines().map(str::trim).any(|line| {
+        if line.is_empty() || line.starts_with('#') {
+            return false;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            return false;
+        };
+        matches!(
+            key.trim().to_ascii_uppercase().as_str(),
+            "YUANWORK_HOME" | "YUANWORK_DATA_DIR" | "YUANWORK_MODEL_CACHE_DIR"
+        )
+    })
 }
 
 /// Wait for the backend to respond to health checks.
@@ -459,5 +492,61 @@ mod tests {
         let source = include_str!("sidecar.rs");
         let needle = format!("try_{}", "wait");
         assert!(!source.contains(&needle));
+    }
+
+    // ===== where the backend keeps its data =====
+
+    /// A throwaway directory holding a .env with the given content.
+    fn env_file_with(content: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("yuanwork-env-{}", content.len()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), content).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_home_in_the_env_file_moves_the_data_out_of_the_project() {
+        let dir = env_file_with("YUANWORK_HOME=D:/yuanwork\n");
+        assert!(env_file_sets_the_location(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_data_dir_in_the_env_file_counts_too() {
+        let dir = env_file_with("YUANWORK_DATA_DIR=D:/somewhere\n");
+        assert!(env_file_sets_the_location(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unrelated_env_file_does_not_count() {
+        let dir = env_file_with("YUANWORK_PORT=8765\nMINIMAX_API_KEY=secret\n");
+        assert!(!env_file_sets_the_location(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_commented_out_line_does_not_count() {
+        let dir = env_file_with("# YUANWORK_HOME=D:/yuanwork\n");
+        assert!(!env_file_sets_the_location(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_env_file_does_not_count() {
+        let dir = std::env::temp_dir().join("yuanwork-env-missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!env_file_sets_the_location(&dir));
+    }
+
+    #[test]
+    fn the_shell_leaves_the_location_to_the_backend_when_the_user_set_one() {
+        // The shell only points the backend at the project's data/
+        // when nothing else decides. Both the environment and the
+        // .env count as "something else" (ADR-045).
+        let source = include_str!("sidecar.rs");
+        assert!(source.contains("var_os(\"YUANWORK_HOME\")"));
+        assert!(source.contains("env_file_sets_the_location"));
     }
 }

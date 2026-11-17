@@ -8,9 +8,9 @@
 |------|------|
 | 版本 | v0.1 |
 | 关联文档 | proposal.md, design.md |
-| 任务总数 | 65 |
+| 任务总数 | 67 |
 | 执行策略 | 按里程碑推进；每个里程碑结束跑一次全量回归与验收回放 |
-| 批次 | M12 |
+| 批次 | M14 |
 
 ## 1. 任务列表
 
@@ -689,6 +689,28 @@
 - **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_ingest_parallel_contract.py -q`
 - **验证结果**: 20 passed（2026-11-17）。**OCR 引擎加载一次只要 2.2 秒**（不是一开始估的 21 秒），但**每个文件重建一次解析器就是每个文件白扔 2.2 秒**——真实工作域有 105 张图片。**单独量（同一进程、6 张图）**：每个文件新建解析器 37.9 秒 → 一个解析器一直留着 **25.5 秒**（快 33%）。**顺带限了线程**：OCR 的 ONNX 会话默认**按核数开线程**（14 个），七个工人一起就是 98 个线程在抢 14 个核，所以工人进程里把 `OMP_NUM_THREADS` 钉成 1。**量不准的部分**：全量建库的数字在这几轮里从 795 秒一路漂到 1209 秒——**同样的活，单独量的解析时间也从 460 秒变成 600 多秒**（这台笔记本连续跑了几小时基准，机器本身在降频）。所以这一项的**端到端收益没法给数**，能给的只有两件事：单独量出来的 33%（同一进程里前后对比）和「不再每个文件加载一次模型」这个事实
 
+### M13 落点（用户要求：把索引与模型缓存固定到 D 盘——系统盘只剩 4.2 GB）
+
+### [x] TASK-066: 实现可写状态归到可配置的根目录
+
+- **描述**: 系统盘只剩 **4.2 GB**，而本项目在系统盘上的足迹几乎全是**模型缓存**：`~/.cache/huggingface/hub` 是 **4.70 GB**（bge-m3 加重排模型）——**那是本项目下载的模型，却落在系统盘上**，而项目管不着它（那是 HuggingFace 自己的默认目录）。还有两处：**数据目录是相对路径**（`.env` 里 `YUANWORK_DATA_DIR=./data`），而后端的 cwd 在三种启动方式下各不相同（桌面端 `src/backend`、仓库根、`src/backend`），于是**同一个项目有三套不同的知识库**（实测 `src/backend/data` 与仓库根 `data/` 各躺着一份 store.db）；**索引写在快满的盘上会更慢**（落库阶段直接受影响，AC-P-012）。按 ADR-045 加一个根目录 `YUANWORK_HOME`：它下面的 `data/` 放索引、日志与审计，`models/` 放模型缓存；模型缓存目录在**进程最早期**写进 `HF_HOME`——**huggingface_hub 的缓存位置是导入时算的常量，晚一步设置不报错也不生效**（实测：先设后导入 → 生效；先导入后设 → 不生效；好在本项目的嵌入模型是懒加载的，且实测 litellm 不会提前把它拉进来）。`YUANWORK_DATA_DIR` 仍可单独覆盖索引目录（桌面端已经在用它）；用户自己设的 `HF_HOME` 不被覆盖；老目录 `~/.yuanwork` 一次性搬到 `~/.yuanwork/data`
+- **输入**: `yuanwork/paths.py`（新）、`yuanwork/__init__.py`、`yuanwork/config.py`、`yuanwork/api/app.py`、`src/app/src-tauri/src/sidecar.rs`
+- **输出**: 路径解析模块与三处接线（进程最早期、配置、桌面端）
+- **验收标准**: 覆盖 AC-P-005、AC-P-012
+- **依赖**: 无
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_paths_contract.py -q`
+- **验证结果**: 22 passed（2026-11-17）；全量回归后端 **1730 passed** / Rust **74 passed** / 前端 **127 passed**。**这台机器上的落点**：`YUANWORK_HOME=D:/yuanwork` → 数据目录 `D:\yuanwork\data`、模型缓存 `D:\yuanwork\models`；**模型缓存从 C 盘搬到了 D 盘**（C 盘可用空间 4.2 GB → **17.5 GB**，模型缓存占的是 4.70 GB——`hub/` 目录里 blobs 与 snapshots 是**硬链接**，标称 13.59 GB 是算了两遍）。**从 `src/backend` 起后端（桌面端的工作目录）报的落点不变**，这正是「不跟 cwd 跑」的证据。**三处接线**：①`yuanwork/paths.py`（新模块，进程最早期定落点）②`config.py`（路径统一解析成绝对路径，相对路径按**项目根**解析而不是 cwd）③`sidecar.rs`（桌面端在 `.env` 里看到 `YUANWORK_HOME` 就不再改指索引目录——否则索引与模型会落到两个地方）。**两个坑**：①`HF_HOME` 是 huggingface_hub **导入时**算的常量，晚一步设置**不报错也不生效**——所以这件事必须在 `yuanwork/__init__.py` 里做，实测 litellm 不会提前把它拉进来；②pydantic 会从 `.env` 里读到**相对的** `YUANWORK_DATA_DIR=./data` 并跳过默认值，所以落点由 `paths` 统一算，配置类只取它的答案。**老契约同步更新**：数据目录的默认值从 `~/.yuanwork` 变成「根目录下的 `data/`」（`test_runtime_contract_singleton.py`）；`.env` 的查找逻辑从 `api/app.py` 挪进 `paths.py`（`test_runtime_contract_dotenv.py`）
+
+### [x] TASK-067: 修掉基准语料生成器里不定的那个字节
+
+- **描述**: 基准语料号称「同一颗种子给出同一批字节」，但**xlsx 每次生成的字节数会差一个字节**——`openpyxl` 在建 workbook 时把**当下时刻**写进 `docProps/core.xml`（`created` 与 `modified` 两处），而这个文件是**压缩**着放进档案的，于是压缩后的长度取决于「写在哪一分钟」，实测 60 次里有 11 次和 49 次两种长度。这让「两次跑量的是同一批活」这件事在字节上不成立，也让 `test_the_same_seed_gives_the_same_bytes` 变成**偶发失败**（全量回归里撞到过一次）。改法：把 `created` 钉成固定时刻，并把 `openpyxl` 写档时读的那个钟换掉（`modified` 是它在 `save()` 里重新盖上的）
+- **输入**: `scripts/bench/corpus.py`
+- **输出**: 可重复的 xlsx 语料
+- **验收标准**: 覆盖 AC-P-010
+- **依赖**: TASK-042
+- **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_perf_benchmark_contract.py -q`
+- **验证结果**: 20 passed（2026-11-17）。**原来偶发失败**：全量回归里 `test_the_same_seed_gives_the_same_bytes` 撞到过一次——实测同一颗种子连生成 60 次，**xlsx 的大小有 11 次是 5233、49 次是 5234**。根因有两处，都在 openpyxl 身上：`DocumentProperties.__init__` 里 `created` 与 `modified` 都是 `now`（每次建 workbook 都变），而 `save()` 在写档前还会**再盖一次** `modified`；这些时间戳是要**压缩**着放进 `docProps/core.xml` 的，压缩后的长度取决于「写在哪一分钟」，于是两次跑量到的不是同一批活。改法：`created` 钉成固定时刻，并把写档时读的那个钟换掉（`modified` 归它管）。改完 60 次全部一致（xlsx 固定在 5220 字节）。**顺带记一笔**：HF 缓存的 `hub/` 里 blobs 与 snapshots 是**硬链接**，按文件大小相加会把同一份数据算两遍——标称 13.59 GB，实际占盘 4.70 GB
+
 ## 2. 依赖关系图
 
 ```mermaid
@@ -774,6 +796,8 @@ graph TD
 批次 M8：TASK-051
 批次 M11（GPU 路线落地后）：TASK-061
 批次 M12（设备自适应）：TASK-062 → TASK-063
+批次 M13（落点）：TASK-066
+批次 M14（基准语料可重复）：TASK-067
 ```
 
 ## 4. 追溯矩阵
@@ -836,9 +860,10 @@ graph TD
 | AC-E-015 | TASK-039 |
 | AC-E-016 | TASK-036 |
 | AC-E-017 | TASK-046 |
-| AC-P-010 | TASK-042, TASK-044, TASK-054, TASK-061, TASK-065 |
+| AC-P-010 | TASK-042, TASK-044, TASK-054, TASK-061, TASK-065, TASK-067 |
 | AC-P-011 | TASK-042, TASK-043, TASK-053, TASK-055, TASK-056, TASK-062, TASK-063 |
-| AC-P-012 | TASK-042, TASK-045, TASK-057, TASK-058, TASK-063, TASK-064 |
+| AC-P-012 | TASK-042, TASK-045, TASK-057, TASK-058, TASK-063, TASK-064, TASK-066 |
+| AC-P-005 | TASK-066 |
 
 ## 5. 变更记录
 
@@ -859,4 +884,6 @@ graph TD
 | 2026-11-14 | v0.1 | 明确基准数据集的两层来源与判据分工 | 合成文档结构比真实文档简单，吞吐会偏乐观，合成集上的数字不能冒充验收结论 | TASK-042 拆出合成集生成器与结构画像采集器；绝对值指标改由真实工作域判定，合成集只做不退化 10% 的回归门 |
 | 2026-11-14 | v0.1 | 五个开放问题拆成任务落地 | 开放问题拍板后落到设计与任务，否则决策只停在文档里 | TASK-024 升级为段落级合并加编辑端点；新增 TASK-046 到 TASK-050，任务总数 50 |
 | 2026-11-14 | v0.1 | 补 TASK-051：桌面端接入工作域 | TASK-001 交付了工作域接口，但桌面端仍在调旧的 /ingest/dir，工作域在实际使用中是空的 | 新增第 8 个里程碑与 1 个任务；AC-F-001 与 AC-F-002 的追溯补上它，任务总数 51 |
+| 2026-11-17 | v0.1 | 补第 13 个里程碑：可写状态归到可配置的根目录 | 用户要求把索引与模型缓存固定到 D 盘。系统盘只剩 4.2 GB，而本项目在系统盘上的足迹有 4.70 GB 的模型缓存（落在 HuggingFace 自己的默认目录里，项目管不着）；且数据目录是相对路径，跟着 cwd 跑——同一个项目在不同启动方式下落到不同目录 | 新增 1 个任务（TASK-066）；AC-P-005 与 AC-P-012 的追溯补上它；proposal.md §2.3 补 1 条技术约束；design.md 补 ADR-045 与 `Paths` 模块；任务总数 66 |
+| 2026-11-17 | v0.1 | 补第 14 个里程碑：基准语料可重复 | 全量回归撞到一个偶发失败：基准语料号称「同一颗种子给出同一批字节」，但 openpyxl 把当下时刻写进 xlsx 的属性里，压缩后长度差一个字节——「两次跑量的是同一批活」这句话在字节上不成立 | 新增 1 个任务（TASK-067）；AC-P-010 的追溯补上它；任务总数 67 |
 | 2026-11-14 | v0.1 | TASK-002 落地：位置锚点结构与五类锚点 | 规范要求位置可回溯到页码、幻灯片号、章节、工作表行与标题路径 | 向量表用 anchor 一列取代三列固定定位；五个解析器各自产出锚点；Excel 改为按行出块 |

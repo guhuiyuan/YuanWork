@@ -61,14 +61,19 @@ def test_the_application_loader_reads_the_file_in_the_working_directory(
 def test_the_other_candidates_come_from_the_package_root():
     """The remaining candidates are the *package's* ancestors, not the
     working directory's — that is what lets the desktop shell find the
-    `.env` at the project root."""
+    `.env` at the project root.
+
+    The lookup itself lives in `yuanwork.paths` (ADR-045 moved it there
+    so that the path resolution and the .env lookup read the same
+    files); the application loader calls it.
+    """
     import inspect
 
-    from yuanwork.api import app as app_module
+    from yuanwork import paths
 
-    source = inspect.getsource(app_module._dotenv_candidates)
-    assert "package_root" in source
-    assert "package_root.parents[:6]" in source
+    source = inspect.getsource(paths.dotenv_candidates)
+    assert "_PACKAGE_ROOT" in source
+    assert "_PACKAGE_ROOT.parents[:6]" in source
 
 
 def test_the_candidates_start_with_the_working_directory(tmp_path, monkeypatch):

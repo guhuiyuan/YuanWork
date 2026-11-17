@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from yuanwork import paths
 
 
 class NetworkMode(IntEnum):
@@ -40,7 +42,17 @@ class YuanWorkSettings(BaseSettings):
     )
 
     # ===== Paths =====
-    data_dir: Path = Field(default=Path("~/.yuanwork").expanduser())
+    # Where the index, the logs and the audit log live. The default is
+    # the project's root directory (or ~/.yuanwork when there is no
+    # checkout to speak of) with data/ under it. Relative paths are
+    # resolved against the project root, not against the working
+    # directory - the backend is started from three different places
+    # (ADR-045).
+    data_dir: Path = Field(default_factory=paths.data_dir)
+    # Where the models this project downloads are kept (bge-m3 and the
+    # reranker, 4.7 GB). It is handed to huggingface_hub through
+    # HF_HOME before that library is imported - see yuanwork/__init__.py
+    model_cache_dir: Path = Field(default_factory=paths.model_cache_dir)
     # Default config_dir: walk up from the package to find the bundled
     # configs/models.yaml.  Layout is src/backend/yuanwork/*.py and
     # src/backend/configs/*.yaml, so configs/ is the package's parent.
@@ -183,6 +195,36 @@ class YuanWorkSettings(BaseSettings):
     # (AC-P-007).
     core_max_docs: int = Field(default=200, gt=0)
 
+    @field_validator("data_dir", "model_cache_dir")
+    @classmethod
+    def _absolute(cls, value: Path) -> Path:
+        """Every configured path becomes absolute.
+
+        A relative path is resolved against the project root, not
+        against the working directory: the backend is started from
+        three different places, and a relative path that follows the
+        working directory gives the project three different knowledge
+        bases (ADR-045).
+        """
+        return paths.resolve_path(value)
+
+    @model_validator(mode="after")
+    def _use_the_resolved_locations(self) -> "YuanWorkSettings":
+        """Where the state lives is decided in one place.
+
+        pydantic-settings would take YUANWORK_DATA_DIR straight from
+        the .env in the working directory - where it is usually a
+        *relative* path, which is exactly what used to give the
+        project three different knowledge bases. The resolution
+        happens in ``yuanwork.paths``; the settings use its answer.
+        A directory the caller passed in is left alone.
+        """
+        if "data_dir" not in self.model_fields_set:
+            self.data_dir = paths.data_dir()
+        if "model_cache_dir" not in self.model_fields_set:
+            self.model_cache_dir = paths.model_cache_dir()
+        return self
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         # The two fusion weights are a split of one whole: the fused
@@ -194,6 +236,11 @@ class YuanWorkSettings(BaseSettings):
                 "YUANWORK_FUSION_ALPHA and YUANWORK_FUSION_BETA must add up "
                 f"to 1.0 (got {self.fusion_alpha} + {self.fusion_beta})"
             )
+        # An older version kept the index directly in the root
+        # directory. Move it under data/ before the new layout is
+        # created - the move only happens when data/ is not there yet,
+        # so it never overwrites anything (ADR-045).
+        paths.migrate_legacy_data_dir()
         # Ensure data dir exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "logs").mkdir(exist_ok=True)
