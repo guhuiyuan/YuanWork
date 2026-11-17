@@ -8,10 +8,10 @@
 |------|------|----------|
 | 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 59 条 |
 | 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 46 条 |
-| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 71/72 完成 |
+| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 74/74 完成 |
 
-**当前阶段**：Phase 4 — 代码生成
-**下一步**：TASK-071 实现问答与建库延迟的实测脚本
+**当前阶段**：Phase 5 — 验证与交付
+**进度**：74/74 个 Task 已完成
 
 规则：
 1. 任何代码改动必须对应 `tasks.md` 中的一个 Task，不得做范围外的事。
