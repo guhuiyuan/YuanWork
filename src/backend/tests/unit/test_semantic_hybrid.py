@@ -283,3 +283,62 @@ async def test_search_pure_dense_back_compat(fake_semantic_memory):
     assert "_score" in r0
     # _score_dense / _score_sparse are only set by search_hybrid
     assert "_score_dense" not in r0 or r0.get("_score_dense") is None or "_score_dense" not in r0
+
+
+@pytest.mark.asyncio
+async def test_the_full_text_hits_are_fetched_in_one_query(fake_semantic_memory):
+    """The hits the dense channel did not return are fetched in one go.
+
+    Fetching them one by one is an N+1: every vector search scans the
+    whole table (0.2 s at 58k rows), and a query with 30 full-text hits
+    spent six seconds there - four times the budget for the whole
+    retrieval (AC-P-002).
+    """
+    sm = fake_semantic_memory
+    await sm.add_chunks(
+        [
+            {
+                "id": f"c{i}",
+                "doc_id": "d1",
+                "chunk_idx": i,
+                "text": f"第{i}段 金额 1280 元",
+            }
+            for i in range(10)
+        ]
+    )
+
+    class _CountingTable:
+        """Counts how many times the table is searched."""
+
+        def __init__(self, real):
+            self._real = real
+            self.searches = 0
+
+        def count_rows(self):
+            return self._real.count_rows()
+
+        def search(self, vector):
+            self.searches += 1
+            return self._real.search(vector)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    counting = _CountingTable(sm.get_or_create_chunks_table())
+    sm.get_or_create_chunks_table = lambda: counting  # type: ignore[method-assign]
+
+    class _Fts:
+        """Hits the dense channel is unlikely to have returned."""
+
+        def search(self, query, limit):
+            return [(f"c{i}", 10.0 - i) for i in range(8)]
+
+    sm._get_fts_index = lambda: _Fts()  # type: ignore[method-assign]
+
+    results = await sm.search_hybrid("金额 1280", top_k=5, recall_k=8)
+
+    # One search for the dense channel, one for the rows the full-text
+    # channel brought back - not one per hit.
+    assert counting.searches <= 2, f"the table was searched {counting.searches} times"
+    # The full-text hits are in the result - the batch fetch works.
+    assert any(str(r["id"]).startswith("c") for r in results)

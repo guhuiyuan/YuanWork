@@ -1156,38 +1156,41 @@ class SemanticMemory:
             # query still answers from the dense channel alone.
             logger.warning(f"FTS search failed (sparse channel empty): {e!r}")
             fts_hits = []
+        # The hits the dense channel did not return are fetched in
+        # **one** query. Fetching them one by one is an N+1: each vector
+        # search scans the whole table (0.2 s at 58k rows), and a query
+        # with 30 full-text hits would spend six seconds there - four
+        # times the budget for the whole retrieval (AC-P-002).
+        missing = [cid for cid, _ in fts_hits if cid not in dense_ids]
+        fetched: dict[str, dict[str, Any]] = {}
+        if missing:
+            ids_clause = ", ".join(f"'{cid}'" for cid in missing)
+
+            def _fetch_missing() -> list[dict[str, Any]]:
+                where = f"id IN ({ids_clause})"
+                if filter_expr:
+                    where = f"({filter_expr}) AND {where}"
+                return table.search(dense_q).where(where).limit(len(missing)).to_list()
+
+            try:
+                rows = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_missing), timeout=self.dense_timeout
+                )
+            except Exception:
+                rows = []
+            for row in rows:
+                # These rows come from a vector search whose distance is
+                # meaningless - the row was picked by its id.
+                row.pop("_distance", None)
+                row["_score_dense"] = 0.0
+                fetched[row["id"]] = row
+
         for cid, fts_score in fts_hits:
             base = dense_ids.get(cid)
             if base is None:
-                # FTS hit not in dense top-K — pull it from the table.
-                def _fetch(cid: str = cid) -> list[dict[str, Any]]:
-                    if filter_expr:
-                        return (
-                            table.search(dense_q)
-                            .where(f"{filter_expr} AND id = '{cid}'")
-                            .limit(1)
-                            .to_list()
-                        )
-                    return (
-                        table.search(dense_q)
-                        .where(f"id = '{cid}'")
-                        .limit(1)
-                        .to_list()
-                    )
-
-                try:
-                    rows = await asyncio.wait_for(
-                        asyncio.to_thread(_fetch), timeout=self.dense_timeout
-                    )
-                except Exception:
-                    rows = []
-                if not rows:
-                    continue
-                base = rows[0]
-                # base is from a dummy vector search so its _distance is
-                # meaningless; drop it
-                base.pop("_distance", None)
-                base["_score_dense"] = 0.0
+                base = fetched.get(cid)
+            if base is None:
+                continue
             r2 = dict(base)
             r2["_score_sparse"] = float(fts_score)
             sparse_results.append(r2)
