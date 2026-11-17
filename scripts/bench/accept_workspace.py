@@ -46,6 +46,32 @@ from bench.workspace_profile import profile_workspace  # noqa: E402
 from bench.run import TARGETS, check_targets, parse_rates, unmeasured  # noqa: E402
 
 
+#: How many failures the report lists one by one. The count is in the
+#: report either way; a list of a thousand paths is not a report.
+FAILED_FILES_SHOWN = 50
+
+
+def failed_files(result: dict[str, Any]) -> dict[str, Any]:
+    """Which files the build could not read, and why.
+
+    A number of failures nobody can explain is not a result - it is a
+    question. The paths and the reasons travel with the report.
+    """
+    failed = [
+        {
+            "path": entry.get("path", ""),
+            "error": entry.get("error", "") or "",
+        }
+        for entry in result.get("files", [])
+        if entry.get("status") == "error"
+    ]
+    return {
+        "total": len(failed),
+        "shown": failed[:FAILED_FILES_SHOWN],
+        "omitted": max(0, len(failed) - FAILED_FILES_SHOWN),
+    }
+
+
 async def accept_workspace(workspace: Path, data_dir: Path) -> dict[str, Any]:
     """Index the workspace and say whether the promises held."""
     from yuanwork.db.sqlite import SQLiteStore
@@ -124,6 +150,7 @@ async def accept_workspace(workspace: Path, data_dir: Path) -> dict[str, Any]:
         "indexed": result.get("indexed", 0),
         "skipped": result.get("skipped", 0),
         "errors": result.get("errors", 0),
+        "failed_files": failed_files(result),
         "chunks": total_chunks,
         "elapsed_seconds": round(elapsed, 3),
         "workers": workers,
@@ -168,6 +195,11 @@ def print_report(report: dict[str, Any]) -> None:
         f"失败：{report['errors']}"
     )
     print(f"切片：{report['chunks']}　总时长：{report['elapsed_seconds']} 秒")
+    rate = (report.get("throughput") or {}).get("files_per_minute", 0.0)
+    print(
+        f"建库速度：{rate} 文件/分钟"
+        f"（承诺 {TARGETS['end_to_end_files_per_minute']} 文件/分钟以上）"
+    )
     print(f"长尾层可检索：{'是' if report['longtail_searchable'] else '否'}")
     print(
         f"核心层页面：{report['core_pages']} 个"
@@ -178,11 +210,18 @@ def print_report(report: dict[str, Any]) -> None:
     for key, value in (report.get("throughput") or {}).items():
         print(f"  {key}: {value}")
 
+    failures = report.get("failed_files") or {}
+    if failures.get("total"):
+        print()
+        print(f"读不进来的文件：{failures['total']} 个")
+        for entry in failures.get("shown", []):
+            print(f"  · {entry['path']}　{entry['error']}")
+        if failures.get("omitted"):
+            print(f"  （还有 {failures['omitted']} 个没列出来，报告文件里有总数）")
+
     missed = check_targets(report)
     if not report["longtail_searchable"]:
         missed.append("长尾层没有可检索的内容")
-    if report["elapsed_seconds"] / 60.0 > TARGETS["end_to_end_minutes"]:
-        missed.append("端到端超过两小时")
 
     print()
     if missed:
@@ -202,6 +241,23 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="The workspace acceptance run")
     parser.add_argument("workspace", help="The workspace to index")
     parser.add_argument("--json", help="Write the report to this file as JSON")
+    parser.add_argument(
+        "--work-dir",
+        help=(
+            "Where the scratch index goes. The system's temporary directory "
+            "is the default; on a machine whose system disk is nearly full "
+            "the index lands on the slow, crowded disk, and the number that "
+            "comes out is not the machine's speed."
+        ),
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help=(
+            "Keep the scratch index instead of deleting it. The latency "
+            "measurements need an index to measure against."
+        ),
+    )
     args = parser.parse_args()
 
     workspace = Path(args.workspace)
@@ -209,11 +265,23 @@ async def main() -> int:
         print(f"工作域不存在：{workspace}")
         return 2
 
-    work = Path(tempfile.mkdtemp(prefix="yuanwork_accept_"))
+    parent: str | None = None
+    if args.work_dir:
+        parent = str(Path(args.work_dir).expanduser().resolve())
+        Path(parent).mkdir(parents=True, exist_ok=True)
+
+    # A fresh directory inside the given one: the caller's directory is
+    # never touched, only what this run made.
+    work = Path(tempfile.mkdtemp(prefix="yuanwork_accept_", dir=parent))
     try:
         report = await accept_workspace(workspace, work / "data")
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if not args.keep:
+            shutil.rmtree(work, ignore_errors=True)
+
+    # The place the index was written travels with the report: a speed
+    # without its conditions is a number without a meaning.
+    report["work_dir"] = str(work)
 
     print_report(report)
     if args.json:

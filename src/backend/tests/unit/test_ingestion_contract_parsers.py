@@ -33,6 +33,7 @@ from unit.ingestion_fixtures import (
     make_markdown_file,
     make_pdf_file,
     make_pptx_file,
+    make_pptx_with_object_placeholder_file,
     make_scanned_pdf_file,
     make_text_file,
     make_xlsx_file,
@@ -226,3 +227,31 @@ async def test_docx_table_block_comes_after_the_text_blocks(temp_dir: Path):
     types = [b.type for b in blocks]
     assert "table" in types
     assert types.index("table") == len(types) - 1
+
+
+# --------------------------------------------------------------------------
+# AC-F-002 — a supported format is never lost to one odd shape
+# --------------------------------------------------------------------------
+
+
+async def test_pptx_with_an_object_placeholder_is_still_read(temp_dir: Path):
+    """A slide whose "title" is an embedded object, not a text shape.
+
+    PowerPoint puts equation objects into a placeholder with no type and
+    no index; python-pptx hands that object back as the title, and it has
+    no text at all. Asking it for `.text` used to raise and the whole
+    .pptx was lost - the file is a supported format, so it has to be
+    read.
+    """
+    path = make_pptx_with_object_placeholder_file(temp_dir)
+    blocks = await PptxParser().parse(path, "doc1")
+
+    assert blocks
+    text_blocks = [b for b in blocks if b.type == "text"]
+    assert len(text_blocks) == 1
+    # The slide has no title (the title is an object), but its text is
+    # still there, and the position still points at the slide.
+    assert "公式对象" in text_blocks[0].content
+    assert text_blocks[0].meta["slide_number"] == 1
+    assert text_blocks[0].meta["anchor"]["kind"] == "slide"
+    assert text_blocks[0].meta["slide_title"] == ""

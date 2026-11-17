@@ -54,8 +54,11 @@ REGRESSION_TOLERANCE = 0.10
 
 #: The promises, as numbers.
 TARGETS = {
-    "end_to_end_minutes": 120.0,
-    "longtail_minutes": 100.0,
+    # The build's **speed**, not its total. A promise about "5000 files
+    # within two hours" needs a corpus nobody has - and the rate it
+    # implies is one the machine cannot keep anyway. The speed is what
+    # can be measured, on any workspace (AC-P-001).
+    "end_to_end_files_per_minute": 150.0,
     "parse_files_per_minute": 120.0,
     "embed_chunks_per_second": 15.0,
     "write_chunks_per_second": 500.0,
@@ -308,12 +311,16 @@ def check_targets(report: dict[str, Any]) -> list[str]:
     """
     throughput = report.get("throughput") or {}
     measured = report.get("measured") or {}
-    elapsed_minutes = report.get("elapsed_seconds", 0.0) / 60.0
     missed: list[str] = []
-    if elapsed_minutes > TARGETS["end_to_end_minutes"]:
-        missed.append(
-            f"端到端 {elapsed_minutes:.1f} 分钟 > {TARGETS['end_to_end_minutes']} 分钟"
-        )
+    # The end-to-end speed is a promise about the **real workspace**:
+    # the synthetic corpus is faster by construction (its documents are
+    # simpler), so its number is a regression gate, not a conclusion.
+    if report.get("profile"):
+        rate = throughput.get("files_per_minute", 0.0)
+        if rate < TARGETS["end_to_end_files_per_minute"]:
+            missed.append(
+                f"端到端 {rate} 文件/分钟 < {TARGETS['end_to_end_files_per_minute']}"
+            )
     if measured.get("parse", True) and throughput.get(
         "parse_files_per_minute", 0.0
     ) < TARGETS["parse_files_per_minute"]:

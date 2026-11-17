@@ -289,6 +289,68 @@ def make_pptx_file(
     return path
 
 
+#: A graphic frame with a placeholder that has neither a type nor an
+#: index - PowerPoint puts embedded equation objects in there. python-pptx
+#: hands such an object back as "the title" (index 0), and it has no text.
+_OBJECT_PLACEHOLDER_FRAME = (
+    '<p:graphicFrame '
+    'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+    "<p:nvGraphicFramePr>"
+    '<p:cNvPr id="99" name="Object 99"/>'
+    "<p:cNvGraphicFramePr/>"
+    "<p:nvPr><p:ph/></p:nvPr>"
+    "</p:nvGraphicFramePr>"
+    '<p:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></p:xfrm>'
+    "<a:graphic>"
+    '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+    "</a:graphicData>"
+    "</a:graphic>"
+    "</p:graphicFrame>"
+)
+
+
+def make_pptx_with_object_placeholder_file(
+    dir_path: Path,
+    name: str = "object.pptx",
+    text: str = "这一页上有一个嵌入的公式对象",
+) -> Path:
+    """A .pptx whose slide carries an embedded-object placeholder.
+
+    The placeholder has no type and no index, so python-pptx returns it
+    as the slide's title - a shape with no text frame at all. Asking it
+    for `.text` used to raise, and the whole file was lost.
+    """
+    import zipfile
+
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    path = dir_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(2))
+    box.text_frame.text = text
+    prs.save(path)
+
+    # Put the object placeholder first, the way PowerPoint does when the
+    # equation object was pasted into the title placeholder.
+    with zipfile.ZipFile(path) as source:
+        names = source.namelist()
+        blobs = {name_: source.read(name_) for name_ in names}
+
+    slide_xml = blobs["ppt/slides/slide1.xml"].decode("utf-8")
+    slide_xml = slide_xml.replace("<p:spTree>", "<p:spTree>" + _OBJECT_PLACEHOLDER_FRAME, 1)
+    blobs["ppt/slides/slide1.xml"] = slide_xml.encode("utf-8")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as target:
+        for name_ in names:
+            target.writestr(name_, blobs[name_])
+    return path
+
+
 # --------------------------------------------------------------------------
 # images
 # --------------------------------------------------------------------------

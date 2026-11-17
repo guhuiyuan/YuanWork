@@ -241,11 +241,27 @@ def test_a_missing_baseline_is_not_an_error(tmp_path: Path):
 
 def test_the_promises_have_their_numbers():
     """A promise without a number is not a promise."""
-    assert TARGETS["end_to_end_minutes"] == 120.0
-    assert TARGETS["longtail_minutes"] == 100.0
+    assert TARGETS["end_to_end_files_per_minute"] == 150.0
     assert TARGETS["parse_files_per_minute"] >= 120.0
     assert TARGETS["embed_chunks_per_second"] >= 15.0
     assert TARGETS["write_chunks_per_second"] >= 500.0
+
+
+def test_the_end_to_end_promise_is_a_speed_and_only_on_the_real_workspace():
+    """The build's promise is a speed, and it is judged where it means
+    something: on the real workspace.
+
+    The synthetic corpus is faster by construction - its documents are
+    simpler - so its number is a regression gate, not a conclusion.
+    """
+    synthetic = report(files_per_minute=10.0)
+    assert check_targets(synthetic) == []
+
+    real = report(files_per_minute=10.0)
+    real["profile"] = {"files": 4349}
+    missed = check_targets(real)
+    assert len(missed) == 1
+    assert "端到端" in missed[0]
 
 
 def test_a_run_that_keeps_the_promises_misses_nothing():

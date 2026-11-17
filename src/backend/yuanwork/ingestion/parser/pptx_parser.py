@@ -36,10 +36,19 @@ class PptxParser(BaseParser):
         total_slides = len(prs.slides)
 
         for slide_idx, slide in enumerate(prs.slides, start=1):
-            # Get slide title
+            # Get slide title.
+            #
+            # `slide.shapes.title` is not always a text shape. PowerPoint
+            # puts embedded equation objects into a placeholder with
+            # neither a type nor an index, and python-pptx hands that
+            # object back as "the title" (index 0) - an object that has no
+            # text at all. Asking it for `.text` raises, and the whole
+            # file is lost. A slide without a text-frame title simply has
+            # no title.
             slide_title = ""
-            if slide.shapes.title:
-                slide_title = slide.shapes.title.text or ""
+            title_shape = slide.shapes.title
+            if title_shape is not None and getattr(title_shape, "has_text_frame", False):
+                slide_title = title_shape.text_frame.text.strip()
 
             # Collect text shapes
             text_parts: list[str] = []

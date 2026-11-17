@@ -7,19 +7,23 @@
 | 规范 | 路径 | 当前状态 |
 |------|------|----------|
 | 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 59 条 |
-| 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 43 条 |
-| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 61/61 完成 |
+| 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 46 条 |
+| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 71/72 完成 |
 
-**当前阶段**：Phase 5 — 验证与交付
-**下一步**：整体验收 —— 按 59 条 AC 跑回放矩阵，产出 `specs/yuanwork/acceptance-report.md`
+**当前阶段**：Phase 4 — 代码生成
+**下一步**：TASK-071 实现问答与建库延迟的实测脚本
 
 规则：
 1. 任何代码改动必须对应 `tasks.md` 中的一个 Task，不得做范围外的事。
 2. 每个 Task 完成前必须跑通其「验证命令」；未通过不得推进到下游 Task。
 3. 不得擅自增加 `proposal.md` §2.1 之外的功能；需要新增时先改规范。
 4. 发现规范与实现冲突时，先停下并提出规范修改方案，经确认后再改代码。
-5. 提交前跑 `~/.claude/skills/sdd/scripts/validate_specs.py --feature <feature>`
+5. 提交前跑 `C:/Users/<用户名>/.claude/skills/sdd/scripts/validate_specs.py --feature <feature>`
    （规范类）或该 Task 的验证命令（代码类）。
+6. 上述命令若因环境限制无法执行（权限被拒），**不得默认通过**。按
+   `C:/Users/<用户名>/.claude/skills/sdd/SKILL.md` 的「受限环境下的降级与解锁路径」处理：
+   用 AskUserQuestion 引导（切模式后重试 / 用户手动跑并贴回输出 /
+   跳过并标记待人工校验），被跳过的 Task 保持未勾选，结论标「未验证」。
 <!-- SDD:END -->
 
 **历史归档**：`archive/as-is-2026-11/` 是 2026-11 对旧实现做的现状快照，
