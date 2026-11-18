@@ -64,6 +64,17 @@ export interface KbFile {
 }
 
 /**
+ * A file the build could not read, and why.
+ *
+ * A count of failures says that something went wrong; the user needs to
+ * know which file and why.
+ */
+export interface FailedFile {
+  path: string;
+  error: string;
+}
+
+/**
  * One entry of the workspace - a folder or a single file the user set up.
  *
  * The workspace is the scope of the whole app: the build runs over its
@@ -194,6 +205,26 @@ interface AppState {
 
   kbFiles: KbFile[];
   setKbFiles: (f: KbFile[]) => void;
+  /**
+   * How many files the knowledge base holds.
+   *
+   * The file list is paged, so its length is not the number - this is
+   * the number the sidebar shows.
+   */
+  kbTotal: number;
+  setKbTotal: (n: number) => void;
+  /** How many slices the knowledge base holds. */
+  kbChunkTotal: number;
+  setKbChunkTotal: (n: number) => void;
+  /**
+   * The files the last build could not read, and how many there were.
+   *
+   * The list is capped by the backend - the count is the real one.
+   */
+  failedFiles: FailedFile[];
+  setFailedFiles: (f: FailedFile[], total?: number) => void;
+  /** How many files the last build could not read - the list is capped. */
+  failedTotal: number;
   /** True once the file list has been fetched - avoids a "no files yet" flash. */
   kbLoaded: boolean;
   setKbLoaded: (v: boolean) => void;
@@ -277,6 +308,14 @@ export const useAppStore = create<AppState>((set) => ({
 
   kbFiles: [],
   setKbFiles: (f) => set({ kbFiles: f }),
+  kbTotal: 0,
+  setKbTotal: (n) => set({ kbTotal: n }),
+  kbChunkTotal: 0,
+  setKbChunkTotal: (n) => set({ kbChunkTotal: n }),
+  failedFiles: [],
+  failedTotal: 0,
+  setFailedFiles: (f, total) =>
+    set({ failedFiles: f, failedTotal: total ?? f.length }),
   kbLoaded: false,
   setKbLoaded: (v) => set({ kbLoaded: v }),
   kbError: null,

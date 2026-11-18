@@ -11,7 +11,7 @@ use serde_json::json;
 /// The commands the webview may invoke.
 ///
 /// Keep in sync with `generate_handler!` in `lib.rs`.
-const COMMAND_NAMES: [&str; 27] = [
+const COMMAND_NAMES: [&str; 28] = [
     "chat_stream",
     "ingest_directory",
     "get_ingest_status",
@@ -20,6 +20,7 @@ const COMMAND_NAMES: [&str; 27] = [
     "get_api_key",
     "set_api_key",
     "list_kb_files",
+    "kb_stats",
     "delete_kb_file",
     "list_wiki_pages",
     "get_wiki_page",
@@ -44,8 +45,9 @@ const COMMAND_NAMES: [&str; 27] = [
 /// The commands that check the backend's HTTP status before treating the
 /// body as a result. The other ones take the body as it comes, so a
 /// backend error surfaces as "no data" instead of an error.
-const STATUS_CHECKING_COMMANDS: [&str; 11] = [
+const STATUS_CHECKING_COMMANDS: [&str; 12] = [
     "list_kb_files",
+    "kb_stats",
     "delete_kb_file",
     "ingest_directory",
     "list_page_blocks",

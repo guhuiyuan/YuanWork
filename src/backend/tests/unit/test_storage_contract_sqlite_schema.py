@@ -181,6 +181,40 @@ async def test_the_files_table_columns(store):
     ]
 
 
+async def test_the_ingest_job_table_columns(store):
+    """The job keeps the files it could not read, and how many.
+
+    A count of failures says that something went wrong; the user needs
+    to know *which* file and *why* (AC-E-004).
+    """
+    assert await column_names(store, "ingest_jobs") == [
+        "job_id", "status", "progress", "files_done", "files_total", "error",
+        "current_file", "failed_files", "failed_total", "created_at",
+        "updated_at",
+    ]
+
+
+async def test_the_failed_files_survive_a_restart(store: SQLiteStore, tmp_path: Path):
+    """They are kept in the database, so the app can still show them."""
+    await store.upsert_ingest_job(
+        job_id="j1",
+        status="completed",
+        failed_files='[{"path": "D:/kb/a.docx", "error": "解析失败"}]',
+        failed_total=1,
+    )
+
+    other = SQLiteStore(store.db_path)
+    await other.initialize()
+    try:
+        job = await other.get_ingest_job("j1")
+    finally:
+        await other.close()
+
+    assert job is not None
+    assert "a.docx" in job["failed_files"]
+    assert job["failed_total"] == 1
+
+
 async def test_the_episodes_table_columns(store):
     assert await column_names(store, "episodes") == [
         "id", "session_id", "role", "content", "topic_tags", "entities",

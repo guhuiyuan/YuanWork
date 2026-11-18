@@ -325,6 +325,14 @@ CREATE TABLE IF NOT EXISTS ingest_jobs (
     files_total INTEGER DEFAULT 0,
     error TEXT,
     current_file TEXT,
+    -- The files the build could not read, as JSON: a list of
+    -- {"path": ..., "error": ...}. A count says that something went
+    -- wrong; the user needs to know *which* file and *why* (AC-E-004).
+    failed_files TEXT DEFAULT '[]',
+    -- How many files there were in all. The list above is capped - a
+    -- workspace can hold a hundred thousand files nobody can read, and
+    -- the number has to stay true even when the list does not.
+    failed_total INTEGER DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -561,6 +569,14 @@ class SQLiteStore:
         added = False
         for column, ddl in (
             ("current_file", "ALTER TABLE ingest_jobs ADD COLUMN current_file TEXT"),
+            (
+                "failed_files",
+                "ALTER TABLE ingest_jobs ADD COLUMN failed_files TEXT DEFAULT '[]'",
+            ),
+            (
+                "failed_total",
+                "ALTER TABLE ingest_jobs ADD COLUMN failed_total INTEGER DEFAULT 0",
+            ),
         ):
             if column not in existing:
                 await self._conn.execute(ddl)
@@ -2060,6 +2076,8 @@ class SQLiteStore:
         files_total: Any = _UNSET,
         error: Any = _UNSET,
         current_file: Any = _UNSET,
+        failed_files: Any = _UNSET,
+        failed_total: Any = _UNSET,
     ) -> None:
         """Record the state of an ingestion job.
 
@@ -2079,6 +2097,8 @@ class SQLiteStore:
                 "files_total": 0,
                 "error": None,
                 "current_file": None,
+                "failed_files": "[]",
+                "failed_total": 0,
             }
         else:
             current = {
@@ -2088,6 +2108,8 @@ class SQLiteStore:
                 "files_total": existing["files_total"],
                 "error": existing["error"],
                 "current_file": existing.get("current_file"),
+                "failed_files": existing.get("failed_files") or "[]",
+                "failed_total": existing.get("failed_total") or 0,
             }
 
         values = {
@@ -2097,6 +2119,8 @@ class SQLiteStore:
             "files_total": current["files_total"],
             "error": current["error"],
             "current_file": current["current_file"],
+            "failed_files": current["failed_files"],
+            "failed_total": current["failed_total"],
         }
         for key, value in (
             ("status", status),
@@ -2105,6 +2129,8 @@ class SQLiteStore:
             ("files_total", files_total),
             ("error", error),
             ("current_file", current_file),
+            ("failed_files", failed_files),
+            ("failed_total", failed_total),
         ):
             if value is not _UNSET:
                 values[key] = value
@@ -2114,8 +2140,8 @@ class SQLiteStore:
             """
             INSERT INTO ingest_jobs
                 (job_id, status, progress, files_done, files_total, error,
-                 current_file, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 current_file, failed_files, failed_total, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status,
                 progress = excluded.progress,
@@ -2123,6 +2149,8 @@ class SQLiteStore:
                 files_total = excluded.files_total,
                 error = excluded.error,
                 current_file = excluded.current_file,
+                failed_files = excluded.failed_files,
+                failed_total = excluded.failed_total,
                 updated_at = excluded.updated_at
             """,
             (
@@ -2133,6 +2161,8 @@ class SQLiteStore:
                 values["files_total"],
                 values["error"],
                 values["current_file"],
+                values["failed_files"],
+                values["failed_total"],
                 now,
                 now,
             ),
@@ -2143,6 +2173,18 @@ class SQLiteStore:
         """The state of one ingestion job."""
         async with self.conn.execute(
             "SELECT * FROM ingest_jobs WHERE job_id = ?", (job_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return _row_to_dict(row) if row else None
+
+    async def get_latest_ingest_job(self) -> dict | None:
+        """The job that ran last.
+
+        The app reads it when it starts: the files the last build could
+        not read are still there (ADR-022).
+        """
+        async with self.conn.execute(
+            "SELECT * FROM ingest_jobs ORDER BY updated_at DESC, rowid DESC LIMIT 1"
         ) as cursor:
             row = await cursor.fetchone()
             return _row_to_dict(row) if row else None

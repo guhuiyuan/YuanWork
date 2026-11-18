@@ -27,12 +27,15 @@ from yuanwork.ingestion.parser.pptx_parser import PptxParser
 from yuanwork.ingestion.parser.xlsx_parser import XlsxParser
 from unit.ingestion_fixtures import (
     make_docx_file,
+    make_docx_with_image_file,
+    make_docx_with_textbox_file,
     make_docx_with_table_file,
     make_docx_with_text_and_table_file,
     make_empty_file,
     make_markdown_file,
     make_pdf_file,
     make_pptx_file,
+    make_pptx_with_image_file,
     make_pptx_with_object_placeholder_file,
     make_scanned_pdf_file,
     make_text_file,
@@ -255,3 +258,95 @@ async def test_pptx_with_an_object_placeholder_is_still_read(temp_dir: Path):
     assert text_blocks[0].meta["slide_number"] == 1
     assert text_blocks[0].meta["anchor"]["kind"] == "slide"
     assert text_blocks[0].meta["slide_title"] == ""
+
+
+async def test_a_docx_whose_text_is_in_a_text_box_is_read(temp_dir: Path):
+    """The text in a text box is the document's text.
+
+    Word's experiment-report templates put the whole document in
+    floating text boxes: the body paragraphs are empty spacers and the
+    visible text is inside `<w:txbxContent>`, which python-docx does
+    not read. The document used to come out with **zero** blocks and be
+    dropped as "no content" - silently.
+    """
+    path = make_docx_with_textbox_file(temp_dir)
+    blocks = await DocxParser().parse(path, "doc1")
+
+    assert blocks
+    text = "\n".join(b.content for b in blocks)
+    assert "测定一阶电路的时间常数" in text
+    # The block says it came from a text box, so the position can be
+    # traced back to the document.
+    assert any(b.meta.get("in_textbox") for b in blocks)
+    assert all(b.meta.get("anchor") for b in blocks)
+
+
+# --------------------------------------------------------------------------
+# AC-E-004 — a scan: the body of the document is a picture
+# --------------------------------------------------------------------------
+
+
+async def test_a_docx_that_is_a_scan_is_read_by_ocr(temp_dir: Path):
+    """A scanned document is a picture with a file name.
+
+    There is not one paragraph of text in it - the words are in the
+    image. Only OCR finds them; without it the file is dropped as "no
+    content" and the user never sees it.
+    """
+    pytest.importorskip("rapidocr_onnxruntime")
+
+    path = make_docx_with_image_file(temp_dir)
+    blocks = await DocxParser().parse(path, "doc1")
+
+    assert blocks
+    ocr_blocks = [b for b in blocks if b.type == "image_ocr"]
+    assert ocr_blocks, f"the scan was not read: {[b.type for b in blocks]}"
+
+    text = " ".join(b.content for b in ocr_blocks)
+    assert "实验报告" in text
+
+    # the picture keeps its place, so the citation can point at it
+    assert all(b.meta.get("in_image") for b in ocr_blocks)
+    assert all(b.meta.get("anchor") for b in ocr_blocks)
+
+
+async def test_a_pptx_whose_slide_is_a_scan_is_read_by_ocr(temp_dir: Path):
+    """The same for a deck: a slide can be a picture of a slide."""
+    pytest.importorskip("rapidocr_onnxruntime")
+
+    path = make_pptx_with_image_file(temp_dir)
+    blocks = await PptxParser().parse(path, "doc1")
+
+    assert blocks
+    ocr_blocks = [b for b in blocks if b.type == "image_ocr"]
+    assert ocr_blocks, f"the scan was not read: {[b.type for b in blocks]}"
+
+    text = " ".join(b.content for b in ocr_blocks)
+    assert "实验报告" in text
+    # the slide it is on is the position
+    assert all(b.meta.get("slide_number") == 1 for b in ocr_blocks)
+    assert all(b.meta.get("anchor") for b in ocr_blocks)
+
+
+async def test_a_scan_that_cannot_be_read_says_why(temp_dir: Path, monkeypatch):
+    """No OCR engine: the file must not vanish.
+
+    AC-E-004 - a file that cannot be read is listed with the reason.
+    Saying "no content" would be a lie: the document has plenty of
+    content, it is a picture of it.
+    """
+    from yuanwork.ingestion.parser import ocr
+
+    monkeypatch.setattr(ocr, "get_engine", lambda: None)
+    monkeypatch.setattr(ocr, "engine_error", lambda: "engine not installed")
+
+    path = make_docx_with_image_file(temp_dir)
+    blocks = await DocxParser().parse(path, "doc1")
+
+    assert blocks
+    placeholder = [b for b in blocks if b.type == "image_placeholder"]
+    assert len(placeholder) == 1
+    assert "图片" in placeholder[0].content
+    assert "engine not installed" in placeholder[0].content
+    # the position is still there - the file is in the index
+    assert placeholder[0].meta.get("anchor")

@@ -8,6 +8,7 @@ startup - nothing is working on it any more.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -15,6 +16,7 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from yuanwork.api.schemas import (
+    FailedFile,
     IngestDirRequest,
     IngestFileRequest,
     IngestJobResponse,
@@ -24,6 +26,94 @@ from yuanwork.api.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: How many failed files a job keeps.
+#:
+#: A workspace can hold a hundred thousand files that nobody can read -
+#: the list is capped so the job row stays a job row, and the real
+#: number is kept beside it (AC-E-004).
+MAX_FAILED_FILES = 300
+
+#: The reasons that are not a failure: the file is in the index, or it
+#: changed and the old version is kept until the user asks for a rebuild
+#: (AC-E-003).
+_NOT_A_FAILURE = ("already_indexed", "modified")
+
+
+def _failure_reason(entry: dict) -> str:
+    """Why this file did not make it into the index - in words."""
+    if entry.get("status") == "error":
+        return str(entry.get("error") or "解析失败")
+    reason = str(entry.get("reason") or "")
+    if reason == "no_content":
+        return "文件里没有可读的文字（可能是扫描件）"
+    return reason or "未知原因"
+
+
+def _collect_failed_files(result: dict) -> tuple[list[dict], int]:
+    """The files the build could not read, and how many there were.
+
+    The files that could not be *read* come first: they are the ones the
+    user has to know about. The unsupported ones come after - there can
+    be a hundred thousand of them, and they are all saying the same
+    thing (AC-E-004).
+    """
+    broken: list[dict] = []
+    unsupported: list[dict] = []
+
+    for entry in result.get("unsupported_files") or []:
+        unsupported.append(
+            {
+                "path": str(entry.get("path") or ""),
+                "error": str(entry.get("reason") or "不支持的文件类型"),
+            }
+        )
+
+    for entry in result.get("files") or []:
+        status = entry.get("status")
+        if status == "error":
+            broken.append(
+                {
+                    "path": str(entry.get("path") or ""),
+                    "error": _failure_reason(entry),
+                }
+            )
+        elif status == "skipped" and entry.get("reason") not in _NOT_A_FAILURE:
+            broken.append(
+                {
+                    "path": str(entry.get("path") or ""),
+                    "error": _failure_reason(entry),
+                }
+            )
+
+    every = broken + unsupported
+    return every[:MAX_FAILED_FILES], len(every)
+
+
+def _parse_failed_files(raw: object) -> list[FailedFile]:
+    """The failed files a job kept - whatever shape they were stored in."""
+    if raw is None or raw == "":
+        return []
+    entries = raw
+    if isinstance(raw, str):
+        try:
+            entries = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(entries, list):
+        return []
+
+    files: list[FailedFile] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        if not path:
+            continue
+        files.append(
+            FailedFile(path=path, error=str(entry.get("error") or "未知原因"))
+        )
+    return files
 
 
 async def _create_job(
@@ -146,21 +236,32 @@ async def rebuild_workspace(
 
 @router.get("/ingest/status/{job_id}", response_model=IngestStatusResponse)
 async def get_ingest_status(job_id: str) -> IngestStatusResponse:
-    """Get the status of an ingestion job."""
+    """The status of an ingestion job.
+
+    `latest` is the job that ran last. The app reads it when it starts:
+    the files the last build could not read are still there after a
+    restart, and the user has to see them (ADR-022, AC-E-004).
+    """
     from yuanwork.api.deps import get_sqlite_store
 
-    job = await get_sqlite_store().get_ingest_job(job_id)
+    store = get_sqlite_store()
+    if job_id == "latest":
+        job = await store.get_latest_ingest_job()
+    else:
+        job = await store.get_ingest_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     return IngestStatusResponse(
-        job_id=job_id,
+        job_id=job["job_id"],
         status=job["status"],
         progress=job["progress"],
         current_file=job.get("current_file"),
         files_done=job["files_done"],
         files_total=job["files_total"],
         error=job.get("error"),
+        failed_files=_parse_failed_files(job.get("failed_files")),
+        failed_total=int(job.get("failed_total") or 0),
     )
 
 
@@ -207,6 +308,7 @@ async def _run_ingest_job(app, job_id: str, path, recursive: bool, force: bool) 
 
         indexed = result.get("indexed", 0)
         errors = result.get("errors", 0)
+        failed, failed_total = _collect_failed_files(result)
 
         if errors and not indexed:
             # Every file failed to parse - that is not a successful run.
@@ -215,6 +317,8 @@ async def _run_ingest_job(app, job_id: str, path, recursive: bool, force: bool) 
                 status="failed",
                 progress=1.0,
                 error=f"{errors} 个文件都没能解析",
+                failed_files=json.dumps(failed, ensure_ascii=False),
+                failed_total=failed_total,
             )
         else:
             await sqlite.upsert_ingest_job(
@@ -222,6 +326,8 @@ async def _run_ingest_job(app, job_id: str, path, recursive: bool, force: bool) 
                 status="completed",
                 progress=1.0,
                 current_file=None,
+                failed_files=json.dumps(failed, ensure_ascii=False),
+                failed_total=failed_total,
             )
     except Exception as e:
         logger.exception(f"Ingest job {job_id} failed")
@@ -260,6 +366,7 @@ async def _run_rebuild_job(app, job_id: str) -> None:
 
         indexed = result.get("indexed", 0)
         errors = result.get("errors", 0)
+        failed, failed_total = _collect_failed_files(result)
 
         if errors and not indexed:
             # Every file failed to parse - that is not a successful run.
@@ -268,6 +375,8 @@ async def _run_rebuild_job(app, job_id: str) -> None:
                 status="failed",
                 progress=1.0,
                 error=f"{errors} 个文件都没能解析",
+                failed_files=json.dumps(failed, ensure_ascii=False),
+                failed_total=failed_total,
             )
         else:
             await sqlite.upsert_ingest_job(
@@ -275,6 +384,8 @@ async def _run_rebuild_job(app, job_id: str) -> None:
                 status="completed",
                 progress=1.0,
                 current_file=None,
+                failed_files=json.dumps(failed, ensure_ascii=False),
+                failed_total=failed_total,
             )
     except Exception as e:
         logger.exception(f"Rebuild job {job_id} failed")

@@ -366,9 +366,20 @@ pub struct KbFile {
 #[tauri::command]
 pub async fn list_kb_files(
     backend: State<'_, BackendHandle>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 ) -> Result<Vec<KbFile>, String> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/kb/files", backend.url());
+    // The list is paged: a knowledge base can hold thousands of files,
+    // and the sidebar shows them a page at a time. The number of files
+    // is not the length of this list - `kb_stats` is where the real
+    // count comes from.
+    let url = format!(
+        "{}/api/v1/kb/files?limit={}&offset={}",
+        backend.url(),
+        limit.unwrap_or(100),
+        offset.unwrap_or(0)
+    );
 
     let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
     // Without checking the status a backend error would come back as an
@@ -387,6 +398,27 @@ pub async fn list_kb_files(
         .collect();
 
     Ok(parsed)
+}
+
+/// How much is in the knowledge base.
+///
+/// The file list is paged, so its length is not the number of files.
+/// This is the number that says how much the build made of the
+/// workspace.
+#[tauri::command]
+pub async fn kb_stats(
+    backend: State<'_, BackendHandle>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/kb/stats", backend.url());
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    Ok(body)
 }
 
 #[tauri::command]

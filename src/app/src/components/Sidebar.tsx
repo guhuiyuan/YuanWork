@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { useAppStore, type WorkspaceEntry } from "../store";
-import { listKbFiles, listWikiPages } from "../api/backend";
+import { latestIngestStatus, listWikiPages } from "../api/backend";
 import { useIngest, entryName } from "../hooks/useIngest";
 import { markOnboarded } from "../api/firstRun";
+import { KbFileRow } from "./KbFileRow";
 
 export function Sidebar() {
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
   const kbFiles = useAppStore((s) => s.kbFiles);
-  const setKbFiles = useAppStore((s) => s.setKbFiles);
+  const kbTotal = useAppStore((s) => s.kbTotal);
+  const kbChunkTotal = useAppStore((s) => s.kbChunkTotal);
+  const setFailedFiles = useAppStore((s) => s.setFailedFiles);
   const setKbLoaded = useAppStore((s) => s.setKbLoaded);
   const setKbError = useAppStore((s) => s.setKbError);
   const wikiPages = useAppStore((s) => s.wikiPages);
@@ -24,9 +27,13 @@ export function Sidebar() {
     addFile,
     rebuild,
     removeEntry,
+    removeFile,
+    loadMoreFiles,
+    refreshFiles,
     refreshWorkspace,
     cancel,
   } = useIngest();
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Load the workspace and the knowledge base on mount.
   //
@@ -52,9 +59,10 @@ export function Sidebar() {
       }
 
       try {
-        const files = await listKbFiles();
+        // The files *and* the real count - the list is a page, so its
+        // length is not the number of files in the knowledge base.
+        const files = await refreshFiles();
         if (gone) return;
-        setKbFiles(files);
         // A knowledge base that already has files means the setup
         // happened - maybe in an earlier version. Without this, deleting
         // the last file would pop the welcome screen over the live chat.
@@ -67,6 +75,14 @@ export function Sidebar() {
         if (!gone) setKbLoaded(true);
       }
 
+      // The files the last build could not read. They are kept in the
+      // database, so they are still there after a restart.
+      const last = await latestIngestStatus();
+      if (!gone && last) {
+        const failed = last.failed_files ?? [];
+        setFailedFiles(failed, last.failed_total ?? failed.length);
+      }
+
       listWikiPages().then(setWikiPages).catch(() => {});
     }
 
@@ -74,7 +90,7 @@ export function Sidebar() {
     return () => {
       gone = true;
     };
-  }, [refreshWorkspace, setKbError, setKbFiles, setKbLoaded, setWikiPages, showToast]);
+  }, [refreshFiles, refreshWorkspace, setFailedFiles, setKbError, setKbLoaded, setWikiPages, showToast]);
 
   return (
     <>
@@ -174,14 +190,116 @@ export function Sidebar() {
           />
         ))}
 
-        {kbFiles.length > 0 && (
-          <div className="ws-count">已索引 {kbFiles.length} 个文件</div>
+        {kbTotal > 0 && (
+          <>
+            <div className="ws-count">
+              已索引 {kbTotal} 个文件
+              {kbChunkTotal > 0 ? ` · ${kbChunkTotal} 个切片` : ""}
+            </div>
+            <div className="kb-list">
+              {kbFiles.map((file) => (
+                <KbFileRow
+                  key={file.doc_id}
+                  file={file}
+                  onDelete={() => removeFile(file.doc_id)}
+                />
+              ))}
+            </div>
+            {kbFiles.length < kbTotal && (
+              <button
+                className="btn btn--more"
+                onClick={async () => {
+                  setLoadingMore(true);
+                  try {
+                    await loadMoreFiles();
+                  } catch (e) {
+                    showToast(`读取失败：${(e as Error).message}`, "error");
+                  } finally {
+                    setLoadingMore(false);
+                  }
+                }}
+                disabled={loadingMore}
+              >
+                {loadingMore
+                  ? "读取中…"
+                  : `加载更多（还有 ${kbTotal - kbFiles.length} 个）`}
+              </button>
+            )}
+          </>
         )}
+
+        <FailedFiles />
       </div>
 
       <style>{sidebarStyles}</style>
     </>
   );
+}
+
+/**
+ * The files the last build could not read.
+ *
+ * The user asked for a folder and saw nothing: the files that could
+ * not be read have to be right there, with the reason - not a count
+ * buried in the log (AC-E-004).
+ *
+ * The list is capped by the backend, and the count is the real one, so
+ * the section says how many there are even when it cannot show them
+ * all.
+ */
+function FailedFiles() {
+  const failedFiles = useAppStore((s) => s.failedFiles);
+  const failedTotal = useAppStore((s) => s.failedTotal);
+  const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+
+  if (failedTotal === 0) return null;
+
+  const shown = showAll ? failedFiles : failedFiles.slice(0, 10);
+
+  return (
+    <>
+      <button
+        className="failed__head"
+        onClick={() => setOpen(!open)}
+        title="这些文件没有进知识库——点开看是哪些、为什么"
+      >
+        <span>读不进来的文件（{failedTotal}）</span>
+        <span>{open ? "▾" : "▸"}</span>
+      </button>
+
+      {open && (
+        <>
+          {shown.map((file) => (
+            <div className="failed__row" key={file.path} title={file.path}>
+              <div className="failed__name">{baseName(file.path)}</div>
+              <div className="failed__reason">{file.error}</div>
+            </div>
+          ))}
+          {failedFiles.length > 10 && (
+            <button
+              className="failed__more"
+              onClick={() => setShowAll(!showAll)}
+            >
+              {showAll ? "收起" : `查看全部 ${failedFiles.length} 个`}
+            </button>
+          )}
+          {failedFiles.length < failedTotal && (
+            <div className="failed__note">
+              还有 {failedTotal - failedFiles.length} 个没有列出
+            </div>
+          )}
+        </>
+      )}
+      <style>{failedStyles}</style>
+    </>
+  );
+}
+
+/** The name of a file - the last piece of its path. */
+function baseName(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : path;
 }
 
 /**
@@ -368,6 +486,16 @@ const sidebarStyles = `
     font-size: 11px;
     color: var(--text-tertiary);
   }
+  .kb-list {
+    margin-top: 4px;
+  }
+  .btn--more {
+    width: 100%;
+    margin-top: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
   .ingest-msg {
     display: flex;
     align-items: center;
@@ -387,4 +515,62 @@ const sidebarStyles = `
     cursor: pointer;
   }
   .ingest-cancel:hover { background: var(--bg-tertiary); }
+`;
+
+/**
+ * The files the build could not read.
+ *
+ * The warning colour is the point: these are the files the user
+ * expected to find and cannot.
+ */
+const failedStyles = `
+  .failed__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-top: 10px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--warning, #b45309);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .failed__head:hover { background: var(--bg-tertiary); }
+  .failed__row {
+    padding: 4px 8px;
+    border-left: 2px solid var(--border);
+    margin-top: 2px;
+  }
+  .failed__name {
+    font-size: 12px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .failed__reason {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .failed__more {
+    width: 100%;
+    margin-top: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .failed__more:hover { background: var(--bg-tertiary); }
+  .failed__note {
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
 `;

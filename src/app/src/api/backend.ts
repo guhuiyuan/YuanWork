@@ -337,6 +337,21 @@ export interface IngestStatus {
   files_done: number;
   files_total: number;
   error: string | null;
+  /** The files the build could not read, with the reason. */
+  failed_files?: FailedFile[];
+  /** How many there were in all - the list above is capped. */
+  failed_total?: number;
+}
+
+/**
+ * A file the build could not read.
+ *
+ * A count of failures says that something went wrong; the user needs
+ * to know *which* file and *why*.
+ */
+export interface FailedFile {
+  path: string;
+  error: string;
 }
 
 /**
@@ -382,12 +397,71 @@ export async function getIngestStatus(jobId: string): Promise<IngestStatus> {
   }
 }
 
-export async function listKbFiles(): Promise<KbFile[]> {
-  if (isTauri) {
-    return invoke<KbFile[]>("list_kb_files");
+/**
+ * The last build's status - null when there was none.
+ *
+ * The files the last build could not read are kept in the database, so
+ * the app can still show them after a restart.
+ */
+export async function latestIngestStatus(): Promise<IngestStatus | null> {
+  try {
+    if (isTauri) {
+      return await invoke<IngestStatus>("get_ingest_status", {
+        jobId: "latest",
+      });
+    }
+    const resp = await fetch(`${BACKEND_BASE}/api/v1/ingest/status/latest`);
+    if (!resp.ok) return null;
+    return (await resp.json()) as IngestStatus;
+  } catch {
+    // No build yet, or the backend is not reachable - the sidebar has
+    // nothing to show, which is not an error worth a toast.
+    return null;
   }
-  const body = await callBackend<{ files: KbFile[] }>("/kb/files");
+}
+
+/** How many files a page of the knowledge base's file list holds. */
+export const KB_PAGE_SIZE = 100;
+
+export async function listKbFiles(): Promise<KbFile[]> {
+  return listKbFilesPage(0, KB_PAGE_SIZE);
+}
+
+/**
+ * One page of the knowledge base's files.
+ *
+ * The list is paged: a knowledge base can hold thousands of files, and
+ * the sidebar shows them a page at a time. The number of files is not
+ * the length of a page - `kbStats` is where the real count comes from.
+ */
+export async function listKbFilesPage(
+  offset = 0,
+  limit = KB_PAGE_SIZE
+): Promise<KbFile[]> {
+  if (isTauri) {
+    return (
+      (await invoke<KbFile[]>("list_kb_files", { limit, offset })) ?? []
+    );
+  }
+  const body = await callBackend<{ files: KbFile[] }>(
+    `/kb/files?limit=${limit}&offset=${offset}`
+  );
   return body.files ?? [];
+}
+
+/** How much is in the knowledge base. */
+export interface KbStats {
+  total_files: number;
+  total_chunks: number;
+  by_type?: Record<string, number>;
+}
+
+export async function kbStats(): Promise<KbStats> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("kb_stats");
+    return toJson<KbStats>(raw);
+  }
+  return callBackend<KbStats>("/kb/stats");
 }
 
 /**

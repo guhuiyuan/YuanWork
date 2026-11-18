@@ -31,6 +31,28 @@ test("the ingest state starts out idle", () => {
   assert.equal(state.ingestFolder, null);
 });
 
+test("the store keeps the number of files, not just the page", () => {
+  // The file list is paged - the count is a number of its own.
+  const store = useAppStore.getState();
+  store.setKbTotal(4350);
+  store.setKbChunkTotal(58712);
+  let state = useAppStore.getState();
+  assert.equal(state.kbTotal, 4350);
+  assert.equal(state.kbChunkTotal, 58712);
+
+  state.setFailedFiles([{ path: "D:\\kb\\a.docx", error: "解析失败" }], 7);
+  state = useAppStore.getState();
+  assert.equal(state.failedFiles.length, 1);
+  // the list is capped - the count is the real one
+  assert.equal(state.failedTotal, 7);
+
+  state.setKbTotal(0);
+  state.setFailedFiles([]);
+  state = useAppStore.getState();
+  assert.equal(state.kbTotal, 0);
+  assert.equal(state.failedTotal, 0);
+});
+
 test("the ingest state can be set and cleared", () => {
   const store = useAppStore.getState();
   store.setIngestState({ ingesting: true, message: "正在索引…", folder: "/kb" });
@@ -71,6 +93,21 @@ test("a completed index marks the setup as done", () => {
   assert.match(hookSource, /markOnboarded\(\)/);
 });
 
+test("the files the build could not read are kept for the sidebar", () => {
+  // AC-E-004: the file and the reason. A count alone is not enough.
+  assert.match(hookSource, /setFailedFiles\(failed, status\.failed_total/);
+});
+
+test("the count of indexed files comes from the stats, not from the page", () => {
+  // The file list is a page - its length is not the number of files.
+  assert.match(hookSource, /kbStats\(\)/);
+  assert.match(hookSource, /kbTotal/);
+});
+
+test("the build says how many files it read and how many it could not", () => {
+  assert.match(hookSource, /个文件读不进来/);
+});
+
 test("a failed index does not mark the setup as done", () => {
   // The `markOnboarded()` call must be inside the completed branch.
   const completedAt = hookSource.indexOf('status.status === "completed"');
@@ -81,7 +118,7 @@ test("a failed index does not mark the setup as done", () => {
 });
 
 test("a failed index stops the polling", () => {
-  assert.match(hookSource, /status\.status === "failed"[\s\S]{0,200}return false;/);
+  assert.match(hookSource, /status\.status === "failed"[\s\S]{0,400}return false;/);
 });
 
 test("a stuck request is only fatal after fifteen of them", () => {

@@ -182,10 +182,65 @@ def make_docx_file(
     return path
 
 
+#: A Word text box (the VML shape Word writes for floating boxes).
+#:
+#: Word templates often put the whole document in one: the body
+#: paragraphs are empty spacers and the visible text is inside
+#: `<w:txbxContent>` - which python-docx does not read.
+_TEXT_BOX_XML = (
+    '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:v="urn:schemas-microsoft-com:vml" '
+    'xmlns:w10="urn:schemas-microsoft-com:office:word">'
+    "<w:r><w:pict>"
+    '<v:shape id="TextBox1" type="#_x0000_t202" '
+    'style="width:300pt;height:100pt" filled="f" stroked="f">'
+    "<v:textbox><w:txbxContent>"
+    '<w:p><w:r><w:t>{text}</w:t></w:r></w:p>'
+    "</w:txbxContent></v:textbox>"
+    "</v:shape>"
+    "</w:pict></w:r></w:p>"
+)
+
+
+def make_docx_with_textbox_file(
+    dir_path: Path,
+    name: str = "textbox.docx",
+    text: str = "实验目的：测定一阶电路的时间常数。",
+) -> Path:
+    """A .docx whose visible text lives in a text box.
+
+    Word's experiment-report templates are written like this: the body
+    paragraphs are empty and the text is in a floating text box. The
+    parser has to read it, or the document is dropped as "no content".
+    """
+    import zipfile
+
+    from docx import Document
+
+    path = dir_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    doc.add_paragraph("")  # the empty spacer Word leaves behind
+    doc.save(path)
+
+    with zipfile.ZipFile(path) as source:
+        names = source.namelist()
+        blobs = {item: source.read(item) for item in names}
+
+    xml = blobs["word/document.xml"].decode("utf-8")
+    box = _TEXT_BOX_XML.format(text=text)
+    xml = xml.replace("</w:body>", box + "</w:body>", 1)
+    blobs["word/document.xml"] = xml.encode("utf-8")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as target:
+        for item in names:
+            target.writestr(item, blobs[item])
+    return path
+
+
 def make_docx_with_table_file(
     dir_path: Path,
-    name: str = "table.docx",
-    rows: list[list[str]] | None = None,
+    name: str = "table.docx",    rows: list[list[str]] | None = None,
 ) -> Path:
     """A .docx containing a table."""
     from docx import Document
@@ -228,6 +283,88 @@ def make_docx_with_text_and_table_file(
         for c, value in enumerate(row):
             table.cell(r, c).text = value
     doc.save(path)
+    return path
+
+
+# --------------------------------------------------------------------------
+# scans: a document whose body is a picture
+# --------------------------------------------------------------------------
+
+
+def render_text_image(
+    dir_path: Path,
+    name: str = "scan.png",
+    text: str = "实验报告 热力学",
+    width: int = 900,
+    height: int = 160,
+) -> Path:
+    """A picture of the given text - what a scan looks like."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    path = dir_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+    font = None
+    for candidate in (
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+    ):
+        if Path(candidate).exists():
+            try:
+                font = ImageFont.truetype(candidate, 56)
+                break
+            except Exception:
+                pass
+    if font is None:
+        font = ImageFont.load_default()
+    draw.text((30, 40), text, fill="black", font=font)
+    img.save(path)
+    return path
+
+
+def make_docx_with_image_file(
+    dir_path: Path,
+    name: str = "scan.docx",
+    text: str = "实验报告 热力学",
+) -> Path:
+    """A .docx whose body is a picture of the text - a scan.
+
+    There is not one paragraph of text in it: the words are in the
+    image, so only OCR can find them. Without OCR the file is dropped
+    as "no content", and the user never sees it.
+    """
+    from docx import Document
+
+    path = dir_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = render_text_image(dir_path / f"{name}.png", text=text)
+
+    doc = Document()
+    doc.add_picture(str(image))
+    doc.save(path)
+    return path
+
+
+def make_pptx_with_image_file(
+    dir_path: Path,
+    name: str = "scan.pptx",
+    text: str = "实验报告 热力学",
+) -> Path:
+    """A .pptx whose slide is a picture of the text - a scanned deck."""
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    path = dir_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = render_text_image(dir_path / f"{name}.png", text=text)
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # the blank layout
+    slide.shapes.add_picture(str(image), Inches(0.5), Inches(1.5))
+    prs.save(path)
     return path
 
 

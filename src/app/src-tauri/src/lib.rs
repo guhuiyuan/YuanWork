@@ -53,6 +53,7 @@ pub fn run() {
             commands::get_api_key,
             commands::set_api_key,
             commands::list_kb_files,
+            commands::kb_stats,
             commands::delete_kb_file,
             commands::list_wiki_pages,
             commands::get_wiki_page,

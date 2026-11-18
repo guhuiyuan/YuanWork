@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -218,6 +219,143 @@ def test_the_finished_jobs_can_be_collected(store: SQLiteStore):
         assert await store.list_ingest_jobs() == []
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# AC-E-004 — the files the build could not read
+# --------------------------------------------------------------------------
+
+
+async def test_the_failed_files_are_kept_and_come_back_with_the_status(
+    client, store: SQLiteStore
+):
+    """A count of failures says that something went wrong.
+
+    The user needs to know *which* file and *why* - so the list of
+    failures is part of the job's state, not just a number.
+    """
+    await store.upsert_ingest_job(
+        job_id="j1",
+        status="completed",
+        failed_files=json.dumps(
+            [{"path": "D:\\kb\\扫描件.docx", "error": "文件里没有可读的文字"}]
+        ),
+        failed_total=1,
+    )
+
+    body = client.get("/api/v1/ingest/status/j1").json()
+
+    assert body["failed_files"] == [
+        {"path": "D:\\kb\\扫描件.docx", "error": "文件里没有可读的文字"}
+    ]
+    assert body["failed_total"] == 1
+
+
+async def test_the_count_of_failed_files_is_the_real_one(client, store: SQLiteStore):
+    """The list is capped - the count is not."""
+    await store.upsert_ingest_job(
+        job_id="j2",
+        status="completed",
+        failed_files=json.dumps([{"path": "D:\\kb\\a.mp4", "error": "不支持的文件类型"}]),
+        failed_total=150000,
+    )
+
+    body = client.get("/api/v1/ingest/status/j2").json()
+
+    assert len(body["failed_files"]) == 1
+    assert body["failed_total"] == 150000
+
+
+async def test_a_job_without_failures_reports_none(client, store: SQLiteStore):
+    await store.upsert_ingest_job(job_id="j3", status="completed")
+
+    body = client.get("/api/v1/ingest/status/j3").json()
+
+    assert body["failed_files"] == []
+    assert body["failed_total"] == 0
+
+
+async def test_the_last_build_can_be_read_after_a_restart(client, store: SQLiteStore):
+    """The app reads the last job when it starts.
+
+    The files the last build could not read are kept in the database -
+    so the user still sees them after the app was closed.
+    """
+    await store.upsert_ingest_job(
+        job_id="old",
+        status="completed",
+        failed_files=json.dumps([{"path": "D:\\kb\\a.docx", "error": "解析失败"}]),
+        failed_total=1,
+    )
+    await store.upsert_ingest_job(
+        job_id="new",
+        status="completed",
+        failed_files=json.dumps([]),
+        failed_total=0,
+    )
+
+    body = client.get("/api/v1/ingest/status/latest").json()
+
+    assert body["job_id"] == "new"
+
+
+def test_the_last_job_is_404_when_there_was_none(client, store: SQLiteStore):
+    """No build yet is not an error the app needs to shout about."""
+    assert client.get("/api/v1/ingest/status/latest").status_code == 404
+
+
+def test_the_failed_files_are_collected_from_the_build_result():
+    """What the build says about a file is what the app shows.
+
+    The files that could not be *read* come first: the unsupported ones
+    can be a hundred thousand, and they are all saying the same thing.
+    """
+    from yuanwork.api.routes.ingest import _collect_failed_files
+
+    result = {
+        "files": [
+            {"path": "D:\\kb\\坏了.docx", "status": "error", "error": "ValueError('x')"},
+            {"path": "D:\\kb\\空.md", "status": "skipped", "reason": "no_content"},
+            {"path": "D:\\kb\\大了.pdf", "status": "skipped", "reason": "文件超过体积上限"},
+            {"path": "D:\\kb\\旧的.docx", "status": "skipped", "reason": "already_indexed"},
+            {"path": "D:\\kb\\改过的.docx", "status": "skipped", "reason": "modified"},
+            {"path": "D:\\kb\\好的.docx", "status": "indexed"},
+        ],
+        "unsupported_files": [
+            {"path": "D:\\kb\\a.mp4", "reason": "不支持的文件类型：.mp4"}
+        ],
+    }
+
+    failed, total = _collect_failed_files(result)
+
+    assert total == 4
+    assert [f["path"] for f in failed] == [
+        "D:\\kb\\坏了.docx",
+        "D:\\kb\\空.md",
+        "D:\\kb\\大了.pdf",
+        "D:\\kb\\a.mp4",
+    ]
+    assert failed[0]["error"] == "ValueError('x')"
+    # the reason is in words, not in a code
+    assert "没有可读的文字" in failed[1]["error"]
+    assert failed[3]["error"] == "不支持的文件类型：.mp4"
+
+
+def test_the_failed_file_list_is_capped_but_the_count_is_not():
+    """A workspace can hold a hundred thousand files nobody can read."""
+    from yuanwork.api.routes.ingest import MAX_FAILED_FILES, _collect_failed_files
+
+    result = {
+        "files": [],
+        "unsupported_files": [
+            {"path": f"D:\\kb\\{i}.mp4", "reason": "不支持的文件类型"} for i in range(500)
+        ],
+    }
+
+    failed, total = _collect_failed_files(result)
+
+    assert len(failed) == MAX_FAILED_FILES
+    assert total == 500
 
 
 # --------------------------------------------------------------------------

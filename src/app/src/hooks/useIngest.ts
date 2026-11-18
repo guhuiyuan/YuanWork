@@ -3,8 +3,12 @@ import { useAppStore, type WorkspaceEntry } from "../store.ts";
 import {
   addWorkspaceFile,
   addWorkspaceFolder,
+  deleteKbFile,
   getIngestStatus,
+  kbStats,
+  KB_PAGE_SIZE,
   listKbFiles,
+  listKbFilesPage,
   listWorkspaceEntries,
   pickFile,
   pickFolder,
@@ -67,6 +71,9 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  */
 export function useIngest() {
   const setKbFiles = useAppStore((s) => s.setKbFiles);
+  const setKbTotal = useAppStore((s) => s.setKbTotal);
+  const setKbChunkTotal = useAppStore((s) => s.setKbChunkTotal);
+  const setFailedFiles = useAppStore((s) => s.setFailedFiles);
   const setCurrentFolder = useAppStore((s) => s.setCurrentFolder);
   const showToast = useAppStore((s) => s.showToast);
   const setIngestState = useAppStore((s) => s.setIngestState);
@@ -78,11 +85,30 @@ export function useIngest() {
   const message = useAppStore((s) => s.ingestMessage);
   const folder = useAppStore((s) => s.ingestFolder);
 
+  /**
+   * How many files the knowledge base holds.
+   *
+   * The file list is paged, so its length is not the number - this is
+   * the number the sidebar shows.
+   */
+  const refreshStats = useCallback(async () => {
+    const stats = await kbStats();
+    setKbTotal(stats.total_files ?? 0);
+    setKbChunkTotal(stats.total_chunks ?? 0);
+  }, [setKbTotal, setKbChunkTotal]);
+
   const refreshFiles = useCallback(async () => {
     const files = await listKbFiles();
     setKbFiles(files);
+    // The count is a nicety - a failure here must not throw away the
+    // file list that was just read.
+    try {
+      await refreshStats();
+    } catch {
+      /* the count stays what it was */
+    }
     return files;
-  }, [setKbFiles]);
+  }, [setKbFiles, refreshStats]);
 
   /** The same, but a failed read is not worth failing a build over. */
   const refreshFilesQuietly = useCallback(async () => {
@@ -92,6 +118,40 @@ export function useIngest() {
       return useAppStore.getState().kbFiles;
     }
   }, [refreshFiles]);
+
+  /**
+   * The next page of the file list.
+   *
+   * The list is paged - a knowledge base can hold thousands of files -
+   * and the page that is loaded is appended to what is already there.
+   */
+  const loadMoreFiles = useCallback(async () => {
+    const loaded = useAppStore.getState().kbFiles.length;
+    const page = await listKbFilesPage(loaded, KB_PAGE_SIZE);
+    if (page.length > 0) {
+      setKbFiles([...useAppStore.getState().kbFiles, ...page]);
+    }
+    return page;
+  }, [setKbFiles]);
+
+  /**
+   * Take a file out of the knowledge base.
+   *
+   * Only the index is touched - the file stays where it is on disk.
+   */
+  const removeFile = useCallback(
+    async (docId: string) => {
+      try {
+        await deleteKbFile(docId);
+      } catch (e) {
+        showToast(`移除失败：${(e as Error).message}`, "error");
+        return;
+      }
+      await refreshFilesQuietly();
+      showToast("已从知识库移除（文件仍保留在磁盘上）", "success");
+    },
+    [refreshFilesQuietly, showToast]
+  );
 
   /**
    * Read the workspace entries.
@@ -177,21 +237,38 @@ export function useIngest() {
       if (cancelled()) return false;
 
       if (status.status === "completed") {
+        // The files the build could not read, with the reason - the
+        // user has to see them, not just a count.
+        const failed = status.failed_files ?? [];
+        setFailedFiles(failed, status.failed_total ?? failed.length);
         const files = await refreshFilesQuietly();
         await refreshWorkspaceQuietly();
         // Only now is the setup actually done: an index run that
         // failed must leave the welcome screen in place.
         markOnboarded();
         setIngestState({ ingesting: false, message: "索引完成" });
-        showToast(
-          files.length
-            ? `已索引 ${files.length} 个文件`
-            : "工作域里没有可索引的文件",
-          files.length ? "success" : "info"
-        );
+        // The real number - the file list is a page, not the count.
+        const indexed = useAppStore.getState().kbTotal || files.length;
+        const total = status.failed_total ?? failed.length;
+        if (total > 0) {
+          // The build did not fail - it read what it could. Say so.
+          showToast(
+            `已索引 ${indexed} 个文件，${total} 个文件读不进来（见侧栏）`,
+            "info"
+          );
+        } else {
+          showToast(
+            indexed
+              ? `已索引 ${indexed} 个文件`
+              : "工作域里没有可索引的文件",
+            indexed ? "success" : "info"
+          );
+        }
         return true;
       }
       if (status.status === "failed") {
+        const failed = status.failed_files ?? [];
+        setFailedFiles(failed, status.failed_total ?? failed.length);
         setIngestState({ ingesting: false, message: null });
         showToast(`索引失败：${status.error ?? "未知错误"}`, "error");
         return false;
@@ -211,7 +288,7 @@ export function useIngest() {
       });
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     }
-  }, [refreshFilesQuietly, refreshWorkspaceQuietly, setIngestState, showToast]);
+  }, [refreshFilesQuietly, refreshWorkspaceQuietly, setFailedFiles, setIngestState, showToast]);
 
   /**
    * Show the folder picker and add what the user chooses to the
@@ -322,6 +399,8 @@ export function useIngest() {
     addFile,
     rebuild,
     removeEntry,
+    removeFile,
+    loadMoreFiles,
     refreshFiles,
     refreshWorkspace,
     cancel,

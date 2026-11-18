@@ -2,11 +2,12 @@
  * The workspace: the folders and the single files the app works on.
  *
  * The workspace is the scope of the whole app - the build runs over
- * its entries, and the sidebar lists them instead of the indexed
- * files. These tests pin the three things that have to hold:
- * the API calls go to the right endpoints, the store keeps the
- * entries, and the screens say the truth about what removing an entry
- * does.
+ * its entries, and the sidebar lists them. Beside them it lists what
+ * the build made of them: the files that are in the knowledge base,
+ * and the files it could not read (AC-E-004). These tests pin the
+ * three things that have to hold: the API calls go to the right
+ * endpoints, the store keeps the entries, and the screens say the
+ * truth about what removing an entry does.
  */
 
 import { test } from "node:test";
@@ -233,11 +234,28 @@ test("the sidebar lists the workspace entries", () => {
   assert.match(sidebarSource, /useAppStore\(\(s\) => s\.workspaceEntries\)/);
 });
 
-test("the sidebar does not list the knowledge base files", () => {
-  // The workspace is the scope of the app - the indexed files are what
-  // the build made of it, not what the user set up.
-  assert.doesNotMatch(sidebarSource, /kbFiles\.map\(/);
-  assert.doesNotMatch(sidebarSource, /KbFileRow/);
+test("the sidebar lists the indexed files as well as the workspace", () => {
+  // The user asked for a folder and saw nothing - "which files are in
+  // the knowledge base" is a question the app has to answer. The
+  // workspace says what the user set up; the file list says what the
+  // build made of it.
+  assert.match(sidebarSource, /workspaceEntries\.map\(/);
+  assert.match(sidebarSource, /kbFiles\.map\(/);
+  assert.match(sidebarSource, /KbFileRow/);
+});
+
+test("the file count is the real one, not the length of a page", () => {
+  // The list is paged - the array length is the page, not the count.
+  assert.match(sidebarSource, /已索引 \{kbTotal\} 个文件/);
+  assert.doesNotMatch(sidebarSource, /已索引 \{kbFiles\.length\} 个文件/);
+});
+
+test("the files that could not be read are in the sidebar", () => {
+  // AC-E-004: the file is listed and the reason is given. A count
+  // alone says that something went wrong, not what.
+  assert.match(sidebarSource, /读不进来的文件/);
+  assert.match(sidebarSource, /failedTotal/);
+  assert.match(sidebarSource, /file\.error/);
 });
 
 test("a row says what the entry is", () => {

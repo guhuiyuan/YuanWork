@@ -69,6 +69,17 @@ class IngestJobResponse(BaseModel):
     estimated_seconds: float | None = None
 
 
+class FailedFile(BaseModel):
+    """A file the build could not read, and why.
+
+    A count of failures says that something went wrong; the user needs
+    to know which file and why (AC-E-004).
+    """
+
+    path: str
+    error: str
+
+
 class IngestStatusResponse(BaseModel):
     """Status of an ingestion job."""
 
@@ -79,6 +90,11 @@ class IngestStatusResponse(BaseModel):
     files_done: int = 0
     files_total: int = 0
     error: str | None = None
+    #: The files the build could not read.
+    failed_files: list[FailedFile] = Field(default_factory=list)
+    #: How many files there were in all - the list above is capped, so
+    #: this is the number that says whether anything is missing.
+    failed_total: int = 0
 
 
 class KBFileInfo(BaseModel):

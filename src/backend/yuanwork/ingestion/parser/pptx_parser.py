@@ -24,10 +24,20 @@ class PptxParser(BaseParser):
 
     async def parse(self, file_path: Path, doc_id: str) -> list[RawBlock]:
         """Parse PPTX into slide-level blocks."""
-        return await asyncio.to_thread(self._parse_sync, file_path, doc_id)
+        blocks, images = await asyncio.to_thread(self._parse_sync, file_path, doc_id)
+        if images:
+            blocks.extend(await self._image_blocks(doc_id, images, blocks))
+        return blocks
 
-    def _parse_sync(self, file_path: Path, doc_id: str) -> list[RawBlock]:
-        """Synchronous PPTX parsing - core logic."""
+    def _parse_sync(
+        self, file_path: Path, doc_id: str
+    ) -> tuple[list[RawBlock], list[tuple[int, str, bytes]]]:
+        """Synchronous PPTX parsing - core logic.
+
+        Returns the blocks and the pictures on the slides - the pictures
+        are read after this, because OCR is not something to do inside a
+        thread.
+        """
         from pptx import Presentation
         from pptx.util import Emu
 
@@ -120,7 +130,86 @@ class PptxParser(BaseParser):
                     )
                 )
 
-        return blocks
+        return blocks, self._images(prs)
+
+    async def _image_blocks(
+        self,
+        doc_id: str,
+        images: list[tuple[int, str, bytes]],
+        text_blocks: list[RawBlock],
+    ) -> list[RawBlock]:
+        """The text in the pictures on the slides.
+
+        A slide that is a picture of a slide - a scan that came in as a
+        .pptx - has its text in the image, not in a text frame. The
+        picture keeps the slide it is on, so the citation can point at
+        it (AC-E-004).
+        """
+        from yuanwork.ingestion.parser.ocr import engine_error, ocr_bytes
+
+        blocks: list[RawBlock] = []
+        read_any = False
+
+        for index, (slide_number, name, data) in enumerate(images):
+            lines = await ocr_bytes(data)
+            if not lines:
+                continue
+            read_any = True
+            for line_index, line in enumerate(lines):
+                blocks.append(
+                    RawBlock(
+                        block_id=f"{doc_id}_img{index}_ocr{line_index}",
+                        doc_id=doc_id,
+                        content=f"[OCR] {line}",
+                        type="image_ocr",
+                        meta={
+                            "in_image": True,
+                            "image_index": index,
+                            "image_name": name,
+                            "line_index": line_index,
+                            "slide_number": slide_number,
+                            "anchor": make_anchor("slide", slide=slide_number),
+                        },
+                    )
+                )
+
+        if text_blocks or read_any:
+            return blocks
+
+        # The deck has nothing but pictures, and no text came out of
+        # them. Say why.
+        reason = engine_error() or "图片里没有识别出文字"
+        return [
+            RawBlock(
+                block_id=f"{doc_id}_image_placeholder",
+                doc_id=doc_id,
+                content=(
+                    f"[图片幻灯片] 这份演示的正文是图片（{len(images)} 张），"
+                    f"文字读不出来：{reason}"
+                ),
+                type="image_placeholder",
+                meta={
+                    "in_image": True,
+                    "image_count": len(images),
+                    "anchor": make_anchor("slide", slide=1),
+                },
+            )
+        ]
+
+    @staticmethod
+    def _images(prs) -> list[tuple[int, str, bytes]]:
+        """The pictures on the slides, with the slide they are on."""
+        images: list[tuple[int, str, bytes]] = []
+        for slide_idx, slide in enumerate(prs.slides, start=1):
+            for shape in slide.shapes:
+                try:
+                    image = shape.image
+                    blob = image.blob
+                except Exception:  # noqa: BLE001 - a shape without a picture
+                    continue
+                name = getattr(image, "filename", "") or f"slide{slide_idx}"
+                images.append((slide_idx, name, blob))
+        return images
 
     def _table_to_markdown(self, table) -> str:
         """Convert a pptx table to Markdown."""
