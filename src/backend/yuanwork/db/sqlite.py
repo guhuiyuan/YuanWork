@@ -333,6 +333,10 @@ CREATE TABLE IF NOT EXISTS ingest_jobs (
     -- workspace can hold a hundred thousand files nobody can read, and
     -- the number has to stay true even when the list does not.
     failed_total INTEGER DEFAULT 0,
+    -- How many of them are a format nobody supports - a different
+    -- problem from "could not be read", and the user should not have
+    -- to tell them apart.
+    unsupported_total INTEGER DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -576,6 +580,10 @@ class SQLiteStore:
             (
                 "failed_total",
                 "ALTER TABLE ingest_jobs ADD COLUMN failed_total INTEGER DEFAULT 0",
+            ),
+            (
+                "unsupported_total",
+                "ALTER TABLE ingest_jobs ADD COLUMN unsupported_total INTEGER DEFAULT 0",
             ),
         ):
             if column not in existing:
@@ -2078,6 +2086,7 @@ class SQLiteStore:
         current_file: Any = _UNSET,
         failed_files: Any = _UNSET,
         failed_total: Any = _UNSET,
+        unsupported_total: Any = _UNSET,
     ) -> None:
         """Record the state of an ingestion job.
 
@@ -2099,6 +2108,7 @@ class SQLiteStore:
                 "current_file": None,
                 "failed_files": "[]",
                 "failed_total": 0,
+                "unsupported_total": 0,
             }
         else:
             current = {
@@ -2110,6 +2120,7 @@ class SQLiteStore:
                 "current_file": existing.get("current_file"),
                 "failed_files": existing.get("failed_files") or "[]",
                 "failed_total": existing.get("failed_total") or 0,
+                "unsupported_total": existing.get("unsupported_total") or 0,
             }
 
         values = {
@@ -2121,6 +2132,7 @@ class SQLiteStore:
             "current_file": current["current_file"],
             "failed_files": current["failed_files"],
             "failed_total": current["failed_total"],
+            "unsupported_total": current["unsupported_total"],
         }
         for key, value in (
             ("status", status),
@@ -2131,6 +2143,7 @@ class SQLiteStore:
             ("current_file", current_file),
             ("failed_files", failed_files),
             ("failed_total", failed_total),
+            ("unsupported_total", unsupported_total),
         ):
             if value is not _UNSET:
                 values[key] = value
@@ -2140,8 +2153,9 @@ class SQLiteStore:
             """
             INSERT INTO ingest_jobs
                 (job_id, status, progress, files_done, files_total, error,
-                 current_file, failed_files, failed_total, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 current_file, failed_files, failed_total, unsupported_total,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status,
                 progress = excluded.progress,
@@ -2151,6 +2165,7 @@ class SQLiteStore:
                 current_file = excluded.current_file,
                 failed_files = excluded.failed_files,
                 failed_total = excluded.failed_total,
+                unsupported_total = excluded.unsupported_total,
                 updated_at = excluded.updated_at
             """,
             (
@@ -2163,6 +2178,7 @@ class SQLiteStore:
                 values["current_file"],
                 values["failed_files"],
                 values["failed_total"],
+                values["unsupported_total"],
                 now,
                 now,
             ),

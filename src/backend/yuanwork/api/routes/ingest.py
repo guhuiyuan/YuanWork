@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
@@ -39,24 +40,41 @@ MAX_FAILED_FILES = 300
 #: (AC-E-003).
 _NOT_A_FAILURE = ("already_indexed", "modified")
 
+#: The old binary formats are registered as supported but cannot be
+#: read (AC-E-004) - the reason has to be in words, not in a stack.
+_LEGACY_EXTENSIONS = (".doc", ".ppt", ".xls")
+
+#: The errors the old binary formats produce.
+_LEGACY_ERRORS = ("BadZipFile", "KeyError", "PackageNotFoundError")
+
 
 def _failure_reason(entry: dict) -> str:
     """Why this file did not make it into the index - in words."""
     if entry.get("status") == "error":
-        return str(entry.get("error") or "解析失败")
+        error = str(entry.get("error") or "")
+        suffix = Path(str(entry.get("path") or "")).suffix.lower()
+        if suffix in _LEGACY_EXTENSIONS and any(
+            error.startswith(prefix) for prefix in _LEGACY_ERRORS
+        ):
+            return f"旧版二进制格式（{suffix}）读不出来，请另存为新版"
+        return error or "解析失败"
     reason = str(entry.get("reason") or "")
     if reason == "no_content":
-        return "文件里没有可读的文字（可能是扫描件）"
+        return "文件里没有可读的文字（空文件，或正文是图片）"
     return reason or "未知原因"
 
 
-def _collect_failed_files(result: dict) -> tuple[list[dict], int]:
+def _collect_failed_files(result: dict) -> tuple[list[dict], int, int]:
     """The files the build could not read, and how many there were.
 
     The files that could not be *read* come first: they are the ones the
     user has to know about. The unsupported ones come after - there can
     be a hundred thousand of them, and they are all saying the same
     thing (AC-E-004).
+
+    Returns the list (capped), how many there were in all, and how many
+    of them are simply a format nobody supports - the two are different
+    problems and the user should not have to tell them apart.
     """
     broken: list[dict] = []
     unsupported: list[dict] = []
@@ -87,7 +105,28 @@ def _collect_failed_files(result: dict) -> tuple[list[dict], int]:
             )
 
     every = broken + unsupported
-    return every[:MAX_FAILED_FILES], len(every)
+    return every[:MAX_FAILED_FILES], len(every), len(unsupported)
+
+
+def _job_outcome(result: dict) -> tuple[str, str | None]:
+    """Did the build do its job?
+
+    A build that found everything already in the index **did** its job:
+    the files it could not read are the ones it could not read before,
+    not a new failure. Only a build that read nothing and failed at
+    everything is a failure - otherwise the app would say "索引失败"
+    after a rebuild that changed nothing.
+    """
+    indexed = result.get("indexed", 0)
+    errors = result.get("errors", 0)
+    already = sum(
+        1
+        for item in result.get("files", [])
+        if item.get("reason") in ("already_indexed", "modified")
+    )
+    if errors and not indexed and not already:
+        return "failed", f"{errors} 个文件都没能解析"
+    return "completed", None
 
 
 def _parse_failed_files(raw: object) -> list[FailedFile]:
@@ -146,8 +185,6 @@ async def ingest_directory(
 
     This kicks off a background job. Poll /ingest/status/{job_id} for progress.
     """
-    from pathlib import Path
-
     path = Path(body.path)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {body.path}")
@@ -185,8 +222,6 @@ async def ingest_file(
     background_tasks: BackgroundTasks,
 ) -> IngestJobResponse:
     """Ingest a single file."""
-    from pathlib import Path
-
     path = Path(body.path)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {body.path}")
@@ -262,6 +297,7 @@ async def get_ingest_status(job_id: str) -> IngestStatusResponse:
         error=job.get("error"),
         failed_files=_parse_failed_files(job.get("failed_files")),
         failed_total=int(job.get("failed_total") or 0),
+        unsupported_total=int(job.get("unsupported_total") or 0),
     )
 
 
@@ -306,29 +342,19 @@ async def _run_ingest_job(app, job_id: str, path, recursive: bool, force: bool) 
             path, recursive=recursive, force=force, on_progress=_on_progress
         )
 
-        indexed = result.get("indexed", 0)
-        errors = result.get("errors", 0)
-        failed, failed_total = _collect_failed_files(result)
+        failed, failed_total, unsupported_total = _collect_failed_files(result)
+        status, error = _job_outcome(result)
 
-        if errors and not indexed:
-            # Every file failed to parse - that is not a successful run.
-            await sqlite.upsert_ingest_job(
-                job_id=job_id,
-                status="failed",
-                progress=1.0,
-                error=f"{errors} 个文件都没能解析",
-                failed_files=json.dumps(failed, ensure_ascii=False),
-                failed_total=failed_total,
-            )
-        else:
-            await sqlite.upsert_ingest_job(
-                job_id=job_id,
-                status="completed",
-                progress=1.0,
-                current_file=None,
-                failed_files=json.dumps(failed, ensure_ascii=False),
-                failed_total=failed_total,
-            )
+        await sqlite.upsert_ingest_job(
+            job_id=job_id,
+            status=status,
+            progress=1.0,
+            error=error,
+            current_file=None,
+            failed_files=json.dumps(failed, ensure_ascii=False),
+            failed_total=failed_total,
+            unsupported_total=unsupported_total,
+        )
     except Exception as e:
         logger.exception(f"Ingest job {job_id} failed")
         await sqlite.upsert_ingest_job(
@@ -364,29 +390,19 @@ async def _run_rebuild_job(app, job_id: str) -> None:
         pipeline = IngestionPipeline.from_app(app)
         result = await pipeline.build_workspace(on_progress=_on_progress)
 
-        indexed = result.get("indexed", 0)
-        errors = result.get("errors", 0)
-        failed, failed_total = _collect_failed_files(result)
+        failed, failed_total, unsupported_total = _collect_failed_files(result)
+        status, error = _job_outcome(result)
 
-        if errors and not indexed:
-            # Every file failed to parse - that is not a successful run.
-            await sqlite.upsert_ingest_job(
-                job_id=job_id,
-                status="failed",
-                progress=1.0,
-                error=f"{errors} 个文件都没能解析",
-                failed_files=json.dumps(failed, ensure_ascii=False),
-                failed_total=failed_total,
-            )
-        else:
-            await sqlite.upsert_ingest_job(
-                job_id=job_id,
-                status="completed",
-                progress=1.0,
-                current_file=None,
-                failed_files=json.dumps(failed, ensure_ascii=False),
-                failed_total=failed_total,
-            )
+        await sqlite.upsert_ingest_job(
+            job_id=job_id,
+            status=status,
+            progress=1.0,
+            error=error,
+            current_file=None,
+            failed_files=json.dumps(failed, ensure_ascii=False),
+            failed_total=failed_total,
+            unsupported_total=unsupported_total,
+        )
     except Exception as e:
         logger.exception(f"Rebuild job {job_id} failed")
         await sqlite.upsert_ingest_job(

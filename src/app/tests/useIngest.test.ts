@@ -95,7 +95,7 @@ test("a completed index marks the setup as done", () => {
 
 test("the files the build could not read are kept for the sidebar", () => {
   // AC-E-004: the file and the reason. A count alone is not enough.
-  assert.match(hookSource, /setFailedFiles\(failed, status\.failed_total/);
+  assert.match(hookSource, /setFailedFiles\(\s*failed,\s*status\.failed_total/);
 });
 
 test("the count of indexed files comes from the stats, not from the page", () => {

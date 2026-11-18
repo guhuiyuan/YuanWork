@@ -72,5 +72,11 @@ test("the failed files are kept in the store", () => {
 });
 
 test("the build hands the failures to the store", () => {
-  assert.match(hookSource, /setFailedFiles\(failed, status\.failed_total/);
+  assert.match(hookSource, /setFailedFiles\(\s*failed,\s*status\.failed_total/);
+});
+
+test("a format nobody supports is counted apart", () => {
+  // A workspace with a code project in it has a hundred thousand of
+  // them - that is not the same problem as "could not be read".
+  assert.match(hookSource, /status\.unsupported_total/);
 });

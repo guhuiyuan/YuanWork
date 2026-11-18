@@ -222,9 +222,17 @@ interface AppState {
    * The list is capped by the backend - the count is the real one.
    */
   failedFiles: FailedFile[];
-  setFailedFiles: (f: FailedFile[], total?: number) => void;
+  setFailedFiles: (f: FailedFile[], total?: number, unsupported?: number) => void;
   /** How many files the last build could not read - the list is capped. */
   failedTotal: number;
+  /**
+   * How many of them are a format nobody supports.
+   *
+   * A workspace with a code project in it has a hundred thousand of
+   * them - a different problem from "could not be read", and the user
+   * should not have to tell them apart.
+   */
+  unsupportedTotal: number;
   /** True once the file list has been fetched - avoids a "no files yet" flash. */
   kbLoaded: boolean;
   setKbLoaded: (v: boolean) => void;
@@ -314,8 +322,13 @@ export const useAppStore = create<AppState>((set) => ({
   setKbChunkTotal: (n) => set({ kbChunkTotal: n }),
   failedFiles: [],
   failedTotal: 0,
-  setFailedFiles: (f, total) =>
-    set({ failedFiles: f, failedTotal: total ?? f.length }),
+  unsupportedTotal: 0,
+  setFailedFiles: (f, total, unsupported) =>
+    set({
+      failedFiles: f,
+      failedTotal: total ?? f.length,
+      unsupportedTotal: unsupported ?? 0,
+    }),
   kbLoaded: false,
   setKbLoaded: (v) => set({ kbLoaded: v }),
   kbError: null,

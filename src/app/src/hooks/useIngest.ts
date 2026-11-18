@@ -240,7 +240,11 @@ export function useIngest() {
         // The files the build could not read, with the reason - the
         // user has to see them, not just a count.
         const failed = status.failed_files ?? [];
-        setFailedFiles(failed, status.failed_total ?? failed.length);
+        setFailedFiles(
+          failed,
+          status.failed_total ?? failed.length,
+          status.unsupported_total ?? 0
+        );
         const files = await refreshFilesQuietly();
         await refreshWorkspaceQuietly();
         // Only now is the setup actually done: an index run that
@@ -250,10 +254,20 @@ export function useIngest() {
         // The real number - the file list is a page, not the count.
         const indexed = useAppStore.getState().kbTotal || files.length;
         const total = status.failed_total ?? failed.length;
-        if (total > 0) {
+        const unsupported = status.unsupported_total ?? 0;
+        // A format nobody supports is a different problem from a file
+        // that could not be read - the user should not have to tell
+        // them apart.
+        const unreadable = Math.max(0, total - unsupported);
+        if (unreadable > 0) {
           // The build did not fail - it read what it could. Say so.
           showToast(
-            `已索引 ${indexed} 个文件，${total} 个文件读不进来（见侧栏）`,
+            `已索引 ${indexed} 个文件，${unreadable} 个文件读不进来（见侧栏）`,
+            "info"
+          );
+        } else if (total > 0) {
+          showToast(
+            `已索引 ${indexed} 个文件，${total} 个文件格式不支持（见侧栏）`,
             "info"
           );
         } else {
@@ -268,7 +282,11 @@ export function useIngest() {
       }
       if (status.status === "failed") {
         const failed = status.failed_files ?? [];
-        setFailedFiles(failed, status.failed_total ?? failed.length);
+        setFailedFiles(
+          failed,
+          status.failed_total ?? failed.length,
+          status.unsupported_total ?? 0
+        );
         setIngestState({ ingesting: false, message: null });
         showToast(`索引失败：${status.error ?? "未知错误"}`, "error");
         return false;

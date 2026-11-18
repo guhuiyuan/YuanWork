@@ -341,6 +341,13 @@ export interface IngestStatus {
   failed_files?: FailedFile[];
   /** How many there were in all - the list above is capped. */
   failed_total?: number;
+  /**
+   * How many of them are simply a format nobody supports.
+   *
+   * That is a different problem from "could not be read" - a workspace
+   * with a code project in it has a hundred thousand of them.
+   */
+  unsupported_total?: number;
 }
 
 /**

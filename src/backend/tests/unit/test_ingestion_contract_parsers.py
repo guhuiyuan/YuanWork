@@ -350,3 +350,21 @@ async def test_a_scan_that_cannot_be_read_says_why(temp_dir: Path, monkeypatch):
     assert "engine not installed" in placeholder[0].content
     # the position is still there - the file is in the index
     assert placeholder[0].meta.get("anchor")
+
+
+async def test_a_logo_is_not_read(temp_dir: Path):
+    """A picture the size of an icon has no text worth reading.
+
+    Reading it would be slow, and what came out would be noise. The
+    file still has to say what happened to it.
+    """
+    path = make_docx_with_image_file(
+        temp_dir, name="logo.docx", text="X", width=32, height=32
+    )
+    blocks = await DocxParser().parse(path, "doc1")
+
+    assert blocks
+    assert not [b for b in blocks if b.type == "image_ocr"]
+    placeholder = [b for b in blocks if b.type == "image_placeholder"]
+    assert len(placeholder) == 1
+    assert "太小" in placeholder[0].content

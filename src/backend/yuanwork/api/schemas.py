@@ -95,6 +95,10 @@ class IngestStatusResponse(BaseModel):
     #: How many files there were in all - the list above is capped, so
     #: this is the number that says whether anything is missing.
     failed_total: int = 0
+    #: How many of them are simply a format nobody supports. That is a
+    #: different problem from "could not be read", and the user should
+    #: not have to tell them apart.
+    unsupported_total: int = 0
 
 
 class KBFileInfo(BaseModel):

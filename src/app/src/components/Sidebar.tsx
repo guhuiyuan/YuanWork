@@ -80,7 +80,11 @@ export function Sidebar() {
       const last = await latestIngestStatus();
       if (!gone && last) {
         const failed = last.failed_files ?? [];
-        setFailedFiles(failed, last.failed_total ?? failed.length);
+        setFailedFiles(
+          failed,
+          last.failed_total ?? failed.length,
+          last.unsupported_total ?? 0
+        );
       }
 
       listWikiPages().then(setWikiPages).catch(() => {});
@@ -250,10 +254,11 @@ export function Sidebar() {
 function FailedFiles() {
   const failedFiles = useAppStore((s) => s.failedFiles);
   const failedTotal = useAppStore((s) => s.failedTotal);
+  const unsupportedTotal = useAppStore((s) => s.unsupportedTotal);
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
-  if (failedTotal === 0) return null;
+  if (failedTotal === 0 && unsupportedTotal === 0) return null;
 
   const shown = showAll ? failedFiles : failedFiles.slice(0, 10);
 
@@ -264,7 +269,10 @@ function FailedFiles() {
         onClick={() => setOpen(!open)}
         title="这些文件没有进知识库——点开看是哪些、为什么"
       >
-        <span>读不进来的文件（{failedTotal}）</span>
+        <span>
+          读不进来的文件（{failedTotal}）
+          {unsupportedTotal > 0 ? ` · 不支持的格式（${unsupportedTotal}）` : ""}
+        </span>
         <span>{open ? "▾" : "▸"}</span>
       </button>
 

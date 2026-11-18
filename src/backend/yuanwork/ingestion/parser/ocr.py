@@ -25,6 +25,15 @@ logger = logging.getLogger(__name__)
 #: than text - it does not belong in the index.
 MIN_CONFIDENCE = 0.30
 
+#: How many pictures in one document are read. Reading a picture takes
+#: about a second and a half, and a document with a hundred of them
+#: would hold the build on that one file.
+MAX_IMAGES_PER_DOCUMENT = 20
+
+#: Pictures smaller than this are logos and icons - their text is
+#: noise, not content.
+MIN_IMAGE_SIDE = 64
+
 _ENGINE: Any = None
 _ENGINE_TRIED = False
 _ENGINE_ERROR: str | None = None
@@ -64,6 +73,25 @@ def reset_engine() -> None:
     _ENGINE = None
     _ENGINE_TRIED = False
     _ENGINE_ERROR = None
+
+
+def image_is_worth_reading(data: bytes) -> bool:
+    """Whether the picture is worth reading.
+
+    Logos and icons are small - their text is noise, not content. A
+    picture whose size cannot be read is worth reading anyway: the
+    size is a filter, not a decision.
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as img:
+            width, height = img.size
+    except Exception:  # noqa: BLE001 - an unreadable header is not a decision
+        return True
+    return min(width, height) >= MIN_IMAGE_SIDE
 
 
 async def ocr_bytes(data: bytes) -> list[str]:

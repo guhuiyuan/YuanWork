@@ -304,6 +304,47 @@ def test_the_last_job_is_404_when_there_was_none(client, store: SQLiteStore):
     assert client.get("/api/v1/ingest/status/latest").status_code == 404
 
 
+def test_a_build_that_changed_nothing_is_not_a_failure():
+    """Everything already in the index: the build did its job.
+
+    The files it could not read are the ones it could not read before -
+    not a new failure. Saying "索引失败" after a rebuild that changed
+    nothing would be a lie the user has to read.
+    """
+    from yuanwork.api.routes.ingest import _job_outcome
+
+    result = {
+        "indexed": 0,
+        "errors": 12,
+        "files": [
+            {"path": "D:\\kb\\a.doc", "status": "error", "error": "BadZipFile"},
+            {"path": "D:\\kb\\b.md", "status": "skipped", "reason": "already_indexed"},
+        ],
+    }
+
+    status, error = _job_outcome(result)
+
+    assert status == "completed"
+    assert error is None
+
+
+def test_a_build_that_read_nothing_and_failed_at_everything_is_a_failure():
+    from yuanwork.api.routes.ingest import _job_outcome
+
+    result = {
+        "indexed": 0,
+        "errors": 3,
+        "files": [
+            {"path": "D:\\kb\\a.doc", "status": "error", "error": "BadZipFile"},
+        ],
+    }
+
+    status, error = _job_outcome(result)
+
+    assert status == "failed"
+    assert "3" in (error or "")
+
+
 def test_the_failed_files_are_collected_from_the_build_result():
     """What the build says about a file is what the app shows.
 
@@ -326,9 +367,10 @@ def test_the_failed_files_are_collected_from_the_build_result():
         ],
     }
 
-    failed, total = _collect_failed_files(result)
+    failed, total, unsupported = _collect_failed_files(result)
 
     assert total == 4
+    assert unsupported == 1
     assert [f["path"] for f in failed] == [
         "D:\\kb\\坏了.docx",
         "D:\\kb\\空.md",
@@ -339,6 +381,39 @@ def test_the_failed_files_are_collected_from_the_build_result():
     # the reason is in words, not in a code
     assert "没有可读的文字" in failed[1]["error"]
     assert failed[3]["error"] == "不支持的文件类型：.mp4"
+
+
+def test_the_old_binary_formats_say_so_in_words():
+    """AC-E-004 - the reason is for the user, not for a stack trace.
+
+    The old formats are registered as supported but cannot be read;
+    the user is told which format and what to do about it.
+    """
+    from yuanwork.api.routes.ingest import _collect_failed_files
+
+    result = {
+        "files": [
+            {
+                "path": "D:\\kb\\旧文档.doc",
+                "status": "error",
+                "error": "BadZipFile('File is not a zip file')",
+            },
+            {
+                "path": "D:\\kb\\旧课件.ppt",
+                "status": "error",
+                "error": "KeyError(\"no relationship of type 'x'\")",
+            },
+        ],
+        "unsupported_files": [],
+    }
+
+    failed, total, unsupported = _collect_failed_files(result)
+
+    assert total == 2
+    assert unsupported == 0
+    assert ".doc" in failed[0]["error"]
+    assert "另存为新版" in failed[0]["error"]
+    assert ".ppt" in failed[1]["error"]
 
 
 def test_the_failed_file_list_is_capped_but_the_count_is_not():
@@ -352,10 +427,11 @@ def test_the_failed_file_list_is_capped_but_the_count_is_not():
         ],
     }
 
-    failed, total = _collect_failed_files(result)
+    failed, total, unsupported = _collect_failed_files(result)
 
     assert len(failed) == MAX_FAILED_FILES
     assert total == 500
+    assert unsupported == 500
 
 
 # --------------------------------------------------------------------------

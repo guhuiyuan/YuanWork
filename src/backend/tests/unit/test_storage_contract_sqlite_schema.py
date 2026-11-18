@@ -189,8 +189,8 @@ async def test_the_ingest_job_table_columns(store):
     """
     assert await column_names(store, "ingest_jobs") == [
         "job_id", "status", "progress", "files_done", "files_total", "error",
-        "current_file", "failed_files", "failed_total", "created_at",
-        "updated_at",
+        "current_file", "failed_files", "failed_total", "unsupported_total",
+        "created_at", "updated_at",
     ]
 
 

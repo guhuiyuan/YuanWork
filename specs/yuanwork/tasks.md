@@ -844,24 +844,35 @@
   它没有地方渲染了，于是「哪些文件在库里」用户看不见；③ **读不进来的文件在应用里完全看不到**：
   建库结果里有（路径 + 原因），但 `ingest_jobs` 只存了错误**计数**，没存是哪些文件、什么原因
   → AC-E-004「列出该文件并说明原因」在应用里没有兑现
-- **输入**: `src/backend/yuanwork/db/sqlite.py`、`src/backend/yuanwork/api/routes/ingest.py`、`src/backend/yuanwork/api/routes/kb.py`、`src/app/src/components/Sidebar.tsx`、`src/app/src/api/backend.ts`
+- **输入**: `src/backend/yuanwork/db/sqlite.py`、`src/backend/yuanwork/api/routes/ingest.py`、`src/backend/yuanwork/api/routes/kb.py`、`src/app/src/components/Sidebar.tsx`、`src/app/src/api/backend.ts`、`scripts/bench/real_workspace_check.py`
 - **输出**: 正确的文件总数（用 `/kb/stats` 的真数）、侧栏里的文件清单（复用 `KbFileRow`，带「加载更多」）、
-  建库失败文件清单（路径 + 原因）落库并由状态端点带出、侧栏里「读不进来的文件」一节
+  建库失败文件清单（路径 + 原因）落库并由状态端点带出、侧栏里「读不进来的文件」一节、
+  一份可重复的真机验收脚本（走应用自己那条路：加工作域 → 重建 → 报告）
 - **验收标准**: 覆盖 AC-E-004、AC-F-001
 - **依赖**: TASK-007, TASK-051, TASK-052
 - **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_api_contract_ingest_kb.py src/backend/tests/unit/test_storage_contract_sqlite_schema.py -q`
-- **验证结果**: 39 passed（2026-11-18，新增 9 条）。全量回归：后端 1776 passed、Rust 74 passed、前端 139 passed（新增 12 条）、
+- **验证结果**: 42 passed（2026-11-18，新增 12 条）。全量回归：后端 1780 passed、Rust 74 passed、前端 140 passed（新增 13 条）、
   前端 `npm run build`（`tsc -b` + vite）通过。**改了什么**：
-  ① `ingest_jobs` 多两列——`failed_files`（路径 + 原因的清单，上限 300 条）与 `failed_total`（真实条数）；
+  ① `ingest_jobs` 多三列——`failed_files`（路径 + 原因的清单，上限 300 条）、`failed_total`（真实条数）
+  与 `unsupported_total`（其中有多少是「格式没人支持」——那是另一类问题，不该混在一起）；
   建库结束时把「读不进来的」按「真读不出来 → 类型不支持」的顺序收进去，**读不出来的排前面**（用户最该知道的那批）；
-  ② `GET /ingest/status/{job_id}` 带出 `failed_files` 与 `failed_total`；`latest` 是**上一次**的建库，
+  ② `GET /ingest/status/{job_id}` 带出这三个数；`latest` 是**上一次**的建库，
   所以应用重启后那批文件还在（`GET /ingest/status/latest`）；③ 侧栏的总数改用 `/kb/stats` 的真数
   （不再拿数组长度当总数），文件清单用 `KbFileRow` 渲染并分页（100 条一页，「加载更多」）；
-  ④ 侧栏多一节「读不进来的文件（N）」，展开是文件名 + 原因，截断时说明「还有 N 个没有列出」；
+  ④ 侧栏多一节「读不进来的文件（N）· 不支持的格式（M）」，展开是文件名 + 原因，截断时说明「还有 N 个没有列出」；
   ⑤ 桌面端加了 `kb_stats` 命令，`list_kb_files` 带上 limit/offset；
-  ⑥ 建库完成的提示语也改成真数（「已索引 4350 个文件，N 个文件读不进来（见侧栏）」）
+  ⑥ 建库完成的提示语也改成真数（「已索引 4358 个文件，36 个文件读不进来（见侧栏）」）；
+  ⑦ **原因要说人话**：旧版二进制格式（.doc/.ppt/.xls）原来报的是 `BadZipFile(...)`，
+  现在说「旧版二进制格式（.doc）读不出来，请另存为新版」；
+  ⑧ **真机撞出来的第二个缺陷**：重建时如果**所有文件都已在库里**（没有新文件要读），
+  旧判据「有错且一个都没入库」会把它判成**失败** → 应用弹「索引失败」。改成：
+  **一个都没读进去且什么都没在库里**才算失败；「都在库里了」是**做完了**。
   **前端那条旧契约改了**：原先钉的是「侧栏**不**列知识库的文件」（工作域改成条目之后的取舍）——
   用户报「看不到那些文件」后，这条取舍被推翻，测试改成钉「侧栏同时列工作域条目**与**索引里的文件」
+  **真机验收**（`scripts/bench/real_workspace_check.py`，走应用自己那条路）：
+  真实工作域建库前 **4350 个文件 / 58712 个切片** → 建库后 **4358 个文件 / 59793 个切片**；
+  读不进来的 **151412** 个（其中 151376 个是「格式没人支持」，36 个是真读不出来），
+  清单按上限存 300 条、真实条数另记一个数
 
 ### [x] TASK-078: 实现扫描件的读取（文档里嵌的图片走 OCR）
 
@@ -874,18 +885,25 @@
   （标 `in_image`、图片序号；docx 记所在标题路径、pptx 记所在页）；**引擎不可用时不能把文件判成「没有内容」**——
   要产出一个说明原因的占位块，文件仍在索引里，用户在侧栏看得见（AC-E-004）
 - **输入**: `src/backend/yuanwork/ingestion/parser/ocr.py`、`src/backend/yuanwork/ingestion/parser/docx_parser.py`、`src/backend/yuanwork/ingestion/parser/pptx_parser.py`、`src/backend/tests/unit/ingestion_fixtures.py`、`src/backend/tests/unit/test_ingestion_contract_parsers.py`
-- **输出**: 文档内嵌图片的 OCR 通路、合成一份「扫描件 docx / pptx」做回归测试
+- **输出**: 文档内嵌图片的 OCR 通路、合成一份「扫描件 docx / pptx」做回归测试、
+  一道护栏（每份文档最多读 20 张图；小图不读——一张图标读一秒半，读出来的是噪声）
 - **验收标准**: 覆盖 AC-E-004、AC-F-002、AC-F-003
 - **依赖**: TASK-005, TASK-076
 - **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_ingestion_contract_parsers.py -q`
-- **验证结果**: 23 passed（2026-11-18，新增 3 条）。后端全量 1776 passed。**真实文件复验**：
-  `D:\workspace` 里那 2 份读不出来的扫描件现在读出来了——`课程作业.docx` 出 **439** 个 OCR 块、
+- **验证结果**: 24 passed（2026-11-18，新增 4 条）。后端全量 1780 passed。**真实文件复验**：
+  `D:\workspace` 里那 2 份读不出来的扫描件现在读出来了——`课程作业.docx` 出 **370** 个 OCR 块、
   `实验报告.docx` 出 **53** 个；`.pptx` 里整页是图片的也一样（锚点仍指向那一页）。
+  **真机建库**（走应用自己的路：加工作域 → 重建）：库里从 **4350 个文件 / 58712 个切片**
+  变成 **4358 个文件 / 59793 个切片**，那两份扫描件与「课程讲义.docx」（文本框那份）都在库里了。
   **为什么以前读不出来**：正文是图片，`document.xml` 里 0 个文本节点，解析器只读段落与文本框 →
   判「没有内容」→ 静默跳过。**修法**：新增 `ingestion/parser/ocr.py`（rapidocr 引擎按进程加载一次，
-  实测 0.85 秒加载、1.5 秒读一张图），docx/pptx 解析时把文档里的图片取出来读字，产出 `image_ocr` 块
+  实测 0.85 秒加载），docx/pptx 解析时把文档里的图片取出来读字，产出 `image_ocr` 块
   （标 `in_image`、图片序号、docx 记所在标题路径、pptx 记所在页）；**引擎不可用时不能判「没有内容」**——
-  产出一个说明原因的占位块，文件仍在索引里，用户在侧栏看得见
+  产出一个说明原因的占位块，文件仍在索引里，用户在侧栏看得见。
+  **护栏**：一份文档最多读 20 张图（一张图约 10 秒——worker 里 ONNX 是单线程的，
+  免得几十个 worker 抢核），小图不读（图标与 logo 读出来的是噪声）。
+  **实测的代价**：那份 13 张图的扫描件读一遍要 **138 秒**——扫描件是这一轮唯一的慢点，
+  但整个工作域里只有 2 份，对整体速率无影响
 
 ## 2. 依赖关系图
 

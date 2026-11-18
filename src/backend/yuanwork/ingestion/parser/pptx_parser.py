@@ -145,12 +145,25 @@ class PptxParser(BaseParser):
         picture keeps the slide it is on, so the citation can point at
         it (AC-E-004).
         """
-        from yuanwork.ingestion.parser.ocr import engine_error, ocr_bytes
+        from yuanwork.ingestion.parser.ocr import (
+            MAX_IMAGES_PER_DOCUMENT,
+            engine_error,
+            image_is_worth_reading,
+            ocr_bytes,
+        )
 
         blocks: list[RawBlock] = []
         read_any = False
+        skipped_small = 0
+        index = 0
 
-        for index, (slide_number, name, data) in enumerate(images):
+        for slide_number, name, data in images:
+            if index >= MAX_IMAGES_PER_DOCUMENT:
+                break
+            if not image_is_worth_reading(data):
+                # A logo or an icon - its text is noise.
+                skipped_small += 1
+                continue
             lines = await ocr_bytes(data)
             if not lines:
                 continue
@@ -172,6 +185,7 @@ class PptxParser(BaseParser):
                         },
                     )
                 )
+            index += 1
 
         if text_blocks or read_any:
             return blocks
@@ -179,6 +193,8 @@ class PptxParser(BaseParser):
         # The deck has nothing but pictures, and no text came out of
         # them. Say why.
         reason = engine_error() or "图片里没有识别出文字"
+        if skipped_small:
+            reason += f"（{skipped_small} 张图太小，没有读）"
         return [
             RawBlock(
                 block_id=f"{doc_id}_image_placeholder",

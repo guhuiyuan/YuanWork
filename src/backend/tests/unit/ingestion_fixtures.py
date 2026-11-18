@@ -329,18 +329,24 @@ def make_docx_with_image_file(
     dir_path: Path,
     name: str = "scan.docx",
     text: str = "实验报告 热力学",
+    width: int = 900,
+    height: int = 160,
 ) -> Path:
     """A .docx whose body is a picture of the text - a scan.
 
     There is not one paragraph of text in it: the words are in the
     image, so only OCR can find them. Without OCR the file is dropped
     as "no content", and the user never sees it.
+
+    ``width``/``height`` make a small picture - a logo, not a page.
     """
     from docx import Document
 
     path = dir_path / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    image = render_text_image(dir_path / f"{name}.png", text=text)
+    image = render_text_image(
+        dir_path / f"{name}.png", text=text, width=width, height=height
+    )
 
     doc = Document()
     doc.add_picture(str(image))
