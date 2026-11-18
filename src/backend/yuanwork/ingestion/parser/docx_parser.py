@@ -143,7 +143,12 @@ class DocxParser(BaseParser):
                         "heading_level": 0,
                         "heading_path": [],
                         "in_textbox": True,
-                        "anchor": make_anchor("section", section=None, heading_path=[]),
+                        "anchor": make_anchor(
+                            "section",
+                            section=None,
+                            heading_path=[],
+                            textbox_index=box_idx,
+                        ),
                     },
                 )
             )
@@ -209,6 +214,7 @@ class DocxParser(BaseParser):
                                 "section",
                                 section=heading_path[-1] if heading_path else None,
                                 heading_path=heading_path,
+                                image_index=index,
                             ),
                         },
                     )

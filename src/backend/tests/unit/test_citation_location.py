@@ -87,6 +87,38 @@ def test_chunk_location_is_human_readable():
     assert chunk_location({}) == ""
 
 
+def test_a_text_box_or_a_picture_still_has_a_position():
+    """AC-F-003 — the position can be traced back.
+
+    A Word document can hold text that is in neither a paragraph nor a
+    heading: it sits in a text box or in a picture. The citation says
+    which one — an empty position is no position.
+    """
+    from yuanwork.utils.chunk_meta import chunk_location
+
+    textbox = {
+        "meta": {
+            "anchor": {
+                "kind": "section",
+                "heading_path": [],
+                "textbox_index": 1,
+            }
+        }
+    }
+    picture = {
+        "meta": {
+            "anchor": {
+                "kind": "section",
+                "heading_path": [],
+                "image_index": 2,
+            }
+        }
+    }
+
+    assert chunk_location(textbox) == "第 2 个文本框"
+    assert chunk_location(picture) == "第 3 张图片"
+
+
 # ===== The chunker really produces the nested shape =====
 
 

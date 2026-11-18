@@ -279,6 +279,12 @@ async def test_a_docx_whose_text_is_in_a_text_box_is_read(temp_dir: Path):
     # traced back to the document.
     assert any(b.meta.get("in_textbox") for b in blocks)
     assert all(b.meta.get("anchor") for b in blocks)
+    # ... and the anchor says *which* text box (AC-F-003).
+    from yuanwork.utils.anchor import anchor_location
+
+    box = [b for b in blocks if b.meta.get("in_textbox")][0]
+    assert box.meta["anchor"]["textbox_index"] == 0
+    assert anchor_location(box.meta["anchor"]) == "第 1 个文本框"
 
 
 # --------------------------------------------------------------------------
@@ -308,6 +314,10 @@ async def test_a_docx_that_is_a_scan_is_read_by_ocr(temp_dir: Path):
     # the picture keeps its place, so the citation can point at it
     assert all(b.meta.get("in_image") for b in ocr_blocks)
     assert all(b.meta.get("anchor") for b in ocr_blocks)
+    # ... and the anchor says *which* picture (AC-F-003)
+    from yuanwork.utils.anchor import anchor_location
+
+    assert anchor_location(ocr_blocks[0].meta["anchor"]) == "第 1 张图片"
 
 
 async def test_a_pptx_whose_slide_is_a_scan_is_read_by_ocr(temp_dir: Path):

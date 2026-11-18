@@ -160,6 +160,13 @@ def anchor_location(anchor: dict[str, Any] | None) -> str:
         path = anchor.get("heading_path")
         if path:
             return " › ".join(str(p) for p in path)
+        # A Word document can hold text that is in neither a paragraph
+        # nor a heading: it sits in a text box or in a picture. The
+        # position is still a position - say which one.
+        if anchor.get("image_index") is not None:
+            return f"第 {anchor['image_index'] + 1} 张图片"
+        if anchor.get("textbox_index") is not None:
+            return f"第 {anchor['textbox_index'] + 1} 个文本框"
         return ""
 
     if kind == "sheet_row":

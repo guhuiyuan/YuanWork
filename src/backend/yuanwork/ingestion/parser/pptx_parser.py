@@ -181,7 +181,9 @@ class PptxParser(BaseParser):
                             "image_name": name,
                             "line_index": line_index,
                             "slide_number": slide_number,
-                            "anchor": make_anchor("slide", slide=slide_number),
+                            "anchor": make_anchor(
+                                "slide", slide=slide_number, image_index=index
+                            ),
                         },
                     )
                 )
