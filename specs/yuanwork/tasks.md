@@ -884,7 +884,7 @@
   修法：.docx/.pptx 解析时把文档里的图片取出来，交给同一个 OCR 引擎，产出的文字作为块
   （标 `in_image`、图片序号；docx 记所在标题路径、pptx 记所在页）；**引擎不可用时不能把文件判成「没有内容」**——
   要产出一个说明原因的占位块，文件仍在索引里，用户在侧栏看得见（AC-E-004）
-- **输入**: `src/backend/yuanwork/ingestion/parser/ocr.py`、`src/backend/yuanwork/ingestion/parser/docx_parser.py`、`src/backend/yuanwork/ingestion/parser/pptx_parser.py`、`src/backend/tests/unit/ingestion_fixtures.py`、`src/backend/tests/unit/test_ingestion_contract_parsers.py`
+- **输入**: `src/backend/yuanwork/ingestion/parser/ocr.py`、`src/backend/yuanwork/ingestion/parser/docx_parser.py`、`src/backend/yuanwork/ingestion/parser/pptx_parser.py`、`src/backend/yuanwork/utils/anchor.py`、`src/backend/tests/unit/ingestion_fixtures.py`、`src/backend/tests/unit/test_ingestion_contract_parsers.py`、`src/backend/tests/unit/test_citation_location.py`、`scripts/bench/refresh_position_anchors.py`
 - **输出**: 文档内嵌图片的 OCR 通路、合成一份「扫描件 docx / pptx」做回归测试、
   一道护栏（每份文档最多读 20 张图；小图不读——一张图标读一秒半，读出来的是噪声）
 - **验收标准**: 覆盖 AC-E-004、AC-F-002、AC-F-003
@@ -904,7 +904,8 @@
   免得几十个 worker 抢核），小图不读（图标与 logo 读出来的是噪声）。
   **位置也要说得出**（AC-F-003）：文本框与图片里的文字不在段落里、也不在标题下，
   锚点带上 `textbox_index` / `image_index`，引用位置说「第 2 个文本框」「第 3 张图片」——
-  **位置是空的，就不是位置**。
+  **位置是空的，就不是位置**。已经切好的切片不会自己变，
+  `scripts/bench/refresh_position_anchors.py` 把那几份文件从索引里删掉再读一遍。
   **实测的代价**：那份 13 张图的扫描件读一遍要 **138 秒**——扫描件是这一轮唯一的慢点，
   但整个工作域里只有 2 份，对整体速率无影响
 
