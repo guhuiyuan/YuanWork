@@ -123,6 +123,75 @@ def test_install_blocks_via_socket_connect_method(guard_factory):
         s.close()
 
 
+# ---- the resolved address ----
+#
+# The socket layer sees the **address**, not the name: `create_connection`
+# checks the hostname, but the kernel-level connect() only gets the
+# resolved IP. Without recognising that address, every allowed domain is
+# blocked by its own DNS - the provider API becomes unreachable and every
+# question is refused with "the model is unavailable".
+
+
+def _fake_dns(monkeypatch, domain: str, address: str):
+    """Resolve one domain to one fixed address; the rest stays real."""
+    original = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == domain:
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port or 443))
+            ]
+        return original(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+
+def test_the_resolved_address_of_an_allowed_domain_is_allowed(
+    guard_factory, monkeypatch
+):
+    """The address an allowed domain resolves to is an allowed target."""
+    g = guard_factory(allowed=["api.openai.com"])
+    _fake_dns(monkeypatch, "api.openai.com", "203.0.113.7")
+
+    assert g._is_allowed_address("203.0.113.7") is True
+    assert g._is_allowed_address("198.51.100.9") is False
+
+
+def test_a_connection_to_an_allowed_domain_gets_past_the_guard(
+    guard_factory, monkeypatch
+):
+    """The connection to an allowed domain must not be refused by the guard.
+
+    203.0.113.0/24 is reserved for documentation (RFC 5737), so the
+    connection fails at the network level - but it must fail there and
+    not at the guard.
+    """
+    g = guard_factory(allowed=["api.openai.com"])
+    _fake_dns(monkeypatch, "api.openai.com", "203.0.113.7")
+    g.install()
+
+    with pytest.raises(OSError) as exc:
+        socket.create_connection(("api.openai.com", 443), timeout=1)
+    assert not isinstance(exc.value, NetworkIsolationError)
+
+
+def test_an_address_outside_the_allowed_ones_is_still_blocked(
+    guard_factory, monkeypatch
+):
+    """An IP that no allowed domain resolves to is still refused."""
+    g = guard_factory(allowed=["api.openai.com"])
+    _fake_dns(monkeypatch, "api.openai.com", "203.0.113.7")
+    g.install()
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setblocking(False)
+    try:
+        with pytest.raises(NetworkIsolationError):
+            s.connect(("198.51.100.9", 443))
+    finally:
+        s.close()
+
+
 def test_allow_all_install_is_noop(guard_factory):
     """ALLOW_ALL mode doesn't patch the socket (no need to guard)."""
     g = guard_factory(mode="ALLOW_ALL")

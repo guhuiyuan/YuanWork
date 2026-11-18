@@ -47,14 +47,20 @@ right-anchored; `v1.api.openai.com` matches `api.openai.com`.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import socket
 import threading
+import time
 from typing import Any
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+#: How long the resolved addresses of the allowed domains are cached.
+_ADDRESS_CACHE_SECONDS = 60.0
 
 
 # Hostnames that are always treated as local, regardless of mode
@@ -144,6 +150,9 @@ class NetworkGuard:
         self._original_create_connection: Any = None
         self._original_socket_connect: Any = None
         self._installed = False
+        # The addresses the allowed domains resolve to, cached briefly.
+        self._address_cache: tuple[float, set[str]] | None = None
+        self._address_cache_lock = threading.Lock()
 
     # ----- Factories -----
 
@@ -250,7 +259,55 @@ class NetworkGuard:
                     "the environment, or set YUANWORK_NETWORK_MODE=allow_all."
                 ),
             )
+        # The socket layer sees the **resolved address**, not the name:
+        # `create_connection` checks the hostname, but the kernel-level
+        # connect() only gets the IP. Without this, every allowed domain
+        # is blocked by its own DNS - the connection is refused before it
+        # leaves the machine.
+        if self._is_ip_literal(hostname) and self._is_allowed_address(hostname):
+            return
         self.check(hostname)
+
+    @staticmethod
+    def _is_ip_literal(host: str) -> bool:
+        """Whether this is an IP address rather than a name."""
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            return False
+        return True
+
+    def _is_allowed_address(self, address: str) -> bool:
+        """Whether this IP is one of the addresses an allowed domain resolves to.
+
+        The hole this leaves is written down in ADR-020: an address that
+        a shared CDN serves can host other tenants too. The alternative -
+        refusing every IP - means the provider API is unreachable, which
+        is worse than the hole.
+        """
+        return address in self._allowed_domain_addresses()
+
+    def _allowed_domain_addresses(self) -> set[str]:
+        """The addresses the allowed domains resolve to (cached briefly)."""
+        now = time.monotonic()
+        with self._address_cache_lock:
+            cached = self._address_cache
+            if cached is not None and now - cached[0] < _ADDRESS_CACHE_SECONDS:
+                return cached[1]
+
+        addresses: set[str] = set()
+        for domain in self.allowed_domains:
+            try:
+                for info in socket.getaddrinfo(domain, None, proto=socket.IPPROTO_TCP):
+                    addresses.add(str(info[4][0]))
+            except OSError:
+                # A domain that does not resolve right now simply
+                # contributes no address.
+                continue
+
+        with self._address_cache_lock:
+            self._address_cache = (now, addresses)
+        return addresses
 
     @staticmethod
     def extract_hostname(address: Any) -> str | None:

@@ -8,10 +8,10 @@
 |------|------|----------|
 | 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 59 条 |
 | 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 46 条 |
-| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 74/74 完成 |
+| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 75/75 完成 |
 
 **当前阶段**：Phase 5 — 验证与交付
-**进度**：74/74 个 Task 已完成
+**进度**：75/75 个 Task 已完成
 
 规则：
 1. 任何代码改动必须对应 `tasks.md` 中的一个 Task，不得做范围外的事。
