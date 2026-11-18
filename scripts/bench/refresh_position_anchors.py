@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 BASE = "http://127.0.0.1:8765/api/v1"
@@ -38,9 +39,14 @@ def call(path: str, method: str = "GET", payload: dict | None = None, timeout: f
 
 
 def main() -> int:
-    wanted = set(NAMES)
-    rows = call("/kb/files?limit=1000")["files"]
-    targets = [r for r in rows if r["file_name"] in wanted]
+    # The file list is paged, so the files are looked up by name - the
+    # ones to re-read are not necessarily in the first page.
+    targets: list[dict] = []
+    for name in NAMES:
+        rows = call(f"/kb/files?search={urllib.parse.quote(name)}&limit=50")["files"]
+        for row in rows:
+            if row["file_name"] == name:
+                targets.append(row)
     print(f"要重读的文件：{len(targets)} 个")
     for row in targets:
         print("  -", row["file_name"], row["chunk_count"], "个切片")
@@ -62,10 +68,11 @@ def main() -> int:
         time.sleep(10.0)
     print(f"重建结束：{status['status']}，用时 {round(time.time() - started)} 秒")
 
-    rows = call("/kb/files?limit=1000")["files"]
-    for row in rows:
-        if row["file_name"] in wanted:
-            print(f"  · {row['file_name']}  {row['chunk_count']} 个切片")
+    for name in NAMES:
+        rows = call(f"/kb/files?search={urllib.parse.quote(name)}&limit=50")["files"]
+        for row in rows:
+            if row["file_name"] == name:
+                print(f"  · {row['file_name']}  {row['chunk_count']} 个切片")
     return 0
 
 
