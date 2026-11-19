@@ -7,6 +7,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   law: "⚖️",
   project: "📁",
   concept: "💡",
+  comparison: "🔀",
   person: "👤",
   general: "📄",
 };
@@ -16,6 +17,7 @@ const CATEGORY_ORDER = [
   "law",
   "project",
   "concept",
+  "comparison",
   "person",
   "general",
 ];
@@ -68,6 +70,24 @@ export function WikiTreePanel() {
     return groups;
   }, [pages, filter]);
 
+  /**
+   * The categories to draw, in order.
+   *
+   * The ones the app knows about come first, in this order. **The rest
+   * follow**: a page whose category nobody listed must still be
+   * reachable. The tree used to draw only the categories on its list —
+   * and the comparison tables (a third kind of page, AC-F-012) were on
+   * nobody's list, so nine pages of a real workspace were simply not
+   * there.
+   */
+  const categories = useMemo(() => {
+    const known = CATEGORY_ORDER.filter((c) => grouped[c]?.length);
+    const rest = Object.keys(grouped)
+      .filter((c) => !CATEGORY_ORDER.includes(c))
+      .sort((a, b) => a.localeCompare(b, "zh-Hans"));
+    return [...known, ...rest];
+  }, [grouped]);
+
   return (
     <div className="wiki-tree">
       <div className="wiki-tree__header">
@@ -96,7 +116,7 @@ export function WikiTreePanel() {
         </div>
       ) : (
         <div className="wiki-tree__groups">
-          {CATEGORY_ORDER.filter((c) => grouped[c]?.length).map((cat) => (
+          {categories.map((cat) => (
             <div key={cat} className="wiki-tree__group">
               <div className="wiki-tree__group-title">
                 <span>{CATEGORY_ICONS[cat] ?? "📄"}</span>
@@ -132,12 +152,20 @@ export function WikiTreePanel() {
   );
 }
 
-function labelForCategory(c: string): string {
+/**
+ * The name of a category, in the reader's words.
+ *
+ * The backend speaks in keys (`comparison`, `concept`); the reader
+ * thinks in 对比表 / 概念. A category nobody has a name for keeps its
+ * key - it is still shown.
+ */
+export function labelForCategory(c: string): string {
   return {
     contract: "合同",
     law: "法规",
     project: "项目",
     concept: "概念",
+    comparison: "对比表",
     person: "人物",
     general: "通用",
   }[c] ?? c;

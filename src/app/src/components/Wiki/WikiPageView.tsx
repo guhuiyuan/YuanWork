@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { useAppStore } from "../../store";
+import { labelForCategory } from "./WikiTreePanel";
 import type { WikiConclusion, WikiPageBlock } from "../../store";
 import {
   getWikiPage,
@@ -217,7 +218,9 @@ export function WikiPageView() {
           )}
         </div>
         <div className="wiki-page__meta">
-          <span className="wiki-page__category">{detail.category}</span>
+          <span className="wiki-page__category">
+            {labelForCategory(detail.category)}
+          </span>
           {detail.tags.map((t) => (
             <span key={t} className="wiki-page__tag">#{t}</span>
           ))}
