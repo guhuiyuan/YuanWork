@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 
 from yuanwork import __version__
 from yuanwork.api.schemas import HealthResponse, VersionResponse
+from yuanwork.utils.parent_watch import instance_token_from_env
 
 router = APIRouter()
 
@@ -90,6 +91,11 @@ async def health_check(request: Request) -> HealthResponse:
         data_dir=str(settings.data_dir),
         network_mode=settings.network_mode.name,
         components=components,
+        # Which instance this is. The desktop app checks it when it
+        # starts: a server on the port that carries somebody else's
+        # token is a leftover from an earlier run, not the backend
+        # this app just started.
+        instance_token=instance_token_from_env(),
     )
 
 

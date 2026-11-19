@@ -20,6 +20,10 @@ class HealthResponse(BaseModel):
     data_dir: str
     network_mode: str
     components: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: Which instance answers here. The desktop app hands its backend a
+    #: token at startup and checks it here, so a leftover server from an
+    #: earlier run is never mistaken for the one just started.
+    instance_token: str = ""
 
 
 class VersionResponse(BaseModel):

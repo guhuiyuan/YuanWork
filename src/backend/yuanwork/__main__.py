@@ -81,9 +81,19 @@ def main() -> None:
     from yuanwork.api.app import create_app
     from yuanwork.config import get_settings
     from yuanwork.privacy.network_guard import NetworkGuard
+    from yuanwork.utils.parent_watch import parent_pid_from_env, watch_parent
 
     settings = get_settings()
     app = create_app(settings=settings)
+
+    # The desktop app is our parent. If it dies without closing its
+    # window, we must not stay behind holding the port - the next app
+    # instance would then talk to this stale one and see an index that
+    # is not there.
+    parent_pid = parent_pid_from_env()
+    if parent_pid is not None:
+        watch_parent(parent_pid)
+        print(f"   Parent process: {parent_pid} (this backend leaves when it does)")
 
     # Install network isolation guard at the socket layer (Stage 3).
     # In ALLOW_ALL mode this is a no-op. In LLM_ONLY / OFFLINE, only

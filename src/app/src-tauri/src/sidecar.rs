@@ -139,6 +139,16 @@ pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::erro
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    // The token says "this backend is mine". The health endpoint hands
+    // it back, and the readiness check compares it - so a server left
+    // over from an earlier run can never pass for ours.
+    let instance_token = instance_token();
+    cmd.env("YUANWORK_INSTANCE_TOKEN", &instance_token);
+    // And the backend watches this PID: if the app is killed without
+    // closing its window, the backend leaves instead of staying behind
+    // holding the port.
+    cmd.env("YUANWORK_PARENT_PID", std::process::id().to_string());
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -150,9 +160,22 @@ pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::erro
     let handle = BackendHandle::new(child);
 
     // Wait for the backend to become healthy
-    wait_for_backend_ready(&handle.url())?;
+    wait_for_backend_ready(&handle.url(), &instance_token)?;
 
     Ok(handle)
+}
+
+/// A token that identifies this launch of the app.
+///
+/// It only has to be different from other launches, not unguessable:
+/// the process ID alone would do, but a second app instance can have
+/// the same PID at a different time, so the clock is in there too.
+fn instance_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}", std::process::id(), nanos)
 }
 
 /// Resolve the backend launch strategy: bundled binary if present, else
@@ -272,14 +295,42 @@ fn env_file_sets_the_location(project_root: &std::path::Path) -> bool {
 }
 
 /// Wait for the backend to respond to health checks.
-fn wait_for_backend_ready(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// The check is not just "something answered 200": the response has to
+/// carry *our* instance token. A server left over from an earlier run
+/// holds the port and answers the health check just fine - and the app
+/// would then talk to that stale backend, with its stale data
+/// directory, and see an index that is not there. The token is how we
+/// tell "our backend" from "somebody else's".
+fn wait_for_backend_ready(
+    url: &str,
+    instance_token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let health_url = format!("{}/api/v1/health", url);
 
     for attempt in 0..60 {
-        match reqwest_get(&health_url) {
-            Ok(code) if code == "200" => {
-                log::info!("Backend ready after {} attempts", attempt);
-                return Ok(());
+        match http_get(&health_url) {
+            Ok(response) if parse_status_code(&response) == "200" => {
+                match parse_instance_token(&response) {
+                    Some(token) if token == instance_token => {
+                        log::info!("Backend ready after {} attempts", attempt);
+                        return Ok(());
+                    }
+                    // Anything else on the port is not the backend this
+                    // app just started: either a leftover from an
+                    // earlier run, or a server that does not report a
+                    // token at all. Either way, using it would mean
+                    // talking to somebody else's data directory.
+                    _ => {
+                        return Err(format!(
+                            "端口 {port} 上跑着一个不是这次启动的 YuanWork 后端。\
+                             可能是上一次的应用被强杀留下的残留进程。\
+                             关掉它，或用 YUANWORK_PORT 指定别的端口。",
+                            port = backend_port()
+                        )
+                        .into());
+                    }
+                }
             }
             _ => {
                 std::thread::sleep(Duration::from_millis(500));
@@ -290,9 +341,22 @@ fn wait_for_backend_ready(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     Err("Backend failed to start within 30 seconds".into())
 }
 
-/// Minimal blocking HTTP GET that returns the HTTP status code.
+/// Pull the instance token out of a health response.
+///
+/// The body is JSON; the token is one field of it. A body that is not
+/// JSON, or has no token, yields None.
+fn parse_instance_token(response: &str) -> Option<String> {
+    let body = response.split("\r\n\r\n").nth(1).or_else(|| response.split("\n\n").nth(1))?;
+    let parsed: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    parsed
+        .get("instance_token")?
+        .as_str()
+        .map(|token| token.to_string())
+}
+
+/// Minimal blocking HTTP GET that returns the whole response.
 /// Used only for the one-shot startup health probe.
-fn reqwest_get(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn http_get(url: &str) -> Result<String, Box<dyn std::error::Error>> {
     let parsed = url::Url::parse(url)?;
     let host = parsed.host_str().ok_or("No host")?;
     let port = parsed.port().unwrap_or(80);
@@ -307,7 +371,7 @@ fn reqwest_get(url: &str) -> Result<String, Box<dyn std::error::Error>> {
 
     let mut response = String::new();
     std::io::Read::read_to_string(&mut stream, &mut response)?;
-    Ok(parse_status_code(&response).to_string())
+    Ok(response)
 }
 
 /// Pull the status code out of an HTTP response.
@@ -364,6 +428,38 @@ mod tests {
         assert_eq!(parse_status_code("HTTP/1.1 500 Internal Server Error"), "500");
         assert_eq!(parse_status_code(""), "");
         assert_eq!(parse_status_code("garbage"), "");
+    }
+
+    // ===== the instance token =====
+
+    #[test]
+    fn test_the_instance_token_is_read_from_the_health_body() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
+            {\"status\": \"ok\", \"instance_token\": \"1234-99\"}";
+        assert_eq!(parse_instance_token(response), Some("1234-99".to_string()));
+    }
+
+    #[test]
+    fn test_a_health_body_without_a_token_yields_none() {
+        // A server that does not report a token is not ours.
+        let response = "HTTP/1.1 200 OK\r\n\r\n{\"status\": \"ok\"}";
+        assert_eq!(parse_instance_token(response), None);
+    }
+
+    #[test]
+    fn test_a_body_that_is_not_json_yields_none() {
+        let response = "HTTP/1.1 200 OK\r\n\r\nnot json at all";
+        assert_eq!(parse_instance_token(response), None);
+    }
+
+    #[test]
+    fn test_the_token_changes_between_launches() {
+        // Two launches of the app must not share a token - that is the
+        // whole point of it.
+        let first = instance_token();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = instance_token();
+        assert_ne!(first, second);
     }
 
     #[test]
