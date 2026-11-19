@@ -58,8 +58,24 @@ test("the tree is a column of its own, not a lid over the page", () => {
   // words of every paragraph were under the tree.
   assert.match(appSource, /app--with-tree/);
   assert.match(cssSource, /\.app--with-tree\s*\{[\s\S]{0,120}grid-template-columns/);
-  assert.match(cssSource, /\.app--with-tree \.app__main \{ grid-column: 3; \}/);
+  assert.match(cssSource, /\.app--with-tree \.app__main \{ grid-column: 3; grid-row: 1; \}/);
   assert.match(cssSource, /\.app__wiki-tree \{[\s\S]{0,200}grid-column: 2;/);
   // the tree is no longer taken out of the flow
   assert.doesNotMatch(cssSource, /\.app__wiki-tree \{[\s\S]{0,120}position: absolute/);
+});
+
+test("the four panels share one row", () => {
+  // A grid item that names only a column is placed by the
+  // auto-placement cursor, and the tree's column comes *before* the
+  // columns the other panels landed on — so the grid pushed the tree
+  // into a second row. That row had no height left (the first row is
+  // 1fr of a 100vh box), and the sidebar, the page and the right
+  // panel collapsed to nothing: the wiki view showed a tree and
+  // nothing else. Every panel has to name the row too.
+  assert.match(cssSource, /\.app--with-tree \.app__sidebar \{ grid-column: 1; grid-row: 1; \}/);
+  assert.match(cssSource, /\.app--with-tree \.app__main \{ grid-column: 3; grid-row: 1; \}/);
+  assert.match(cssSource, /\.app--with-tree \.app__right \{ grid-column: 4; grid-row: 1; \}/);
+  assert.match(cssSource, /\.app__wiki-tree \{[\s\S]{0,120}grid-row: 1;/);
+  // and the grid itself has exactly one row to put them in
+  assert.match(cssSource, /\.app--with-tree\s*\{[\s\S]{0,240}grid-template-rows: 1fr;/);
 });

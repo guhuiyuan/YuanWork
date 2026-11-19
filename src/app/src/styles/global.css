@@ -108,13 +108,22 @@ input:focus, textarea:focus {
    words of every paragraph were under the tree. */
 .app--with-tree {
   grid-template-columns: 280px 260px 1fr 320px;
+  grid-template-rows: 1fr;
 }
 
-.app--with-tree .app__main { grid-column: 3; }
-.app--with-tree .app__right { grid-column: 4; }
+/* Every panel names its row as well as its column.
+   Without the row, the grid puts the tree in a *second* row (the
+   column it names comes before the columns the others landed on),
+   that row has no height left, and the sidebar, the page and the
+   right panel all collapse to nothing — the wiki view then shows a
+   tree and nothing else. */
+.app--with-tree .app__sidebar { grid-column: 1; grid-row: 1; }
+.app--with-tree .app__main { grid-column: 3; grid-row: 1; }
+.app--with-tree .app__right { grid-column: 4; grid-row: 1; }
 
 .app__wiki-tree {
   grid-column: 2;
+  grid-row: 1;
   height: 100%;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
