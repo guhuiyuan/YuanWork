@@ -20,6 +20,8 @@ const read = (...parts: string[]) =>
 
 const treeSource = read("src", "components", "Wiki", "WikiTreePanel.tsx");
 const pageSource = read("src", "components", "Wiki", "WikiPageView.tsx");
+const appSource = read("src", "App.tsx");
+const cssSource = read("src", "styles", "global.css");
 
 test("a category nobody listed is still drawn", () => {
   // The order is the known categories first; the rest follow.
@@ -48,4 +50,16 @@ test("the tree still filters by title, category and tag", () => {
   assert.match(treeSource, /p\.title\.toLowerCase\(\)\.includes\(q\)/);
   assert.match(treeSource, /p\.category\.toLowerCase\(\)\.includes\(q\)/);
   assert.match(treeSource, /\(p\.tags \?\? \[\]\)\.some/);
+});
+
+test("the tree is a column of its own, not a lid over the page", () => {
+  // It used to float over the main area (position: absolute), and the
+  // page underneath was half hidden behind it — the title and the first
+  // words of every paragraph were under the tree.
+  assert.match(appSource, /app--with-tree/);
+  assert.match(cssSource, /\.app--with-tree\s*\{[\s\S]{0,120}grid-template-columns/);
+  assert.match(cssSource, /\.app--with-tree \.app__main \{ grid-column: 3; \}/);
+  assert.match(cssSource, /\.app__wiki-tree \{[\s\S]{0,200}grid-column: 2;/);
+  // the tree is no longer taken out of the flow
+  assert.doesNotMatch(cssSource, /\.app__wiki-tree \{[\s\S]{0,120}position: absolute/);
 });

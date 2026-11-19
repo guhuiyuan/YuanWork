@@ -39,7 +39,7 @@ export function App() {
   }, [toast, dismissToast]);
 
   return (
-    <div className="app">
+    <div className={`app${view === "wiki" ? " app--with-tree" : ""}`}>
       <aside className="app__sidebar">
         <ErrorBoundary label="侧边栏">
           <Sidebar />
