@@ -73,6 +73,7 @@ export function useIngest() {
   const setKbFiles = useAppStore((s) => s.setKbFiles);
   const setKbTotal = useAppStore((s) => s.setKbTotal);
   const setKbChunkTotal = useAppStore((s) => s.setKbChunkTotal);
+  const setKbMissingChunks = useAppStore((s) => s.setKbMissingChunks);
   const setFailedFiles = useAppStore((s) => s.setFailedFiles);
   const setCurrentFolder = useAppStore((s) => s.setCurrentFolder);
   const showToast = useAppStore((s) => s.showToast);
@@ -95,7 +96,8 @@ export function useIngest() {
     const stats = await kbStats();
     setKbTotal(stats.total_files ?? 0);
     setKbChunkTotal(stats.total_chunks ?? 0);
-  }, [setKbTotal, setKbChunkTotal]);
+    setKbMissingChunks(stats.missing_chunks ?? 0);
+  }, [setKbTotal, setKbChunkTotal, setKbMissingChunks]);
 
   const refreshFiles = useCallback(async () => {
     const files = await listKbFiles();

@@ -46,6 +46,11 @@ REASON_UNLOCATABLE = "unlocatable_evidence"
 REASON_MODEL_INSUFFICIENT = "model_insufficient"
 REASON_MODEL_UNAVAILABLE = "model_unavailable"
 REASON_GATE_ERROR = "gate_error"
+#: The file the question named is in the ledger but not in the index -
+#: there is nothing to answer from, and the fix is to index it again
+#: (TASK-088). Not a gate's reason: the gates said "there is no
+#: evidence", and this says *why* there is none.
+REASON_INDEX_MISSING = "index_missing"
 
 
 @dataclass

@@ -39,6 +39,7 @@ from yuanwork.retrieval.confidence import ConfidenceScorer
 from yuanwork.retrieval.evidence_gate import (
     REASON_GATE_ERROR,
     REASON_INSUFFICIENT,
+    REASON_INDEX_MISSING,
     REASON_MODEL_UNAVAILABLE,
     EvidenceGate,
     EvidenceGateResult,
@@ -92,6 +93,10 @@ class AgentState:
     #: Where the answer most likely is - with the path, so the reader
     #: can click it and look at the original (TASK-085).
     refusal_positions: list[dict[str, str]] = field(default_factory=list)
+    #: The file the question named is in the ledger but not in the
+    #: index - so it cannot be read, however much the ledger says
+    #: otherwise (TASK-088).
+    index_missing: bool = False
     #: The user stopped the run - the answer is what came before.
     cancelled: bool = False
 
@@ -490,6 +495,11 @@ class AgentLoop:
         )
         state.evidence = result["evidence"]
         state.tier_conflicts = result.get("conflicts") or []
+        # The file the question named may be in the ledger but not in
+        # the index - then there is nothing to answer from, and the
+        # reader deserves to hear that instead of "证据不足"
+        # (TASK-088).
+        state.index_missing = bool(result.get("index_missing"))
 
         # Compute confidence
         state.confidence = self.scorer.score(state.evidence)
@@ -711,6 +721,11 @@ class AgentLoop:
         state.refusal_reason = (
             state.gate.reason if state.gate is not None else REASON_INSUFFICIENT
         )
+        if state.index_missing and state.refusal_reason == REASON_INSUFFICIENT:
+            # The documents are not silent - the file the reader named
+            # is not in the index. "证据不足" would be a wrong thing to
+            # say (TASK-088).
+            state.refusal_reason = REASON_INDEX_MISSING
 
         if state.refusal_reason == REASON_MODEL_UNAVAILABLE:
             # The model could not be reached. Telling the user that the

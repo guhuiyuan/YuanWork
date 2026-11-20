@@ -11,6 +11,7 @@ export function Sidebar() {
   const kbFiles = useAppStore((s) => s.kbFiles);
   const kbTotal = useAppStore((s) => s.kbTotal);
   const kbChunkTotal = useAppStore((s) => s.kbChunkTotal);
+  const kbMissingChunks = useAppStore((s) => s.kbMissingChunks);
   const setFailedFiles = useAppStore((s) => s.setFailedFiles);
   const setKbLoaded = useAppStore((s) => s.setKbLoaded);
   const setKbError = useAppStore((s) => s.setKbError);
@@ -200,6 +201,12 @@ export function Sidebar() {
               已索引 {kbTotal} 个文件
               {kbChunkTotal > 0 ? ` · ${kbChunkTotal} 个切片` : ""}
             </div>
+            {kbMissingChunks > 0 && (
+              <div className="ws-count ws-count--warn">
+                索引里比账本少 {kbMissingChunks} 个切片 —— 这些文件说已入库，
+                其实搜不到。点上面的「重建」把它们放回去。
+              </div>
+            )}
             <div className="kb-list">
               {kbFiles.map((file) => (
                 <KbFileRow
@@ -493,6 +500,15 @@ const sidebarStyles = `
     padding: 0 8px;
     font-size: 11px;
     color: var(--text-tertiary);
+  }
+  .ws-count--warn {
+    margin-top: 4px;
+    padding: 6px 8px;
+    border: 1px solid var(--refusal-border);
+    background: var(--refusal-bg);
+    border-radius: 6px;
+    color: #92400e;
+    line-height: 1.5;
   }
   .kb-list {
     margin-top: 4px;

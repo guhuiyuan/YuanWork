@@ -20,6 +20,8 @@
 
 {% if reason == "unlocatable_evidence" %}
 1. **重建一次索引** —— 找到的资料没有可定位的位置，重新索引之后才能让你点开逐条核对
+{% elif reason == "index_missing" %}
+1. **重新索引这份文件** —— 它在账本里，却不在索引里；重建一次知识库就能把它放回去
 {% elif reason == "model_insufficient" %}
 1. **补上另一份文档** —— 找到的资料在讲别的事，回答这个问题需要的是另一份
 {% elif reason == "model_unavailable" %}

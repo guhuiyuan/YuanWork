@@ -229,6 +229,10 @@ interface AppState {
   setKbTotal: (n: number) => void;
   /** How many slices the knowledge base holds. */
   kbChunkTotal: number;
+  /** The slices the ledger claims and the index does not have - zero
+   *  when the two agree (TASK-088). */
+  kbMissingChunks: number;
+  setKbMissingChunks: (n: number) => void;
   setKbChunkTotal: (n: number) => void;
   /**
    * The files the last build could not read, and how many there were.
@@ -334,6 +338,8 @@ export const useAppStore = create<AppState>((set) => ({
   setKbTotal: (n) => set({ kbTotal: n }),
   kbChunkTotal: 0,
   setKbChunkTotal: (n) => set({ kbChunkTotal: n }),
+  kbMissingChunks: 0,
+  setKbMissingChunks: (n) => set({ kbMissingChunks: n }),
   failedFiles: [],
   failedTotal: 0,
   unsupportedTotal: 0,

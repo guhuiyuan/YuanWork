@@ -157,6 +157,9 @@ class IngestionPipeline:
         )
         self.workspace = Workspace(sqlite_store)
         self.max_file_size = max_file_size
+        #: The documents the vector table really holds. Read once, when
+        #: a build asks whether a file is in the index (TASK-088).
+        self._indexed_doc_ids: set[str] | None = None
         # The tier judgement may ask the model about the documents the
         # rules cannot place (ADR-031).
         self.llm_gateway = llm_gateway
@@ -822,11 +825,26 @@ class IngestionPipeline:
           is kept and marked; it is not replaced without being asked
           (AC-E-015).
         * ``new`` - nothing is known about it.
+
+        The ledger alone does not decide: a build that was interrupted
+        after the ledger was written and before the slices were flushed
+        leaves files that are "indexed" with nothing in the index. Those
+        files are not searchable - and, trusting the ledger, they could
+        not be repaired either: the build skipped them (TASK-088).
         """
         same = await self.sqlite.get_file_by_hash(file_hash)
         if same:
             if same.get("chunk_version") == self.chunker.version:
-                return {"state": "already_indexed", "doc_id": same.get("doc_id")}
+                if await self._index_holds(same.get("doc_id")):
+                    return {"state": "already_indexed", "doc_id": same.get("doc_id")}
+                # The ledger says it is in the index; the index says it
+                # is not. The index is the truth - so the file is read
+                # again.
+                logger.info(
+                    f"Re-indexing {file_path.name} - the ledger has it, "
+                    f"the index does not"
+                )
+                return {"state": "new", "doc_id": None}
             return {"state": "stale", "doc_id": same.get("doc_id")}
 
         previous = await self._indexed_version_at(file_path)
@@ -835,6 +853,30 @@ class IngestionPipeline:
             return {"state": "modified", "doc_id": previous.get("doc_id")}
 
         return {"state": "new", "doc_id": None}
+
+    async def _index_holds(self, doc_id: str | None) -> bool:
+        """Whether the vector table really holds this document.
+
+        The set of ids in the index is read once and kept: a build asks
+        the question for every file it walks, and reading the table
+        once costs a fraction of a second (TASK-088).
+
+        A store that cannot answer - a stand-in in the tests, or an
+        index that cannot be read - leaves the ledger in charge: the
+        old behaviour is the safe one there.
+        """
+        if not doc_id:
+            return False
+        if self._indexed_doc_ids is None:
+            reader = getattr(self.semantic, "indexed_doc_ids", None)
+            if reader is None:
+                return True
+            try:
+                self._indexed_doc_ids = await reader()
+            except Exception as e:  # noqa: BLE001 - the ledger is the fallback
+                logger.warning(f"The index's document ids could not be read: {e}")
+                return True
+        return doc_id in self._indexed_doc_ids
 
     async def metadata_of(self, file_path: Path) -> dict[str, Any]:
         """The metadata the parser knows about a file."""
@@ -863,6 +905,8 @@ class IngestionPipeline:
             await self._batch.add(chunks)
         else:
             await self.semantic.add_chunks(chunks)
+        # The index has a new document in it (TASK-088).
+        self._indexed_doc_ids = None
 
     async def upsert_file(
         self,
@@ -902,6 +946,9 @@ class IngestionPipeline:
         """Write whatever the batch still holds."""
         if self._batch is not None:
             await self._batch.flush()
+        # The index has new documents in it - the set of ids read for
+        # the resume has to be read again (TASK-088).
+        self._indexed_doc_ids = None
 
     def _record(self, stage: str, seconds: float) -> None:
         """How long a stage took.

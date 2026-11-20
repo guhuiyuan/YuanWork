@@ -341,3 +341,19 @@ test("taking an entry out says what it does", () => {
   assert.match(hookSource, /它带入索引的内容已清除，文件仍在磁盘上/);
   assert.doesNotMatch(hookSource, /文件已删除|已从磁盘删除/);
 });
+
+// ===== the count that tells the truth =====
+
+test("the sidebar says when the index holds less than the ledger", () => {
+  // A build that was interrupted leaves files that are "indexed" with
+  // nothing in the index. The count in the sidebar comes from the
+  // ledger, so the difference has to be said out loud (TASK-088).
+  assert.match(sidebarSource, /kbMissingChunks/);
+  assert.match(sidebarSource, /索引里比账本少/);
+});
+
+test("the backend reports what the index really holds", () => {
+  const stats = read("src", "api", "backend.ts");
+  assert.match(stats, /missing_chunks\?: number;/);
+  assert.match(stats, /index_chunks\?: number;/);
+});

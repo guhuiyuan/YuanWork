@@ -143,17 +143,41 @@ async def get_term_context(
 
 @router.get("/kb/stats")
 async def get_kb_stats(request: Request) -> dict:
-    """Get knowledge base statistics."""
+    """Get knowledge base statistics.
+
+    The ledger says how many files were indexed; the index says how
+    many slices are really there. The two can differ - a build that was
+    interrupted leaves files that are "indexed" with nothing in the
+    index - and then the difference is reported, because a count that
+    lies is how a user ends up looking for a file that cannot be found
+    (TASK-088).
+    """
     sqlite = get_sqlite_store()
 
     total_files = await sqlite.count_files()
     total_chunks = await sqlite.count_chunks()
     by_type = await sqlite.count_files_by_type()
 
+    index_chunks: int | None = None
+    from yuanwork.api.deps import get_semantic_memory
+
+    semantic = get_semantic_memory()
+    counter = getattr(semantic, "count", None)
+    if counter is not None:
+        try:
+            index_chunks = int(await counter())
+        except Exception:  # noqa: BLE001 - the count is a nicety
+            index_chunks = None
+
     return {
         "total_files": total_files,
         "total_chunks": total_chunks,
         "by_type": by_type,
+        # What the index really holds, and what it is missing.
+        "index_chunks": index_chunks,
+        "missing_chunks": (
+            max(0, total_chunks - index_chunks) if index_chunks is not None else None
+        ),
     }
 
 

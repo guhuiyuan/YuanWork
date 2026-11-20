@@ -1080,6 +1080,39 @@ class SemanticMemory:
 
         return results
 
+    async def indexed_doc_ids(self) -> set[str]:
+        """The documents the vector table actually holds.
+
+        The ledger in SQLite says which files were indexed - but it can
+        be wrong: a build that was interrupted after the ledger was
+        written and before the slices were flushed leaves files that
+        are "indexed" with nothing in the index (TASK-088). This is the
+        truth, read from the index itself.
+
+        Only the ids are read (a projection), so the whole table costs
+        about a fifth of a second - cheap enough to ask once per build.
+        """
+        table = self.get_or_create_chunks_table()
+        if table.count_rows() == 0:
+            return set()
+
+        def _read() -> set[str]:
+            rows = (
+                table.search()
+                .select(["doc_id"])
+                .limit(1_000_000)
+                .to_list()
+            )
+            return {r.get("doc_id") for r in rows if r.get("doc_id")}
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_read), timeout=self.dense_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Reading the index's document ids took too long")
+            return set()
+
     async def chunks_of_doc(
         self,
         doc_id: str,

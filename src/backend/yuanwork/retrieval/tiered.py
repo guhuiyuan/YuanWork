@@ -205,7 +205,54 @@ class TieredRetriever:
             "longtail_searched": True,
             "conflicts": conflicts,
             "core_ms": core_ms,
+            # A file the ledger says is indexed but the index does not
+            # hold: the reader asked about a file that is *not* in the
+            # knowledge base, however much the ledger says otherwise.
+            # Saying so is the difference between "your documents do not
+            # say this" and "your index is missing this file" (TASK-088).
+            "index_missing": await self._index_missing(
+                scope_doc_ids, (core + longtail)[:top_k]
+            ),
         }
+
+    async def _index_missing(
+        self,
+        scope_doc_ids: list[str] | None,
+        evidence: list[dict[str, Any]],
+    ) -> bool:
+        """Whether the file the question named is missing from the index.
+
+        The ledger in SQLite says a file was indexed; the index says it
+        is not there. That happens when a build is interrupted after the
+        ledger was written and before the slices were flushed - the
+        file is "indexed" and unfindable (TASK-088).
+        """
+        if not scope_doc_ids or evidence:
+            return False
+        semantic = getattr(self.retriever, "semantic", None)
+        if semantic is None:
+            return False
+        for doc_id in scope_doc_ids:
+            try:
+                row = await self.sqlite.get_file(doc_id)
+            except Exception as e:  # noqa: BLE001 - the check is a nicety
+                logger.warning(f"The file record could not be read: {e}")
+                continue
+            if not row or not (row.get("chunk_count") or 0):
+                # The ledger does not claim it either - nothing to say.
+                continue
+            try:
+                chunks = await semantic.chunks_of_doc(doc_id, limit=1)
+            except Exception as e:  # noqa: BLE001 - the check is a nicety
+                logger.warning(f"The index could not be read: {e}")
+                continue
+            if not chunks:
+                logger.warning(
+                    f"The ledger has {row.get('file_name')} but the index "
+                    f"does not - the file is missing from the index"
+                )
+                return True
+        return False
 
     # --------------------------------------------------------------------------
     # the core layer

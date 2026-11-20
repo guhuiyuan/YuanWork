@@ -464,6 +464,10 @@ export interface KbStats {
   total_files: number;
   total_chunks: number;
   by_type?: Record<string, number>;
+  /** What the index really holds - the ledger may claim more. */
+  index_chunks?: number;
+  /** The slices the ledger claims and the index does not have. */
+  missing_chunks?: number;
 }
 
 export async function kbStats(): Promise<KbStats> {
