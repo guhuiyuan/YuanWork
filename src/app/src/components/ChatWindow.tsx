@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAppStore, ChatMessage, Citation, TermContext } from "../store";
+import { useAppStore, ChatMessage, Citation, RefusalPosition, TermContext } from "../store";
 import {
   cancelChat,
   chatStream,
@@ -10,7 +10,7 @@ import {
 } from "../api/backend";
 import { citationLabel, openedNotice } from "../api/citations";
 import { markTerms, termContextSummary } from "../api/terms";
-import { appendFailureNotice, failureNotice, isCancellation, refusalBanner, refusalContent } from "../api/streamText";
+import { appendFailureNotice, failureNotice, isCancellation, refusalBanner, refusalContent, refusalTextWithoutPositions } from "../api/streamText";
 
 /** Format the backend's conflict records into one warning string. */
 function formatConflicts(conflicts: unknown): string | undefined {
@@ -196,11 +196,15 @@ export function ChatWindow() {
             // The refusal message already contains everything that was
             // streamed, so the pending buffer is flushed first and then
             // REPLACED. Appending would duplicate the tail.
+            const positions = Array.isArray(ev.data.positions)
+              ? (ev.data.positions as RefusalPosition[])
+              : [];
             flush();
             useAppStore.getState().updateMessage(assistantId, {
               refused: true,
               refusalReason: reason,
               content: refusalContent(message),
+              refusalPositions: positions,
             });
             break;
           }
@@ -244,6 +248,9 @@ export function ChatWindow() {
       // look identical in the response body.
       if (resp.refusal_reason) {
         patch.refusalReason = resp.refusal_reason;
+      }
+      if (resp.refusal_positions?.length) {
+        patch.refusalPositions = resp.refusal_positions;
       }
       const conflict = formatConflicts(resp.conflicts);
       if (conflict) patch.conflict = conflict;
@@ -398,6 +405,35 @@ function Message({ msg }: { msg: ChatMessage }) {
   // told "show page 12" - so the app says where to look. Without that
   // the reader is left with a document and no idea where in it the
   // words are.
+  // A refusal names the places where the answer probably is. The
+  // refusal text tells the reader to click them - so they have to be
+  // clickable, with the path the backend sent (TASK-085).
+  const openPositionAt = useCallback(async (position: RefusalPosition) => {
+    setOpenError(null);
+    if (!position.file_path) {
+      setOpenError("这个位置没有文件路径。");
+      return;
+    }
+    try {
+      const opened = await openCitation({
+        index: 0,
+        file_name: position.file_name,
+        file_path: position.file_path,
+        text: "",
+        location: position.location,
+      } as Citation);
+      showToast(
+        openedNotice(
+          { file_name: position.file_name, location: position.location },
+          opened
+        ),
+        "info"
+      );
+    } catch (e) {
+      setOpenError(e instanceof Error ? e.message : String(e));
+    }
+  }, [showToast]);
+
   const openCitationAt = useCallback(async (citation: Citation) => {
     setOpenError(null);
     try {
@@ -443,9 +479,18 @@ function Message({ msg }: { msg: ChatMessage }) {
 
   // The answer, with the terms in it marked. The text itself is not
   // changed - the pieces joined together are the answer.
+  //
+  // A refusal is the one case where the text loses a part: its list of
+  // positions is drawn as buttons above the message, so the plain list
+  // would only say the same thing twice.
+  const hasPositions = !!msg.refusalPositions && msg.refusalPositions.length > 0;
+  const shownContent = useMemo(
+    () => (hasPositions ? refusalTextWithoutPositions(msg.content) : msg.content),
+    [hasPositions, msg.content]
+  );
   const segments = useMemo(
-    () => markTerms(msg.content, msg.terms ?? []),
-    [msg.content, msg.terms]
+    () => markTerms(shownContent, msg.terms ?? []),
+    [shownContent, msg.terms]
   );
 
   if (msg.role === "user") {
@@ -471,6 +516,31 @@ function Message({ msg }: { msg: ChatMessage }) {
         <div className="msg__conflict">
           <strong>⚠️ 冲突提示</strong>
           <div>{msg.conflict}</div>
+        </div>
+      )}
+
+      {msg.refusalPositions && msg.refusalPositions.length > 0 && (
+        <div className="msg__citations msg__citations--positions">
+          <div className="msg__citations-title">最可能相关的位置（点开看原文）</div>
+          {msg.refusalPositions.map((p, index) => (
+            <button
+              key={`${p.file_path}-${p.location}-${index}`}
+              className="citation"
+              onClick={() => void openPositionAt(p)}
+              title="打开原文"
+            >
+              <span className="citation__index">{index + 1}</span>
+              <span className="citation__body">
+                <span className="citation__loc">
+                  📄 《{p.file_name}》
+                  {p.location ? ` · ${p.location}` : ""}
+                </span>
+              </span>
+            </button>
+          ))}
+          {openError && (
+            <div className="citation__error">打不开这个文件：{openError}</div>
+          )}
         </div>
       )}
 

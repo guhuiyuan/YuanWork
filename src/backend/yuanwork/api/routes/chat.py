@@ -175,6 +175,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             confidence=result["confidence"],
             refused=result.get("refused", False),
             refusal_reason=result.get("refusal_reason"),
+            refusal_positions=result.get("refusal_positions", []),
             conflicts=result.get("conflicts", []),
             wiki_compile=result.get("wiki_compile"),
             terms=result.get("terms", []),

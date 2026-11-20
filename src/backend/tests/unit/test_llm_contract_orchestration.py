@@ -198,12 +198,15 @@ def test_the_trace_carries_the_citation_count():
 # --------------------------------------------------------------------------
 
 
-def test_the_result_has_the_ten_fields():
+def test_the_result_has_the_eleven_fields():
+    """The eleventh is the positions of a refusal: the text says where
+    to look, and this says which file to open (TASK-085)."""
     agent = make_agent(evidence=evidence(3))
     result = asyncio.run(agent.run(query="问题", session_id="s"))
     assert set(result) == {
         "answer", "citations", "confidence", "refused", "refusal_reason",
         "cancelled", "conflicts", "wiki_compile", "terms", "trace",
+        "refusal_positions",
     }
 
 

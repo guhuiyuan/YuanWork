@@ -6,6 +6,12 @@
  * as duplicated or reordered text, so they are worth pinning down.
  */
 
+/** The heading the refusal template puts above the positions. */
+const POSITIONS_HEADING = "## 最可能相关的位置";
+
+/** The heading the refusal template puts above the advice. */
+const ADVICE_HEADING = "## 你可以：";
+
 /**
  * Append a failure notice to text that was already streamed.
  *
@@ -67,6 +73,27 @@ export function refusalBanner(reason: string | undefined): {
     title: "⚠️ 证据不足，已拒绝直接回答",
     detail: "下方仅供参考可能位置。",
   };
+}
+
+/**
+ * The refusal text with its list of positions taken out.
+ *
+ * The text names the positions in words - every reader gets that, and
+ * it has to stay that way (ADR-012). The desktop draws the very same
+ * positions as buttons that open the file, so there the plain list
+ * would say the same thing twice; the buttons take its place.
+ *
+ * The section is only removed when it is found *and* its end is found
+ * as well: a text that does not look the way it is expected to look
+ * keeps all of itself, because losing the advice at the end of a
+ * refusal is worse than showing a list twice.
+ */
+export function refusalTextWithoutPositions(text: string): string {
+  const start = text.indexOf(POSITIONS_HEADING);
+  if (start < 0) return text;
+  const end = text.indexOf(ADVICE_HEADING, start);
+  if (end < 0) return text;
+  return `${text.slice(0, start).trimEnd()}\n\n${text.slice(end)}`.trim();
 }
 
 /**

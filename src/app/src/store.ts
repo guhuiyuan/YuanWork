@@ -22,8 +22,18 @@ export interface ChatMessage {
   /** Why the answer was refused - "insufficient_evidence", "unlocatable_evidence"
    *  or "generation_error: ..." */
   refusalReason?: string;
+  /** Where the answer most likely is - with the path, so the reader can
+   *  click it and look at the original (TASK-085). */
+  refusalPositions?: RefusalPosition[];
   conflict?: string;
   timestamp: number;
+}
+
+/** One place a refusal points at. */
+export interface RefusalPosition {
+  file_name: string;
+  file_path: string;
+  location: string;
 }
 
 export interface CitationAnchor {

@@ -136,6 +136,8 @@ class TieredRetriever:
         query: str,
         top_k: int = 10,
         doc_ids: list[str] | None = None,
+        scope_doc_ids: list[str] | None = None,
+        summary: bool = False,
     ) -> dict[str, Any]:
         """The evidence for a question, and what happened on the way.
 
@@ -143,13 +145,20 @@ class TieredRetriever:
         tail is not searched at all - that is the short circuit
         ADR-034 asks for, and it is what keeps the answer inside two
         seconds when the core layer can answer (AC-P-009).
+
+        ``scope_doc_ids`` means the question named a file: the evidence
+        has to come from that file. The short circuit is about *speed*,
+        not a licence to answer a question about a document the core
+        layer knows nothing about - so with a scope the core evidence is
+        only the conclusions *of that file*, and the long tail is
+        searched even when the core layer has enough (TASK-085).
         """
         started = time.perf_counter()
 
-        core = await self._core_evidence(query, top_k)
+        core = await self._core_evidence(query, top_k, scope_doc_ids=scope_doc_ids)
         core_ms = round((time.perf_counter() - started) * 1000, 1)
 
-        if len(core) >= self.min_core:
+        if len(core) >= self.min_core and not scope_doc_ids:
             logger.info(
                 f"The core layer answered with {len(core)} conclusions "
                 f"in {core_ms} ms - the long tail was not searched"
@@ -162,7 +171,25 @@ class TieredRetriever:
                 "core_ms": core_ms,
             }
 
-        longtail = await self._longtail_evidence(query, top_k, doc_ids)
+        # With a scope the long tail is searched *inside* that file:
+        # the question is about that file, and the top hits of the
+        # whole work domain would crowd it out (TASK-085).
+        if scope_doc_ids and summary and len(scope_doc_ids) == 1:
+            # "Summarise this file" wants the file's breadth, not the
+            # chunks that match the question - the question *is* the
+            # file name, so the ranking says nothing.
+            spread = await self._spread_of(scope_doc_ids[0], top_k)
+            if spread:
+                return {
+                    "evidence": spread,
+                    "core_found": False,
+                    "longtail_searched": True,
+                    "conflicts": [],
+                    "core_ms": core_ms,
+                }
+        longtail = await self._longtail_evidence(
+            query, top_k, scope_doc_ids or doc_ids
+        )
         conflicts = self._conflicts(core, longtail)
 
         for conflict in conflicts:
@@ -184,13 +211,45 @@ class TieredRetriever:
     # the core layer
     # --------------------------------------------------------------------------
 
+    async def _spread_of(self, doc_id: str, top_k: int) -> list[dict[str, Any]]:
+        """A document's chunks, spread over the document.
+
+        This is the evidence a summary needs: what the document covers
+        from beginning to end (TASK-085).
+        """
+        semantic = getattr(self.retriever, "semantic", None)
+        if semantic is None:
+            return []
+        try:
+            chunks = await semantic.chunks_of_doc(doc_id, limit=20)
+        except Exception as e:  # noqa: BLE001 - the spread is a nicety
+            logger.warning(f"Could not read the document's chunks: {e}")
+            return []
+        evidence = []
+        for chunk in chunks:
+            chunk.setdefault("tier", TIER_LONGTAIL)
+            # The spread is not a similarity ranking - it says what the
+            # document covers, not how well a chunk matches the question.
+            # The reader named the file, so the evidence is on point;
+            # the score only says so much.
+            chunk.setdefault("_score", 0.9)
+            evidence.append(chunk)
+        return evidence
+
     async def _core_evidence(
-        self, query: str, top_k: int
+        self,
+        query: str,
+        top_k: int,
+        scope_doc_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """The compiled conclusions that answer the question.
 
         The core layer is not sliced and searched - it was compiled into
         pages when it came in, and those conclusions are the evidence.
+
+        With a scope (the question named a file) only the conclusions
+        that came out of that file count: a conclusion about another
+        document is not an answer to this question.
         """
         try:
             conclusions = await self.sqlite.list_active_conclusions(
@@ -202,6 +261,14 @@ class TieredRetriever:
 
         if not conclusions:
             return []
+
+        if scope_doc_ids:
+            wanted = set(scope_doc_ids)
+            conclusions = [
+                c for c in conclusions if c.get("source_doc_id") in wanted
+            ]
+            if not conclusions:
+                return []
 
         query_terms = terms(query)
         if not query_terms:

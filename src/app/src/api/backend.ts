@@ -10,6 +10,7 @@ import { parseSseFrame, parseSseFrames, type RawSseFrame } from "./sse.ts";
 import type {
   Citation,
   KbFile,
+  RefusalPosition,
   TermContext,
   WikiBacklinksPayload,
   WikiConclusion,
@@ -69,6 +70,8 @@ export interface ChatResponse {
   confidence: number;
   refused: boolean;
   refusal_reason?: string | null;
+  /** The places a refusal points at - clickable, with the path. */
+  refusal_positions?: RefusalPosition[];
   conflicts?: ConflictInfo[];
   /** The terms in the answer - each one opens the text it stands for. */
   terms?: string[];

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import logging
 import time
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from yuanwork.orchestrator.steps.answer import (
     generate_answer,
     generate_answer_stream,
     generate_refusal,
+    refusal_positions,
     validate_citations,
 )
 from yuanwork.retrieval.confidence import ConfidenceScorer
@@ -87,6 +89,9 @@ class AgentState:
     conflicts: list[dict[str, Any]] = field(default_factory=list)
     refused: bool = False
     refusal_reason: str | None = None
+    #: Where the answer most likely is - with the path, so the reader
+    #: can click it and look at the original (TASK-085).
+    refusal_positions: list[dict[str, str]] = field(default_factory=list)
     #: The user stopped the run - the answer is what came before.
     cancelled: bool = False
 
@@ -201,6 +206,7 @@ class AgentLoop:
             "confidence": state.confidence["confidence"] if state.confidence else 0.0,
             "refused": state.refused,
             "refusal_reason": state.refusal_reason,
+            "refusal_positions": state.refusal_positions,
             "cancelled": state.cancelled,
             "conflicts": state.conflicts,
             "wiki_compile": state.wiki_compile,
@@ -350,6 +356,9 @@ class AgentLoop:
                     "reason": state.refusal_reason,
                     "message": state.answer,
                     "candidates": state.candidates,
+                    # The places to look, with the path - the reader is
+                    # told to click them (TASK-085).
+                    "positions": state.refusal_positions,
                 },
             }
         else:
@@ -386,6 +395,7 @@ class AgentLoop:
                     ),
                     "refused": state.refused,
                     "refusal_reason": state.refusal_reason,
+                    "refusal_positions": state.refusal_positions,
                     "cancelled": state.cancelled,
                     "conflicts": state.conflicts,
                     "wiki_compile": state.wiki_compile,
@@ -465,12 +475,18 @@ class AgentLoop:
 
     async def _step_extract(self, state: AgentState) -> None:
         """Step 3: Extract evidence chunks."""
+        scope_doc_ids = self._scope_from_file_hint(state)
+        intent = str((state.understanding or {}).get("intent") or "").lower()
         result = await extract_evidence(
             query=state.query,
             candidates=state.candidates,
             retriever=self.retriever,
             top_k=10,
             tiered=self.tiered,
+            scope_doc_ids=scope_doc_ids,
+            # A summary of a file wants the file's breadth, not the
+            # chunks that happen to match the question (TASK-085).
+            summary=intent in ("summarize", "summary", "overview"),
         )
         state.evidence = result["evidence"]
         state.tier_conflicts = result.get("conflicts") or []
@@ -486,6 +502,47 @@ class AgentLoop:
             "tier_conflicts": len(state.tier_conflicts),
             "confidence": state.confidence,
         })
+
+    def _scope_from_file_hint(self, state: AgentState) -> list[str] | None:
+        """The files the question names, if it names one.
+
+        "Summarise the fifth lecture of this PDF" is a question about
+        *that file*. The core layer's short circuit is about speed - it
+        must not answer with two conclusions from a different document
+        and leave the file the reader asked about unsearched
+        (TASK-085).
+
+        The file name the reader typed and the name in the index rarely
+        match exactly (a space here and there), so the comparison
+        ignores spaces and case. When the hint matches nothing, the
+        question is not scoped - a wrong scope would lose the answer.
+        """
+        hint = str((state.understanding or {}).get("file_hint") or "").strip()
+        if not hint:
+            return None
+
+        def normalized(name: str) -> str:
+            return re.sub(r"\s+", "", (name or "").strip().casefold())
+
+        wanted = normalized(hint)
+        if not wanted:
+            return None
+
+        matched: list[str] = []
+        for candidate in state.candidates or []:
+            name = normalized(str(candidate.get("file_name") or ""))
+            if not name:
+                continue
+            if name == wanted or name.endswith(wanted) or wanted.endswith(name):
+                matched.append(candidate["doc_id"])
+            elif wanted in name:
+                matched.append(candidate["doc_id"])
+        if not matched:
+            return None
+        # Keep the order, drop the duplicates.
+        seen: set[str] = set()
+        unique = [d for d in matched if not (d in seen or seen.add(d))]
+        return unique or None
 
     async def _step_maybe_compile_wiki_page(self, state: AgentState) -> None:
         """Step 3.5 (Stage 2): opportunistically compile a Wiki page from
@@ -629,6 +686,9 @@ class AgentLoop:
         """
         state.refused = True
         state.refusal_reason = "citation_invalid"
+        state.refusal_positions = refusal_positions(
+            state.evidence, state.candidates
+        )
         state.answer = await generate_refusal(
             state.candidates,
             kb_empty=await self._knowledge_base_is_empty(),
@@ -661,6 +721,9 @@ class AgentLoop:
             # the same reason a half-generated answer keeps its citations.
             state.citations = self._build_citations(state.evidence)
         else:
+            state.refusal_positions = refusal_positions(
+                state.evidence, state.candidates
+            )
             state.answer = await generate_refusal(
                 state.candidates,
                 kb_empty=await self._knowledge_base_is_empty(),

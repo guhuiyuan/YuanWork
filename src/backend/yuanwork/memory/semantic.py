@@ -180,6 +180,22 @@ def _quantize_int8(model: Any) -> Any:
 CHUNKS_SCHEMA_VERSION = 2
 
 
+def spread_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Evenly spread over the rows - the first, the last, and the ones
+    in between.
+
+    A summary of a document needs the document's shape, not its first
+    few paragraphs: taking every n-th row shows what the document
+    covers from beginning to end (TASK-085).
+    """
+    if limit <= 0 or not rows:
+        return []
+    if len(rows) <= limit:
+        return list(rows)
+    step = (len(rows) - 1) / (limit - 1) if limit > 1 else 1
+    return [rows[int(round(i * step))] for i in range(limit)]
+
+
 class SemanticMemory:
     """LanceDB-backed semantic memory store."""
 
@@ -1063,6 +1079,47 @@ class SemanticMemory:
             r["_score"] = 1.0 / (1.0 + distance)
 
         return results
+
+    async def chunks_of_doc(
+        self,
+        doc_id: str,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        """A spread of one document's chunks, in the order they appear.
+
+        A summary of a document needs the document's *breadth* - what
+        it covers from beginning to end - not the ten chunks that happen
+        to match the question. When the question is "summarise this
+        file", the file name is the query, and the similarity ranking
+        says nothing about what the file is about (TASK-085).
+
+        The chunks are read straight out of the table (no embedding, no
+        reranking) and spread evenly over the document, so the answer
+        sees the whole thing at a glance.
+        """
+        table = self.get_or_create_chunks_table()
+        if table.count_rows() == 0:
+            return []
+
+        def _read() -> list[dict[str, Any]]:
+            rows = (
+                table.search()
+                .where(f"doc_id = '{doc_id}'")
+                .limit(2000)
+                .to_list()
+            )
+            rows.sort(key=lambda r: r.get("chunk_idx") or 0)
+            return rows
+
+        try:
+            rows = await asyncio.wait_for(
+                asyncio.to_thread(_read), timeout=self.dense_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Reading a document's chunks took too long")
+            return []
+
+        return spread_rows(rows, limit)
 
     async def search_hybrid(
         self,

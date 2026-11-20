@@ -38,6 +38,13 @@ async def localize_files(
     if search_query:
         try:
             files = await sqlite.list_files(limit=top_k_files * 2, search=search_query)
+            # The name the reader typed and the name in the index rarely
+            # match exactly - a space is enough to lose the file
+            # (TASK-085). The tolerant lookup finds it anyway.
+            if file_hint:
+                extra = await sqlite.find_files_by_name(file_hint)
+                known = {f["doc_id"] for f in files}
+                files = list(files) + [f for f in extra if f["doc_id"] not in known]
             for f in files:
                 doc_id = f["doc_id"]
                 if doc_id not in seen_doc_ids:

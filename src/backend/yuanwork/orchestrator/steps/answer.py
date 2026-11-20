@@ -223,7 +223,7 @@ async def generate_refusal(
     return template.render(
         opening=_refusal_opening(reason),
         reason=reason,
-        positions=_refusal_positions(evidence, candidates),
+        positions=refusal_positions(evidence, candidates),
     )
 
 
@@ -255,7 +255,7 @@ def _refusal_opening(reason: str | None) -> str:
     )
 
 
-def _refusal_positions(
+def refusal_positions(
     evidence: list[dict[str, Any]] | None,
     candidates: list[dict[str, Any]] | None,
 ) -> list[dict[str, str]]:
@@ -264,6 +264,10 @@ def _refusal_positions(
     The evidence comes first - it knows the page or the section it was
     cut from, which is what the user needs to check it. The candidate
     files are the fallback: they are what we know exists.
+
+    Every position carries the path as well: the reader is told to
+    "click the position below and look at the original", so the
+    positions have to be clickable (TASK-085).
     """
     positions: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -277,7 +281,11 @@ def _refusal_positions(
         if key in seen:
             continue
         seen.add(key)
-        positions.append({"file_name": file_name, "location": location})
+        positions.append({
+            "file_name": file_name,
+            "location": location,
+            "file_path": str(chunk.get("file_path") or ""),
+        })
 
     for candidate in candidates or []:
         file_name = candidate.get("file_name", "")
@@ -287,6 +295,10 @@ def _refusal_positions(
         if key in seen:
             continue
         seen.add(key)
-        positions.append({"file_name": file_name, "location": ""})
+        positions.append({
+            "file_name": file_name,
+            "location": "",
+            "file_path": str(candidate.get("file_path") or ""),
+        })
 
     return positions[:5]

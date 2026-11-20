@@ -17,6 +17,7 @@ import {
   isGenerationError,
   refusalBanner,
   refusalContent,
+  refusalTextWithoutPositions,
 } from "../src/api/streamText.ts";
 
 test("the failure notice goes after the streamed text", () => {
@@ -113,6 +114,45 @@ test("an unknown reason is kept but truncated", () => {
 
 test("an empty reason still produces a notice", () => {
   assert.match(failureNotice(""), /请求失败/);
+});
+
+// ===== the list of positions in a refusal =====
+
+const REFUSAL = `我在你的知识库里没有找到足够明确的证据来回答这个问题。
+
+## 最可能相关的位置
+
+- 《合同.pdf》（第 12 页）
+- 《说明.docx》
+
+## 你可以：
+
+1. **换用更具体的关键词** —— 例如合同编号、金额、日期、条款名`;
+
+test("the list of positions is taken out of the refusal text", () => {
+  // The desktop draws those positions as buttons; the plain list would
+  // say the same thing twice.
+  const out = refusalTextWithoutPositions(REFUSAL);
+  assert.doesNotMatch(out, /最可能相关的位置/);
+  assert.doesNotMatch(out, /合同\.pdf/);
+  // but the rest of the refusal is still there
+  assert.match(out, /没有找到足够明确的证据/);
+  assert.match(out, /你可以/);
+  assert.match(out, /换用更具体的关键词/);
+});
+
+test("a refusal without the section is left alone", () => {
+  // A text that does not look the way it is expected to look keeps
+  // all of itself.
+  const text = "我在你的知识库里没有找到足够明确的证据来回答这个问题。";
+  assert.equal(refusalTextWithoutPositions(text), text);
+});
+
+test("a refusal whose advice is missing keeps everything", () => {
+  // Losing the advice at the end of a refusal is worse than showing a
+  // list twice.
+  const text = "开头\n\n## 最可能相关的位置\n\n- 《合同.pdf》";
+  assert.equal(refusalTextWithoutPositions(text), text);
 });
 
 // ===== the streaming contract in the component and the store =====

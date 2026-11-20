@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -710,6 +711,26 @@ class SQLiteStore:
         params.extend([limit, offset])
 
         async with self.conn.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            return [_row_to_dict(r) for r in rows]
+
+    async def find_files_by_name(self, name: str, limit: int = 20) -> list[dict]:
+        """The files whose name is this one, whatever the spacing.
+
+        The reader types the file name the way they remember it; the
+        index has it the way the file system spelled it - one space
+        here and there is enough to lose the file. A question that
+        names a file has to find it (TASK-085).
+        """
+        wanted = re.sub(r"\s+", "", name or "").strip().casefold()
+        if not wanted:
+            return []
+        async with self.conn.execute(
+            "SELECT * FROM files WHERE REPLACE(LOWER(file_name), ' ', '') = ? "
+            "OR REPLACE(LOWER(file_name), ' ', '') LIKE ? "
+            "ORDER BY indexed_at DESC LIMIT ?",
+            (wanted, f"%{wanted}%", limit),
+        ) as cursor:
             rows = await cursor.fetchall()
             return [_row_to_dict(r) for r in rows]
 

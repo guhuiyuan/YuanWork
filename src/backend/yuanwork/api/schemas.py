@@ -192,6 +192,19 @@ class InteractionRequest(BaseModel):
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class RefusalPosition(BaseModel):
+    """One place the answer most likely is.
+
+    It carries the path, so the reader can click it and look at the
+    original - a refusal that names a place it will not let you open
+    is a dead end (TASK-085).
+    """
+
+    file_name: str = ""
+    file_path: str = ""
+    location: str = ""
+
+
 class ChatResponse(BaseModel):
     """Chat response (non-streaming fallback)."""
 
@@ -201,6 +214,8 @@ class ChatResponse(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
     refused: bool = False
     refusal_reason: str | None = None
+    #: The places a refusal points at - clickable, with the path.
+    refusal_positions: list[RefusalPosition] = Field(default_factory=list)
     conflicts: list[ConflictInfo] = Field(default_factory=list)
     wiki_compile: dict[str, Any] | None = None
     # The terms the reader may not know - each one opens the text it

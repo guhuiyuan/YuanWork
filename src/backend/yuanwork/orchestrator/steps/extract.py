@@ -19,6 +19,8 @@ async def extract_evidence(
     retriever: HybridRetriever,
     top_k: int = 10,
     tiered: "TieredRetriever | None" = None,
+    scope_doc_ids: list[str] | None = None,
+    summary: bool = False,
 ) -> dict[str, Any]:
     """The evidence for a question, and where it came from.
 
@@ -33,7 +35,13 @@ async def extract_evidence(
     doc_ids = [c["doc_id"] for c in candidates] if candidates else None
 
     if tiered is not None:
-        return await tiered.search(query=query, top_k=top_k, doc_ids=doc_ids)
+        return await tiered.search(
+            query=query,
+            top_k=top_k,
+            doc_ids=doc_ids,
+            scope_doc_ids=scope_doc_ids,
+            summary=summary,
+        )
 
     if not candidates:
         # No candidates - try broad search
