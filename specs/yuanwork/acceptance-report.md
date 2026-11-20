@@ -40,7 +40,7 @@
 | AC-F-017 | 给定一批情景事件，当执行整合时，系统 SHALL 从中归纳出实体、规律与页面更新并写入语义记… | TASK-021 | test_consolidation_induction.py 30 passed | ✅ 通过 |
 | AC-F-018 | 给定空闲、累计轮数达阈值、用户手动触发这 3 种条件，系统 SHALL 分别都能触发一次整合 | TASK-022 | test_consolidation_triggers.py 16 passed | ✅ 通过 |
 | AC-F-019 | 给定一次模型调用，系统 SHALL 只向白名单内的主机发出请求，并把调用记录写入本地审计 | TASK-004, TASK-005, TASK-008 | test_privacy_contract_audit_entry.py 15 passed；test_privacy_contract_redaction_wiring.py 11 passed；test_privacy_contract_bypass.py 14 passed | ✅ 通过 |
-| AC-F-020 | 给定一次作答，系统 SHALL 使答案中的事实全部来自知识库切片，模型 SHALL 不得补充… | TASK-012, TASK-016 | test_citation_validation.py 20 passed；test_runtime_contract_validation.py 22 passed | ✅ 通过 |
+| AC-F-020 | 给定一次作答，系统 SHALL 使答案中的事实全部来自知识库切片，模型 SHALL 不得补充… | TASK-012, TASK-016, TASK-087 | test_citation_validation.py 20 passed；test_runtime_contract_validation.py 22 passed；TASK-087 后端 1799 passed + 真机复验：连跑 6 次全部正常作答 | ✅ 通过 |
 | AC-F-021 | 给定工作域内的一份文档，当建立索引时，系统 SHALL 判定它属于核心层还是长尾层 | TASK-032 | test_tier_classifier_contract.py 13 passed | ✅ 通过 |
 | AC-F-022 | 给定一份核心层文档，当完成摄入时，系统 SHALL 由模型通读该文档原文，并产出实体页、概念… | TASK-033 | test_core_compile_contract.py 18 passed | ✅ 通过 |
 | AC-F-023 | 给定编译出的页面，当查看页面上的一条结论时，系统 SHALL 为该结论附带它在原文中的出处锚… | TASK-034 | test_conclusion_anchor_contract.py 9 passed | ✅ 通过 |
@@ -442,3 +442,21 @@ wiki 视图只剩一棵树，页面、侧栏、引用全没了。
 
 **一条教训**：**格式也是内容**。回答的组织方式（分节、步骤、对比）本身是答案的一部分，
 把它压成纯文本不是「朴素」，是**扔掉信息**。
+### 6.13 引用编号越界，把一次编号失误变成了一次拒答
+
+「总结第五讲」这个问题**有时答、有时拒答**——拒的那次说的是
+「答案里的引用和找到的资料对不上」。抓了流：模型写的答案里出现了 **[25]**，
+而证据只有 **20** 条 → 越界 → 引用校验（ADR-009）按规矩转拒答。
+
+原因不是模型编造内容，是它在答案末尾的**「引用来源」一节里自己重新编号**，
+编出了一个证据里根本没有的号。**校验是对的**（越界就该拒答），错的是
+**模型不知道编号的范围**。
+
+**修法**（TASK-087）：**不放松校验**（放松了就等于给了假引用），而是**把编号范围告诉模型**——
+提示词里写明「只能引用上面列出的编号（1 到 N）」与「『引用来源』一节照抄上面的编号，
+不要自己重新编号」。
+
+**真机复验**：
+| 做什么 | 修之前 | 修之后 |
+|--------|--------|--------|
+| 同一个问题（总结第五讲）连跑 | 2 次里错 1 次（拒答） | **6 次全部正常作答**，引用编号的最大值都是 **20** |

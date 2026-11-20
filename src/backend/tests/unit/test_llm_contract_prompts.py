@@ -121,6 +121,18 @@ def test_the_answer_template_does_not_use_the_confidence(answer):
     assert "{{ confidence }}" not in answer
 
 
+def test_the_answer_template_states_the_range_of_the_numbers(answer):
+    """The model has to know how many references there are.
+
+    The model renumbered the sources in its own "引用来源" list once, and
+    the number it made up was above the evidence - which the citation
+    check (ADR-009) then rejects, so a question that could be answered
+    came back as a refusal (TASK-087)."""
+    assert "{{ evidence|length }}" in answer
+    assert "只能引用上面列出的编号" in answer
+    assert "不要自己重新编号" in answer
+
+
 # --------------------------------------------------------------------------
 # the conflict template
 # --------------------------------------------------------------------------
