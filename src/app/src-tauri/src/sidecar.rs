@@ -202,22 +202,54 @@ fn find_backend_executable(app: &AppHandle) -> Result<BackendLaunch, Box<dyn std
 /// Walks up to 8 parent directories looking for `.venv/Scripts/python.exe`
 /// (Windows) or `.venv/bin/python` (Unix). If not found, tries `py` /
 /// `python` / `python3` on the system PATH.
-fn find_python_interpreter() -> Result<PathBuf, Box<dyn std::error::Error>> {
+/// The project root this binary was built in.
+///
+/// The exe does not live in the checkout - the cargo target directory
+/// is on D: to keep C: free - so walking up from the *current
+/// directory* finds nothing when the app is started by double-clicking
+/// the exe (the working directory is then the exe's own folder). The
+/// build knows where the project is, so the build writes it into the
+/// binary and the finder falls back to it.
+fn build_time_project_root() -> Option<PathBuf> {
+    // CARGO_MANIFEST_DIR is <root>/src/app/src-tauri.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest.parent()?.parent()?.parent().map(|p| p.to_path_buf())
+}
+
+/// The places to look for the project, most specific first.
+///
+/// The current directory and its parents come first (that is where the
+/// app is normally started from), then the root the binary was built
+/// in.
+fn candidate_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         let mut dir = cwd.as_path();
         for _ in 0..8 {
-            let cand = if cfg!(target_os = "windows") {
-                dir.join(".venv").join("Scripts").join("python.exe")
-            } else {
-                dir.join(".venv").join("bin").join("python")
-            };
-            if cand.exists() {
-                return Ok(cand);
-            }
+            roots.push(dir.to_path_buf());
             match dir.parent() {
                 Some(p) => dir = p,
                 None => break,
             }
+        }
+    }
+    if let Some(root) = build_time_project_root() {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+fn find_python_interpreter() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    for root in candidate_roots() {
+        let cand = if cfg!(target_os = "windows") {
+            root.join(".venv").join("Scripts").join("python.exe")
+        } else {
+            root.join(".venv").join("bin").join("python")
+        };
+        if cand.exists() {
+            return Ok(cand);
         }
     }
 
@@ -241,25 +273,28 @@ fn find_python_interpreter() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Err("no Python interpreter found; create .venv at project root or install Python".into())
 }
 
-/// Locate the `src/backend/` directory by walking up from cwd.
+/// Locate the `src/backend/` directory.
 ///
 /// This is the directory `python -m yuanwork` is invoked from so that
-/// `import yuanwork` resolves to the project's package.
+/// `import yuanwork` resolves to the project's package. The current
+/// directory and its parents come first; the root the binary was built
+/// in is the fallback, so the exe works even when it is started from
+/// somewhere else entirely.
 fn find_backend_module_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut dir = cwd.as_path();
-        for _ in 0..8 {
-            let cand = dir.join("src").join("backend");
-            if cand.join("yuanwork").exists() {
-                return Ok(cand);
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => break,
-            }
+    for root in candidate_roots() {
+        let cand = root.join("src").join("backend");
+        if cand.join("yuanwork").exists() {
+            return Ok(cand);
         }
     }
-    Err("could not locate src/backend/ (run from project root or src/app/)".into())
+    Err(match build_time_project_root() {
+        Some(root) => format!(
+            "could not locate src/backend/ (it was at {} when this was built)",
+            root.display()
+        )
+        .into(),
+        None => "could not locate src/backend/ (run from project root or src/app/)".into(),
+    })
 }
 
 /// The project root, given the backend module directory.
@@ -460,6 +495,35 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let second = instance_token();
         assert_ne!(first, second);
+    }
+
+    // ===== finding the project =====
+
+    #[test]
+    fn test_the_build_time_root_is_where_the_project_was() {
+        // The exe does not live in the checkout, so the working
+        // directory cannot be the only lead (TASK-083).
+        let root = build_time_project_root().expect("the build directory is known");
+        assert!(
+            root.join("src").join("backend").join("yuanwork").exists(),
+            "the build-time root should be the project root: {}",
+            root.display()
+        );
+    }
+
+    #[test]
+    fn test_the_candidate_roots_include_the_build_time_root() {
+        let roots = candidate_roots();
+        let built = build_time_project_root().expect("the build directory is known");
+        assert!(roots.contains(&built));
+    }
+
+    #[test]
+    fn test_the_backend_is_found_from_anywhere() {
+        // The walk up from the current directory is tried first, but the
+        // build-time root is always in the list - so the exe works even
+        // when it is started by double-clicking it.
+        assert!(find_backend_module_dir().is_ok());
     }
 
     #[test]
