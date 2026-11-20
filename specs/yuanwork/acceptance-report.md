@@ -26,10 +26,10 @@
 | AC-F-003 | 给定工作域内含 PDF、PPT、Word、Excel 与 Markdown 文件，当建立索引… | TASK-002, TASK-072 | test_anchor_contract.py 17 passed；test_ingestion_contract_parsers.py 19 passed | ✅ 通过 |
 | AC-F-004 | 给定一次提问，当执行检索时，系统 SHALL 同时走向量与全文两路召回并融合排序，且 SHA… | TASK-014, TASK-015 | test_retrieval_contract_confidence.py 13 passed；test_retrieval_contract_edges.py 17 passed | ✅ 通过 |
 | AC-F-005 | 给定一次作答，当返回答案时，系统 SHALL 为每条结论附上引用，引用 SHALL 含文件名… | TASK-012 | test_citation_validation.py 20 passed | ✅ 通过 |
-| AC-F-006 | 给定一条带位置锚点的引用，当用户点击它时，系统 SHALL 在系统默认程序中打开该文件并定位… | TASK-027 | TASK-027 7 passed | ✅ 通过 |
+| AC-F-006 | 给定一条带位置锚点的引用，当用户点击它时，系统 SHALL 在系统默认程序中打开该文件并定位… | TASK-027, TASK-084, TASK-085 | TASK-027 7 passed；TASK-084 Rust 83 + 前端 152 passed；TASK-085 真机复验：默认程序打开原文、应用说出位置 | ✅ 通过 |
 | AC-F-007 | 给定检索到的证据条数低于阈值，或存在无法定位到原文的证据，当准备作答时，系统 SHALL 拒… | TASK-009 | test_evidence_gate_hard_rules.py 31 passed | ✅ 通过 |
 | AC-F-008 | 给定硬规则闸已通过，当模型自评这些证据不足以回答该问题时，系统 SHALL 拒答（模型自评闸… | TASK-010 | test_evidence_gate_model.py 22 passed | ✅ 通过 |
-| AC-F-009 | 给定系统决定拒答，当输出拒答结果时，系统 SHALL 给出最可能的位置与改进建议，且 SHA… | TASK-011 | test_llm_contract_refusal_citation.py 22 passed | ✅ 通过 |
+| AC-F-009 | 给定系统决定拒答，当输出拒答结果时，系统 SHALL 给出最可能的位置与改进建议，且 SHA… | TASK-011, TASK-085 | test_llm_contract_refusal_citation.py 22 passed；TASK-085 后端 1798 + 前端 159 passed；真机复验：拒答里的位置点开就是原文 | ✅ 通过 |
 | AC-F-010 | 给定独立判定发现模型答案与知识库冲突，当返回结果时，系统 SHALL 以知识库内容为准，并在… | TASK-013 | test_conflict_rewrite.py 14 passed | ✅ 通过 |
 | AC-F-011 | 给定判定出了一次冲突，当该冲突发生时，系统 SHALL 把分歧点、出处与判定说明写入本地冲突… | TASK-013 | test_conflict_rewrite.py 14 passed | ✅ 通过 |
 | AC-F-012 | 给定一组达到编译阈值的证据簇，当触发页面编译时，系统 SHALL 自动生成含标题、摘要、要点… | TASK-025 | test_wiki_page_structure.py 11 passed | ✅ 通过 |
@@ -59,7 +59,7 @@
 | AC-P-006 | 给定工作域内单个文件被重建索引，当重建完成时，系统 SHALL 在 60 秒以内让新内容可被… | TASK-002, TASK-003, TASK-071 | test_anchor_contract.py 17 passed；test_storage_contract_chunker.py 11 passed；TASK-071  passed；延迟实测 0.35 | ✅ 通过 |
 | AC-P-007 | 给定基准机与同一真实工作域且其中核心层文档不超过 200 份，当完成长尾层索引时，系统 SH… | TASK-040, TASK-042, TASK-045, TASK-070 | test_ingest_performance_contract.py 9 passed；test_perf_benchmark_contract.py 18 passed；test_ingest_parallel_contract.py 17 passed；TASK-070  passed；… | ✅ 通过 |
 | AC-P-008 | 给定一份核心层文档，当完成摄入编译时，系统 SHALL 在 5 分钟以内完成编译（不含模型排… | TASK-033, TASK-071 | test_core_compile_contract.py 18 passed；TASK-071  passed；延迟实测 15.45 | ✅ 通过 |
-| AC-P-009 | 给定一次提问且核心层页面已有可用结论，当检索证据时，系统 SHALL 在 2 秒以内返回核心… | TASK-036, TASK-071 | test_tiered_retrieval_contract.py 15 passed；TASK-071  passed；延迟实测 0.008 | ✅ 通过 |
+| AC-P-009 | 给定一次提问且核心层页面已有可用结论，当检索证据时，系统 SHALL 在 2 秒以内返回核心… | TASK-036, TASK-071, TASK-085 | test_tiered_retrieval_contract.py 15 passed；TASK-071  passed；延迟实测 0.008；TASK-085：点名文件时长尾层搜**那份文件**（搜一个文件，仍然快） | ✅ 通过 |
 | AC-P-010 | 给定基准机与真实工作域数据集，当执行解析阶段时，系统 SHALL 达到 120 个文件每分钟… | TASK-042, TASK-044, TASK-054, TASK-061, TASK-065, TASK-067 | test_perf_benchmark_contract.py 18 passed；test_parser_fastpath_contract.py 9 passed；test_perf_benchmark_contract.py 8 passed；test_ingest_parallel_c… | ✅ 通过 |
 | AC-P-011 | 给定基准机与真实工作域数据集，当执行嵌入阶段时，系统 SHALL 达到 15 个切片每秒以上… | TASK-042, TASK-043, TASK-053, TASK-055, TASK-056, TASK-062, TASK-063, TASK-069 | test_perf_benchmark_contract.py 18 passed；test_embedding_device_contract.py 10 passed；test_embedding_device_contract.py 9 passed；test_ingest_perfor… | ✅ 通过 |
 | AC-P-012 | 给定基准机与真实工作域数据集，当执行索引落库阶段，系统 SHALL 达到 500 个切片每秒… | TASK-042, TASK-045, TASK-057, TASK-058, TASK-063, TASK-064, TASK-066, TASK-070 | test_perf_benchmark_contract.py 18 passed；test_ingest_parallel_contract.py 17 passed；test_ingest_performance_contract.py 21 passed；test_ingest_perf… | ✅ 通过 |
@@ -381,3 +381,39 @@ wiki 视图只剩一棵树，页面、侧栏、引用全没了。
 
 **教训**：进程之间的约定要**能被核对**。「有人回 200」不等于「那是我要的那个」——
 **令牌是几行代码的事，比事后查一小时便宜得多**。
+### 6.11 点名了文件却拒答；拒答里的位置点不开
+
+用户报两件事：**「人工智能导论（第五讲）24.pdf 明明在左侧工作域中，但说是证据不足无法正常回答」**
+与**「上面的位置没有连接，至少前端没有，无法点击跳转」**。两件事各有一串原因。
+
+**一、点名了文件却拒答**——三件事叠在一起，缺一件都不会拒答：
+- **核心层的短路不看文件线索**（ADR-031/034）：核心层找到两条**别的文档**的结论就返回了，
+  长尾层根本没搜。短路是**速度**的优化，不是正确性的保证——用它回答「关于这份文件」的问题，
+  答的其实是**另一份文件**；
+- **文件名对不上**：索引里存的是「人工智能导论（第五讲） 24.pdf」（第五讲后面多一个空格），
+  问题里写的是「…（第五讲）24.pdf」→ SQL 的 `file_name = ?` 匹配不到 → 定位步骤**根本没锁定**那份文件；
+- **总结要的是铺开**：10 条最像问题的切片说不出一份 150 页的文档讲了什么——而「总结这份文件」
+  这个问题**本身就是文件名**，相似度排序对它说不了什么。
+
+**修法**（TASK-085，ADR-047）：问题点名了文件就把检索范围**锁定到那份文件**（核心层的证据也只取
+来自那份文件的结论；长尾层在那份文件里搜）；文件名匹配**忽略空格与大小写**；
+总结类问题**按文档铺开**取 20 条证据（均匀分布在全文），并让证据闸知道这是「总结一份文件」
+（`evidence_gate.j2` 的第一条：证据来自那份文件且覆盖多个部分就算充分）。
+**规范同步**：proposal §2.1 增 1 条「按文件提问」；AC-P-009 补一处例外
+（点名文件时长尾层搜那份文件——搜的是一个文件，0.09 秒，仍然快）；AC 条数不变（59）。
+
+**二、拒答里的位置点不开**——位置只有文字，没有能打开的东西：文案按 ADR-012 不能带路径
+（路径是内部标识），而能打开的正是路径。**修法**（ADR-048）：**位置给两遍**——
+文案里照旧列位置（人读），另给一个带路径的字段 `refusal_positions`（程序用）；
+桌面端把文案里的清单换成**可点的按钮**，点了就在默认程序里打开，并说出位置
+（「已打开《示例实验.pdf》· 第 10 页」）。**规范同步**：AC-F-009 补一句「给出的位置要能点开」。
+
+**真机复验**：
+| 做什么 | 修之前 | 修之后 |
+|--------|--------|--------|
+| 问「总结一下人工智能导论（第五讲）24.pdf 的内容」 | 证据不足，无法正常回答 | **正常作答，20 条引用**（内容讲的是搜索技术/专家系统/回溯/A*） |
+| 问一个资料里没有答案的问题，看拒答 | 位置是一行文字，点不动 | **5 个可点的按钮**，点开就是原文（默认程序打开 + 说出「第 10 页」） |
+
+**两条教训**：**「短路」是速度的优化，不是正确性的保证**——拿它回答「关于这份文件」的问题，
+答的是另一份文件；**名字差一个空格就足以让检索范围落空**——文件系统怎么拼，
+不是读者记得的那个意思。
