@@ -9,7 +9,8 @@ import {
   openCitation,
 } from "../api/backend";
 import { citationLabel, openedNotice } from "../api/citations";
-import { markTerms, termContextSummary } from "../api/terms";
+import { termContextSummary } from "../api/terms";
+import { AnswerMarkdown } from "./AnswerMarkdown";
 import { appendFailureNotice, failureNotice, isCancellation, refusalBanner, refusalContent, refusalTextWithoutPositions } from "../api/streamText";
 
 /** Format the backend's conflict records into one warning string. */
@@ -477,8 +478,10 @@ function Message({ msg }: { msg: ChatMessage }) {
     setTermLoading(false);
   }, []);
 
-  // The answer, with the terms in it marked. The text itself is not
-  // changed - the pieces joined together are the answer.
+  // The answer, rendered as markdown - the model writes it that way,
+  // and the marks themselves should not be what the reader sees
+  // (TASK-086). The text itself is not changed: what is rendered is
+  // what was written.
   //
   // A refusal is the one case where the text loses a part: its list of
   // positions is drawn as buttons above the message, so the plain list
@@ -487,10 +490,6 @@ function Message({ msg }: { msg: ChatMessage }) {
   const shownContent = useMemo(
     () => (hasPositions ? refusalTextWithoutPositions(msg.content) : msg.content),
     [hasPositions, msg.content]
-  );
-  const segments = useMemo(
-    () => markTerms(shownContent, msg.terms ?? []),
-    [shownContent, msg.terms]
   );
 
   if (msg.role === "user") {
@@ -545,23 +544,15 @@ function Message({ msg }: { msg: ChatMessage }) {
       )}
 
       <div className="msg__content">
-        {msg.content
-          ? segments.map((segment, index) => {
-              const term = segment.term;
-              if (!term) return <span key={index}>{segment.text}</span>;
-              return (
-                <button
-                  key={index}
-                  type="button"
-                  className="msg__term"
-                  title="查看原文上下文"
-                  onClick={() => void openTerm(term)}
-                >
-                  {segment.text}
-                </button>
-              );
-            })
-          : "（生成中…）"}
+        {msg.content ? (
+          <AnswerMarkdown
+            content={shownContent}
+            terms={msg.terms ?? []}
+            onTerm={(term) => void openTerm(term)}
+          />
+        ) : (
+          "（生成中…）"
+        )}
       </div>
 
       {msg.terms && msg.terms.length > 0 && (
@@ -751,9 +742,62 @@ const chatStyles = `
     padding: 10px 14px;
     border-radius: 8px;
     max-width: 85%;
-    white-space: pre-wrap;
     word-wrap: break-word;
   }
+  /* The answer is markdown: it brings its own headings, lists and
+     emphasis, so the marks must not show up as text (TASK-086). */
+  .msg__content > *:first-child { margin-top: 0; }
+  .msg__content > *:last-child { margin-bottom: 0; }
+  .msg__content h1, .msg__content h2, .msg__content h3, .msg__content h4 {
+    margin: 14px 0 6px;
+    line-height: 1.35;
+    color: var(--text-primary);
+  }
+  .msg__content h1 { font-size: 18px; }
+  .msg__content h2 { font-size: 16px; }
+  .msg__content h3 { font-size: 15px; }
+  .msg__content h4 { font-size: 14px; }
+  .msg__content p { margin: 0 0 8px; }
+  .msg__content ul, .msg__content ol { margin: 0 0 8px; padding-left: 22px; }
+  .msg__content li { margin: 3px 0; }
+  .msg__content li > p { margin: 0; }
+  .msg__content strong { font-weight: 600; color: var(--text-primary); }
+  .msg__content code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-tertiary);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .msg__content pre {
+    background: var(--bg-tertiary);
+    padding: 10px 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0 0 8px;
+  }
+  .msg__content pre code { background: none; padding: 0; }
+  .msg__content blockquote {
+    margin: 0 0 8px;
+    padding: 2px 0 2px 10px;
+    border-left: 3px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .msg__content table {
+    border-collapse: collapse;
+    margin: 0 0 8px;
+    font-size: 13px;
+  }
+  .msg__content th, .msg__content td {
+    border: 1px solid var(--border);
+    padding: 5px 8px;
+    text-align: left;
+  }
+  .msg__content th { background: var(--bg-tertiary); }
+  .msg__content hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  .md__link { color: var(--accent); text-decoration: underline; }
+  .md__link-url { color: var(--text-tertiary); font-size: 11px; margin-left: 4px; }
+  .md__image { color: var(--text-secondary); font-style: italic; }
   .msg__term {
     display: inline;
     background: none;

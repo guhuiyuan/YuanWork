@@ -1,5 +1,6 @@
 import { useAppStore } from "../store";
 import { triggerConsolidation, searchEpisodic } from "../api/backend";
+import { plainPreview } from "../api/markdown.ts";
 import { useState } from "react";
 
 export function RightPanel() {
@@ -58,7 +59,7 @@ export function RightPanel() {
             {messages.slice(-3).map((m) => (
               <div key={m.id} className="trace-item">
                 <div className="trace-item__role">{m.role}</div>
-                <div className="trace-item__content">{m.content.slice(0, 100)}</div>
+                <div className="trace-item__content">{plainPreview(m.content)}</div>
                 {m.confidence != null && (
                   <div className="trace-item__meta">置信度 {(m.confidence * 100).toFixed(0)}%</div>
                 )}
