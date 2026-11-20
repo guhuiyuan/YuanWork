@@ -67,6 +67,13 @@ pub struct CitationAnchor {
     pub row: Option<u32>,
     #[serde(default)]
     pub heading_path: Vec<String>,
+    /// Which text box in the document (Word keeps whole reports in
+    /// floating text boxes).
+    #[serde(default)]
+    pub textbox_index: Option<u32>,
+    /// Which picture in the document (scanned documents are pictures).
+    #[serde(default)]
+    pub image_index: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -869,7 +876,7 @@ pub struct OpenedLocation {
     pub path: String,
     /// The position in words - "第 12 页", "Slide 3", "进度表 第 7 行".
     pub location: String,
-    /// How the position was reached: "fragment", "office" or "none".
+    /// How the position was reached: "office" or "none".
     pub method: String,
 }
 
@@ -878,25 +885,22 @@ pub struct OpenedLocation {
 pub struct Launch {
     pub program: String,
     pub args: Vec<String>,
-    /// "fragment" | "office" | "none"
+    /// "office" | "none"
     pub method: &'static str,
 }
 
 /// How a file is opened at a position.
 ///
-/// Every format has its own way of getting to a place inside it: a PDF
-/// viewer understands a `#page=` fragment, Office has to be told
-/// through its own automation, and a text file has no position at all
-/// (ADR-017).
+/// Office has to be told through its own automation - that is the only
+/// way to land on a slide or on a worksheet. Everything else opens in
+/// the default program, and the app says where in the file the words
+/// are (ADR-017).
 pub fn plan_open(path: &str, anchor: &CitationAnchor) -> Launch {
     let extension = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
 
     match extension.as_str() {
-        "pdf" => {
-            if let Some(page) = anchor.page {
-                return open_with_fragment(path, &format!("page={page}"));
-            }
-        }
+        // Office is told through its own automation - the only way to
+        // land on a slide or on a worksheet.
         "ppt" | "pptx" => {
             if let Some(slide) = anchor.slide {
                 return open_with_office(&powerpoint_script(path, slide));
@@ -910,10 +914,21 @@ pub fn plan_open(path: &str, anchor: &CitationAnchor) -> Launch {
         _ => {}
     }
 
+    // Everything else - PDFs included - opens in the default program.
+    //
+    // It used to be `path#page=N` for PDFs, but that asks Windows for
+    // a file *named* "…pdf#page=N" - the reader gets "file not found"
+    // and the citation is dead. And the URL form (`file:///…`) is
+    // worse: some readers (WPS) take it for something else entirely
+    // and open the wrong document. The default program opens the file;
+    // the app says which page the words are on.
     open_as_is(path)
 }
 
 /// The position in words - what the reader sees.
+///
+/// The words match the ones the backend uses, so the citation in the
+/// answer and the notice after opening say the same thing.
 pub fn describe_anchor(anchor: &CitationAnchor) -> String {
     match anchor.kind.as_str() {
         "page" => match anchor.page {
@@ -924,7 +939,24 @@ pub fn describe_anchor(anchor: &CitationAnchor) -> String {
             Some(slide) => format!("Slide {slide}"),
             None => String::new(),
         },
-        "section" => anchor.section.clone().unwrap_or_default(),
+        "section" => {
+            if let Some(section) = anchor.section.as_ref().filter(|s| !s.trim().is_empty()) {
+                return section.clone();
+            }
+            if !anchor.heading_path.is_empty() {
+                return anchor.heading_path.join(" › ");
+            }
+            // A Word document can hold text that is in neither a
+            // paragraph nor a heading: it sits in a text box or in a
+            // picture. The position is still a position - say which.
+            if let Some(index) = anchor.image_index {
+                return format!("第 {} 张图片", index + 1);
+            }
+            if let Some(index) = anchor.textbox_index {
+                return format!("第 {} 个文本框", index + 1);
+            }
+            String::new()
+        }
         "sheet_row" => match (&anchor.sheet, anchor.row) {
             (Some(sheet), Some(row)) => format!("{sheet} 第 {row} 行"),
             (Some(sheet), None) => sheet.clone(),
@@ -950,17 +982,6 @@ fn open_as_is(path: &str) -> Launch {
         ],
         method: "none",
     }
-}
-
-/// Open the file with a fragment appended - the way a PDF viewer is
-/// told which page to show.
-fn open_with_fragment(path: &str, fragment: &str) -> Launch {
-    let mut launch = open_as_is(path);
-    if let Some(last) = launch.args.last_mut() {
-        *last = format!("{path}#{fragment}");
-    }
-    launch.method = "fragment";
-    launch
 }
 
 /// Open the file through Office's own automation - the only way to
@@ -1018,9 +1039,10 @@ fn escape_powershell(text: &str) -> String {
 
 /// Open the file a citation points at, at the position it points to.
 ///
-/// The way to get there is different per format (ADR-017): a PDF
-/// viewer understands a `#page=` fragment, Office is told through its
-/// own automation, and everything else is simply opened.
+/// The way to get there is different per format (ADR-017): Office is
+/// told through its own automation, and everything else - PDFs
+/// included - opens in the default program. The position comes back
+/// in words ("第 12 页"), so the app can say where to look.
 #[tauri::command]
 pub fn open_at_anchor(
     path: String,
@@ -1116,18 +1138,48 @@ mod tests {
     }
 
     #[test]
-    fn open_at_anchor_opens_a_pdf_at_its_page() {
+    fn open_at_anchor_opens_a_pdf_in_the_default_program() {
+        // The page used to be glued onto the file name
+        // ("…合同.pdf#page=12"), which asks Windows for a file *named*
+        // that - the reader gets "file not found" and the citation is
+        // dead. The default program opens the file; the app says which
+        // page the words are on.
         let mut a = anchor("page");
         a.page = Some(12);
 
         let launch = plan_open("C:\\kb\\合同.pdf", &a);
 
-        assert_eq!(launch.method, "fragment");
+        assert_eq!(launch.method, "none");
         assert!(
-            launch.args.iter().any(|arg| arg.contains("#page=12")),
-            "the page is not in the launch command: {:?}",
+            launch.args.iter().any(|arg| arg == "C:\\kb\\合同.pdf"),
+            "the file name is not in the launch command: {:?}",
             launch
         );
+        assert!(
+            !launch.args.iter().any(|arg| arg.contains("#page")),
+            "the fragment must not be part of the file name: {:?}",
+            launch
+        );
+    }
+
+    #[test]
+    fn the_page_of_a_citation_is_said_in_words() {
+        let mut a = anchor("page");
+        a.page = Some(12);
+        assert_eq!(describe_anchor(&a), "第 12 页");
+    }
+
+    #[test]
+    fn a_text_box_position_is_said_in_words() {
+        // A Word report can keep its whole body in floating text
+        // boxes - the position is still a position.
+        let mut a = anchor("section");
+        a.textbox_index = Some(1);
+        assert_eq!(describe_anchor(&a), "第 2 个文本框");
+
+        let mut b = anchor("section");
+        b.image_index = Some(2);
+        assert_eq!(describe_anchor(&b), "第 3 张图片");
     }
 
     #[test]

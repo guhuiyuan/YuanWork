@@ -15,7 +15,9 @@ import type { Citation, CitationAnchor } from "../store.ts";
  * A citation without a position cannot be opened at a place - it can
  * only be opened.
  */
-export function anchorOf(citation: Citation): CitationAnchor | null {
+export function anchorOf(
+  citation: Partial<Citation>
+): CitationAnchor | null {
   const anchor = citation.anchor;
   if (anchor && anchor.kind) return anchor;
 
@@ -46,7 +48,17 @@ export function describeAnchor(anchor: CitationAnchor | null): string {
     case "slide":
       return anchor.slide != null ? `Slide ${anchor.slide}` : "";
     case "section":
-      return anchor.section ?? "";
+      if (anchor.section) return anchor.section;
+      if (anchor.heading_path?.length)
+        return anchor.heading_path.join(" › ");
+      // A Word document can hold text that is in neither a paragraph
+      // nor a heading: it sits in a text box or in a picture. The
+      // position is still a position - say which one.
+      if (anchor.image_index != null)
+        return `第 ${anchor.image_index + 1} 张图片`;
+      if (anchor.textbox_index != null)
+        return `第 ${anchor.textbox_index + 1} 个文本框`;
+      return "";
     case "sheet_row":
       if (anchor.sheet && anchor.row != null)
         return `${anchor.sheet} 第 ${anchor.row} 行`;
@@ -57,6 +69,28 @@ export function describeAnchor(anchor: CitationAnchor | null): string {
     default:
       return "";
   }
+}
+
+/**
+ * What the reader is told after a citation is opened.
+ *
+ * The file opens in the default program, and most programs cannot be
+ * told "show page 12" - so the notice says where in the file the words
+ * are. Saying it is the difference between "the citation is dead" and
+ * "look at page 12".
+ */
+export function openedNotice(
+  citation: Partial<Citation>,
+  opened?: { location?: string | null; method?: string }
+): string {
+  const name = citation.file_name || "（未知文件）";
+  const location =
+    opened?.location || citation.location || describeAnchor(anchorOf(citation));
+  if (!location) return `已打开《${name}》`;
+  // Office is told through its own automation, so the file lands on
+  // the slide or on the worksheet by itself.
+  if (opened?.method === "office") return `已打开《${name}》· ${location}`;
+  return `已打开《${name}》· ${location}（阅读器未必自动跳到那里）`;
 }
 
 /**

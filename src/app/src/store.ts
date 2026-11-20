@@ -35,6 +35,10 @@ export interface CitationAnchor {
   sheet?: string;
   row?: number;
   heading_path?: string[];
+  /** Which text box (a Word report can keep its body in text boxes). */
+  textbox_index?: number;
+  /** Which picture (a scanned document is pictures). */
+  image_index?: number;
 }
 
 export interface Citation {

@@ -8,7 +8,7 @@ import {
   getTermContext,
   openCitation,
 } from "../api/backend";
-import { citationLabel } from "../api/citations";
+import { citationLabel, openedNotice } from "../api/citations";
 import { markTerms, termContextSummary } from "../api/terms";
 import { appendFailureNotice, failureNotice, isCancellation, refusalBanner, refusalContent } from "../api/streamText";
 
@@ -379,6 +379,7 @@ export function ChatWindow() {
 }
 
 function Message({ msg }: { msg: ChatMessage }) {
+  const showToast = useAppStore((s) => s.showToast);
   const [openError, setOpenError] = useState<string | null>(null);
   // The term whose context is open, and the context itself.
   const [activeTerm, setActiveTerm] = useState<string | null>(null);
@@ -392,14 +393,20 @@ function Message({ msg }: { msg: ChatMessage }) {
   // Clicking a citation opens the file it points at, at the position it
   // points to (ADR-017). A file that cannot be opened says so instead
   // of doing nothing - the reader has to know the click did not work.
+  //
+  // The file opens in the default program, and most programs cannot be
+  // told "show page 12" - so the app says where to look. Without that
+  // the reader is left with a document and no idea where in it the
+  // words are.
   const openCitationAt = useCallback(async (citation: Citation) => {
     setOpenError(null);
     try {
-      await openCitation(citation);
+      const opened = await openCitation(citation);
+      showToast(openedNotice(citation, opened), "info");
     } catch (e) {
       setOpenError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [showToast]);
 
   /**
    * Open the text a term stands for.

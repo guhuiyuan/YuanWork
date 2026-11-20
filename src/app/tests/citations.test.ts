@@ -13,6 +13,7 @@ import {
   anchorOf,
   citationLabel,
   describeAnchor,
+  openedNotice,
 } from "../src/api/citations.ts";
 import type { Citation } from "../src/store.ts";
 
@@ -100,5 +101,58 @@ test("the label prefers the position the backend worded", () => {
   assert.equal(
     citationLabel(citation({ location: "第 12 页（扫描件）", page: 12 })),
     "合同.pdf · 第 12 页（扫描件）"
+  );
+});
+
+// ===== the notice after opening =====
+
+test("the notice says which file and where in it", () => {
+  // The file opens in the default program, and most programs cannot be
+  // told "show page 12" - so the app says where to look.
+  assert.equal(
+    openedNotice(
+      { file_name: "合同.pdf" },
+      { location: "第 12 页", method: "none" }
+    ),
+    "已打开《合同.pdf》· 第 12 页（阅读器未必自动跳到那里）"
+  );
+});
+
+test("the notice says nothing extra when the file lands by itself", () => {
+  // Office is told through its own automation, so the file lands on
+  // the slide by itself.
+  assert.equal(
+    openedNotice(
+      { file_name: "方案.pptx" },
+      { location: "Slide 3", method: "office" }
+    ),
+    "已打开《方案.pptx》· Slide 3"
+  );
+});
+
+test("the notice falls back to the citation's own position", () => {
+  assert.equal(
+    openedNotice({ file_name: "合同.pdf", location: "第 12 页" }),
+    "已打开《合同.pdf》· 第 12 页（阅读器未必自动跳到那里）"
+  );
+});
+
+test("a file without a position is just opened", () => {
+  assert.equal(
+    openedNotice({ file_name: "说明.txt" }, { location: "", method: "none" }),
+    "已打开《说明.txt》"
+  );
+});
+
+// ===== the position in a Word document =====
+
+test("a text box position is said in words", () => {
+  assert.equal(
+    describeAnchor({ kind: "section", textbox_index: 1 }),
+    "第 2 个文本框"
+  );
+  assert.equal(
+    describeAnchor({ kind: "section", image_index: 2 }),
+    "第 3 张图片"
   );
 });

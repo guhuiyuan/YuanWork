@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { useAppStore } from "../../store";
 import { labelForCategory } from "./WikiTreePanel";
+import { openedNotice } from "../../api/citations";
 import type { WikiConclusion, WikiPageBlock } from "../../store";
 import {
   getWikiPage,
@@ -313,9 +314,13 @@ export function WikiPageView() {
                     className="wiki-page__conclusion-link"
                     title={`${c.file_name} ${c.location}`}
                     onClick={() => {
-                      openConclusion(c).catch((e) =>
-                        console.error("cannot open the source", e)
-                      );
+                      openConclusion(c)
+                        .then((opened) =>
+                          showToast(openedNotice(c, opened), "info")
+                        )
+                        .catch((e) =>
+                          console.error("cannot open the source", e)
+                        );
                     }}
                   >
                     {c.location || c.file_name}
