@@ -231,12 +231,13 @@ class BatchIngestor:
         jobs: list[tuple[str, str, str]] = []
         skipped_files = 0
         for path in files:
-            file_hash = self.pipeline.hash_file(path)
-            doc_id = doc_id_for(path, file_hash)
+            # The resume comes first: a file that is already indexed is
+            # not read at all - and hashing it would mean reading every
+            # byte of every file of the work domain on every rebuild
+            # (TASK-089).
+            state: dict[str, Any] = {"state": "new", "doc_id": None}
             if not force:
-                # The resume: what the index already knows about this
-                # file decides whether it is read at all.
-                state = await self.pipeline.resume_state(path, file_hash)
+                state = await self.pipeline.resume_state(path)
                 if state["state"] == "already_indexed":
                     results["skipped"] += 1
                     skipped_files += 1
@@ -249,14 +250,6 @@ class BatchIngestor:
                         }
                     )
                     continue
-                if state["state"] == "stale":
-                    # The content is in the index, but it was cut with
-                    # the old rules - it is cut again, under the same id,
-                    # so the old chunks are replaced (ADR-046).
-                    doc_id = state.get("doc_id") or doc_id
-                    logger.info(
-                        "Re-cutting %s - it was cut with the old rules", path.name
-                    )
                 if state["state"] == "modified":
                     # The file changed on disk. The indexed version is
                     # kept and marked - it is not replaced without
@@ -273,7 +266,22 @@ class BatchIngestor:
                         }
                     )
                     continue
-            else:
+
+            # The file is going to be read, so it has to be hashed - and
+            # hashing reads the whole file, so it waits in a thread: the
+            # backend has to stay able to answer while a build runs
+            # (TASK-089).
+            file_hash = await asyncio.to_thread(self.pipeline.hash_file, path)
+            doc_id = doc_id_for(path, file_hash)
+            if state["state"] == "stale":
+                # The content is in the index, but it was cut with
+                # the old rules - it is cut again, under the same id,
+                # so the old chunks are replaced (ADR-046).
+                doc_id = state.get("doc_id") or doc_id
+                logger.info(
+                    f"Re-cutting {path.name} - it was cut with the old rules", path.name
+                )
+            if force:
                 # An explicit rebuild replaces the indexed version of
                 # this file - otherwise the old one would stay
                 # searchable next to the new one.

@@ -8,6 +8,7 @@ import inspect
 import logging
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -250,14 +251,12 @@ class IngestionPipeline:
                 "path": str(file_path),
             }
 
-        # Compute hash
-        file_hash = self._hash_file(file_path)
-
         # The resume: what the index already knows about this file
-        # decides whether it is read at all.
+        # decides whether it is read at all - and whether it has to be
+        # hashed at all (TASK-089).
         stale_doc_id: str | None = None
         if not force:
-            state = await self.resume_state(file_path, file_hash)
+            state = await self.resume_state(file_path)
             if state["state"] == "already_indexed":
                 logger.info(f"Skipping {file_path.name} - already indexed")
                 return {
@@ -287,6 +286,12 @@ class IngestionPipeline:
                     "doc_id": state["doc_id"],
                     "stale": True,
                 }
+
+        # The file is going to be read, so it has to be hashed - and
+        # hashing reads the whole file, so it waits in a thread: the
+        # backend has to stay able to answer while a build runs
+        # (TASK-089).
+        file_hash = await asyncio.to_thread(self._hash_file, file_path)
 
         # Generate doc_id
         doc_id = hashlib.sha256(
@@ -813,7 +818,7 @@ class IngestionPipeline:
         """The hash of a file's contents."""
         return self._hash_file(file_path)
 
-    async def resume_state(self, file_path: Path, file_hash: str) -> dict[str, Any]:
+    async def resume_state(self, file_path: Path, file_hash: str | None = None) -> dict[str, Any]:
         """What the index already knows about this file.
 
         * ``already_indexed`` - the very same content is in the index,
@@ -831,7 +836,32 @@ class IngestionPipeline:
         leaves files that are "indexed" with nothing in the index. Those
         files are not searchable - and, trusting the ledger, they could
         not be repaired either: the build skipped them (TASK-088).
+
+        **The file is not read to find this out** when it does not have
+        to be: the ledger has the file's size and the moment it was
+        read, and if both are the same the content cannot have changed
+        either. Hashing every file of the work domain took about a
+        minute of the rebuild's time - for an answer the ledger already
+        had (TASK-089).
         """
+        previous = await self._indexed_version_at(file_path)
+
+        if previous is not None and self._unchanged_since(file_path, previous):
+            # The same file, untouched since it was read.
+            if previous.get("chunk_version") == self.chunker.version:
+                if await self._index_holds(previous.get("doc_id")):
+                    return {"state": "already_indexed", "doc_id": previous.get("doc_id")}
+                logger.info(
+                    f"Re-indexing {file_path.name} - the ledger has it, "
+                    f"the index does not"
+                )
+                return {"state": "new", "doc_id": None}
+            return {"state": "stale", "doc_id": previous.get("doc_id")}
+
+        # The file changed (or nothing is known about it): the content
+        # decides.
+        if file_hash is None:
+            file_hash = await asyncio.to_thread(self._hash_file, file_path)
         same = await self.sqlite.get_file_by_hash(file_hash)
         if same:
             if same.get("chunk_version") == self.chunker.version:
@@ -847,12 +877,39 @@ class IngestionPipeline:
                 return {"state": "new", "doc_id": None}
             return {"state": "stale", "doc_id": same.get("doc_id")}
 
-        previous = await self._indexed_version_at(file_path)
         if previous is not None:
             await self._mark_stale(previous["doc_id"])
             return {"state": "modified", "doc_id": previous.get("doc_id")}
 
         return {"state": "new", "doc_id": None}
+
+    def _unchanged_since(self, file_path: Path, record: dict[str, Any]) -> bool:
+        """Whether the file on disk is the one the ledger recorded.
+
+        The ledger has the file's size and the moment it was read. If
+        the size is the same and the file has not been touched since it
+        was read, the content cannot have changed either - and the file
+        does not have to be read to know that (TASK-089).
+
+        The trade-off is the one every build tool makes: a file that
+        was edited without changing its size and with its timestamp put
+        back is not noticed. Reading every file to be sure costs a
+        minute of every rebuild - and that is what this check buys
+        back.
+        """
+        size = record.get("size_bytes")
+        indexed_at = record.get("indexed_at")
+        if size is None or indexed_at is None:
+            return False
+        try:
+            stat = file_path.stat()
+            if int(size) != int(stat.st_size):
+                return False
+            read_at = datetime.fromisoformat(str(indexed_at)).timestamp()
+        except (OSError, TypeError, ValueError):
+            return False
+        # A file that was touched after it was read has a later moment.
+        return stat.st_mtime <= read_at + 0.001
 
     async def _index_holds(self, doc_id: str | None) -> bool:
         """Whether the vector table really holds this document.

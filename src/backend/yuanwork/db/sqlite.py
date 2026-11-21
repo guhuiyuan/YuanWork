@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_file_hash ON files(file_hash);
 CREATE INDEX IF NOT EXISTS idx_files_file_type ON files(file_type);
 CREATE INDEX IF NOT EXISTS idx_files_indexed_at ON files(indexed_at DESC);
+-- The build looks a file up by its path for every file of the work
+-- domain - without this index each lookup is a scan of the whole
+-- table (TASK-089).
+CREATE INDEX IF NOT EXISTS idx_files_file_path ON files(file_path COLLATE NOCASE);
 
 -- Episodic memory (conversation history)
 CREATE TABLE IF NOT EXISTS episodes (
