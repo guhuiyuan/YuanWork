@@ -1314,7 +1314,7 @@
 
 ### M37 三个入口说清自己是什么：轨迹、图谱、审计
 
-### [ ] TASK-092: 实现推理轨迹在右栏按步显示
+### [x] TASK-092: 实现推理轨迹在右栏按步显示
 
 - **描述**: 右栏「推理轨迹」页是一句占位说明「阶段 2 将可视化 3 步推理轨迹」，
   底下画的是**最近 3 条对话消息**——那不是轨迹。后端早就在发轨迹：
@@ -1340,6 +1340,18 @@
 - **验收标准**: 覆盖 AC-F-033
 - **依赖**: 无（后端不改——事件早就在流里）
 - **验证命令**: `cd src/app && npm test`
+- **验证结果**: 前端 **186 passed**（新增 `trace.test.ts` 11 条，全过）；
+  后端未改——逐条核对了 `AgentLoop._stream_steps` 发出的 7 个 `trace` 事件
+  的字段与前端认的字段**一一对得上**：`understanding.intent`、
+  `candidate_count` / `candidates[].file_name`、`evidence_count`、
+  `wiki_compile.triggered` / `.title`、`gate.passed` / `.sufficient_count` /
+  `.model_evaluated` / `.reason`、`confidence.confidence`、`refused`、
+  `conflict_count`（`EvidenceGateResult.to_dict()` 与 `Conf
+idenceScorer.score()` 的实际键名都对过）。前端的 7 步因此是**按发生顺序**
+  出现的，缺的步不占位
+- **补记（改完发现的一处真问题）**: 后端 `wiki_links` 里记着
+  **页面→源文件**（`target_type='doc'`）40 条，但旧图谱只画 `target_type='page'`
+  的边 —— 于是那 40 条**页↔文件**的关系在图上凭空没了。TASK-093 补上
 
 ### [ ] TASK-093: 实现图谱有关系边，点节点能打开那一页且不重排
 

@@ -129,6 +129,8 @@ export function ChatWindow() {
     addMessage(userMsg);
     setInput("");
     setStreaming(true);
+    // The trace belongs to one run: a new question starts a new one.
+    useAppStore.getState().clearTrace();
 
     // Placeholder assistant message - the stream writes into this one.
     const assistantId = crypto.randomUUID();
@@ -152,6 +154,12 @@ export function ChatWindow() {
     try {
       const resp: ChatResponse = await chatStream({ query: q, session_id: sessionId }, (ev) => {
         switch (ev.type) {
+          case "trace": {
+            // The steps of the run. The panel on the right shows them
+            // as they happen (ADR-053).
+            useAppStore.getState().applyTrace(ev.data);
+            break;
+          }
           case "token": {
             const text = typeof ev.data.text === "string" ? ev.data.text : "";
             if (text) {
@@ -207,6 +215,9 @@ export function ChatWindow() {
               content: refusalContent(message),
               refusalPositions: positions,
             });
+            // The reason belongs on the trace too - it says why the
+            // run ended without an answer.
+            useAppStore.getState().applyRefusalReason(reason);
             break;
           }
           case "conflict": {

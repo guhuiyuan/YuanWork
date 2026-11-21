@@ -1,14 +1,12 @@
 import { useAppStore } from "../store";
 import { triggerConsolidation, searchEpisodic } from "../api/backend";
-import { plainPreview } from "../api/markdown.ts";
+import { traceStepLabel, type TraceStep } from "../api/trace.ts";
 import { useState } from "react";
 
 export function RightPanel() {
   const [tab, setTab] = useState<"trace" | "memory" | "audit">("trace");
   const [episodicResult, setEpisodicResult] = useState<unknown>(null);
   const [consolidationMsg, setConsolidationMsg] = useState<string | null>(null);
-
-  const messages = useAppStore((s) => s.messages);
 
   async function handleConsolidate() {
     setConsolidationMsg("整合中…");
@@ -53,20 +51,7 @@ export function RightPanel() {
       </div>
 
       <div className="panel-body">
-        {tab === "trace" && (
-          <div>
-            <div className="hint">阶段 2 将可视化 3 步推理轨迹</div>
-            {messages.slice(-3).map((m) => (
-              <div key={m.id} className="trace-item">
-                <div className="trace-item__role">{m.role}</div>
-                <div className="trace-item__content">{plainPreview(m.content)}</div>
-                {m.confidence != null && (
-                  <div className="trace-item__meta">置信度 {(m.confidence * 100).toFixed(0)}%</div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        {tab === "trace" && <TracePanel />}
 
         {tab === "memory" && (
           <div>
@@ -96,6 +81,53 @@ export function RightPanel() {
   );
 }
 
+/**
+ * The steps of the run that is going on - or of the last one.
+ *
+ * The backend sends one event per step; this shows what each step
+ * found or decided (ADR-053). The steps are the point - the reader
+ * wants to see *why* the answer came out the way it did.
+ */
+function TracePanel() {
+  const trace = useAppStore((s) => s.trace);
+
+  return (
+    <div>
+      <div className="hint hint--left">
+        上一次回答实际走过的步骤 —— 能不能作答由「证据闸」决定，置信度只是参考。
+      </div>
+      {trace.length === 0 ? (
+        <div className="hint">
+          还没有轨迹 —— 提一个问题，这里会显示它实际走过的步骤。
+        </div>
+      ) : (
+        trace.map((step) => (
+          <div
+            key={step.step}
+            className={`trace-step trace-step--${step.outcome ?? "ok"}`}
+          >
+            <div className="trace-step__head">
+              <span className="trace-step__name">{traceStepLabel(step.step)}</span>
+              <span className="trace-step__status">{traceStatusLabel(step)}</span>
+            </div>
+            <div className="trace-step__detail">{step.detail}</div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+/** What happened to a step, in the reader's words. */
+function traceStatusLabel(step: TraceStep): string {
+  if (step.status === "started") return "进行中";
+  if (step.status === "cancelled") return "已停止";
+  if (step.durationMs === undefined) return "已完成";
+  return step.durationMs < 1000
+    ? `${Math.round(step.durationMs)} 毫秒`
+    : `${(step.durationMs / 1000).toFixed(1)} 秒`;
+}
+
 const rightStyles = `
   .tab {
     padding: 6px 10px;
@@ -113,28 +145,51 @@ const rightStyles = `
     text-align: center;
     padding: 24px 8px;
   }
-  .trace-item {
+  .hint--left {
+    text-align: left;
+    padding: 8px 0 10px;
+    line-height: 1.5;
+  }
+  .trace-step {
     background: var(--bg-primary);
     border: 1px solid var(--border);
+    border-left: 2px solid var(--border);
     border-radius: 6px;
     padding: 8px 10px;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
     font-size: 12px;
   }
-  .trace-item__role {
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    font-size: 10px;
+  .trace-step--ok {
+    border-left-color: var(--text-tertiary);
+  }
+  .trace-step--refused {
+    border-left-color: #dc2626;
+  }
+  .trace-step--conflict {
+    border-left-color: #d97706;
+  }
+  .trace-step--skipped {
+    border-left-color: var(--border);
+    opacity: 0.75;
+  }
+  .trace-step__head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
     margin-bottom: 2px;
   }
-  .trace-item__content {
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .trace-step__name {
+    font-weight: 600;
   }
-  .trace-item__meta {
-    margin-top: 4px;
+  .trace-step__status {
     color: var(--text-tertiary);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .trace-step__detail {
+    color: var(--text-secondary);
+    line-height: 1.5;
+    word-break: break-word;
   }
   .result {
     font-family: var(--font-mono);

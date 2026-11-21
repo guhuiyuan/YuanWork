@@ -6,24 +6,31 @@
 
 | 规范 | 路径 | 当前状态 |
 |------|------|----------|
-| 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 61 条 |
-| 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 51 条 |
-| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 89/89 完成 |
+| 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 66 条 |
+| 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 56 条 |
+| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 91/94 完成 |
 
-**当前阶段**：Phase 5 — 验证与交付
-**进度**：89/89 个 Task 已完成
+**当前阶段**：Phase 4 — 代码生成
+**下一步**：TASK-091 旧二进制格式不再被尝试、TASK-093 图谱有关系边、TASK-094 审计接到右栏
 
 规则：
 1. 任何代码改动必须对应 `tasks.md` 中的一个 Task，不得做范围外的事。
 2. 每个 Task 完成前必须跑通其「验证命令」；未通过不得推进到下游 Task。
 3. 不得擅自增加 `proposal.md` §2.1 之外的功能；需要新增时先改规范。
 4. 发现规范与实现冲突时，先停下并提出规范修改方案，经确认后再改代码。
-5. 提交前跑 `C:/Users/<用户名>/.claude/skills/sdd/scripts/validate_specs.py --feature <feature>`
+5. 提交前跑 `d:/prep for work/Projects/SDD skill/skills/sdd/scripts/validate_specs.py --feature <feature>`
    （规范类）或该 Task 的验证命令（代码类）。
-6. 上述命令若因环境限制无法执行（权限被拒），**不得默认通过**。按
-   `C:/Users/<用户名>/.claude/skills/sdd/SKILL.md` 的「受限环境下的降级与解锁路径」处理：
-   用 AskUserQuestion 引导（切模式后重试 / 用户手动跑并贴回输出 /
-   跳过并标记待人工校验），被跳过的 Task 保持未勾选，结论标「未验证」。
+6. **任何**命令若因权限被拒（尤其报 `Auto mode is unavailable: its safety
+   check does not run for this session`），**不要重试、也不要把错误原样报出来
+   就放弃**。先走本地通道，再问用户：
+   ① `d:/prep for work/Projects/SDD skill/skills/sdd/scripts/hook_probe.py` 看结论（只判定，不执行）；
+   ② 若 `allowed=false` 且这条命令**出现在本规范里**（某个 Task 的验证命令，
+   或「常用命令」小节里）→ `d:/prep for work/Projects/SDD skill/skills/sdd/scripts/install_hook.py --root . --extra "<原命令>"`
+   登记后重试（**不用切模式**）；
+   ③ 仍不行（命令不在规范里）→ 用 AskUserQuestion 问用户怎么处理（切到非 auto
+   模式后重试 / 用户手动跑并贴回输出 / 跳过并标记待人工校验），同一批被拒命令
+   合并成一次提问。
+   被跳过的 Task 保持未勾选，结论标「未验证」。
 <!-- SDD:END -->
 
 **历史归档**：`archive/as-is-2026-11/` 是 2026-11 对旧实现做的现状快照，

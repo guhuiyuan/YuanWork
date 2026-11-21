@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { applyRefusalReason, applyTraceEvent, type TraceStep } from "./api/trace.ts";
+
 export type View = "chat" | "wiki" | "graph";
 
 export type ToastKind = "info" | "error" | "success";
@@ -217,6 +219,17 @@ interface AppState {
   setStreaming: (s: boolean) => void;
   clearMessages: () => void;
 
+  /**
+   * The steps of the run that is going on (or the last one).
+   *
+   * The backend sends one event per step; the panel on the right shows
+   * them as they happen (ADR-053). A new question starts a new trace.
+   */
+  trace: TraceStep[];
+  applyTrace: (data: unknown) => void;
+  applyRefusalReason: (reason: string | undefined) => void;
+  clearTrace: () => void;
+
   kbFiles: KbFile[];
   setKbFiles: (f: KbFile[]) => void;
   /**
@@ -330,7 +343,13 @@ export const useAppStore = create<AppState>((set) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
     })),
   setStreaming: (s) => set({ isStreaming: s }),
-  clearMessages: () => set({ messages: [] }),
+  clearMessages: () => set({ messages: [], trace: [] }),
+
+  trace: [],
+  applyTrace: (data) => set((s) => ({ trace: applyTraceEvent(s.trace, data) })),
+  applyRefusalReason: (reason) =>
+    set((s) => ({ trace: applyRefusalReason(s.trace, reason) })),
+  clearTrace: () => set({ trace: [] }),
 
   kbFiles: [],
   setKbFiles: (f) => set({ kbFiles: f }),
