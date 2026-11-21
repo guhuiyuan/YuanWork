@@ -1393,7 +1393,7 @@ idenceScorer.score()` 的实际键名都对过）。前端的 7 步因此是**�
   `cd src/app && npm test`，外加一次真机核对：`GET /api/v1/wiki/graph` 的
   `edges` 长度大于 0
 
-### [ ] TASK-094: 实现审计接到右栏：记录表、汇总与清空
+### [x] TASK-094: 实现审计接到右栏：记录表、汇总与清空
 
 - **描述**: 用户报「审计目前好像还没做」。**后端做完了**：`GET /api/v1/audit`
   （最近 N 条，默认 100、上限 1000）、`GET /api/v1/audit/stats`（调用次数、
@@ -1422,6 +1422,22 @@ idenceScorer.score()` 的实际键名都对过）。前端的 7 步因此是**�
 - **依赖**: TASK-004（审计条目只存元数据与哈希）
 - **验证命令**: `cd src/app && npm test` 与
   `.venv/Scripts/python.exe -m pytest src/backend/tests -q`
+- **验证结果**: 前端 **225 passed**（新增 `audit.test.ts` 19 条，全过；
+  `npm run build` 的 `tsc -b` 也过）；后端一行没改——三个接口早就在了，
+  审计那三条的后端测试全过（整仓 **1859 passed / 4 failed**，那 4 条是并行
+  推进中的 TASK-091 / TASK-093 留下的：`test_unsupported_formats.py` 两条、
+  图谱边一条、页面 stale 标记一条，与本任务无关）。
+  桌面端桥接层 `cargo test --release` **87 passed**（`commands_contract.rs`
+  的命令清单从 28 条加到 31 条，与 `lib.rs` 的 `generate_handler!` 同步）。
+  逐条核对了后端条目字段与前端认的字段：`timestamp` / `type` / `model` /
+  `task_type` / `prompt_hash`（16 位十六进制）/ `prompt_length` /
+  `prompt_tokens` / `completion_tokens` / `duration_ms` / `success` /
+  `error_kind`——**没有**「查询摘要」这个字段，那句占位说明删掉了
+- **补记（改完发现的一处真问题）**: `commands_contract.rs` 里有一条契约测试
+  断言「注册的命令条数没有变过」。桥接层加了三个命令，它就会红——那份清单
+  本来就写着「与 `lib.rs` 的 `generate_handler!` 保持同步」，所以 TASK-094
+  一并把它更新到 31 条，并把三个新命令加进「查状态码的那批」：清空失败
+  若不查状态码，桌面端会拿到一个没有条数的回答，界面上就会显示「已清空 0 条」
 
 ## 2. 依赖关系图
 

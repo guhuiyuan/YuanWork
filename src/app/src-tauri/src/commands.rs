@@ -865,6 +865,75 @@ pub async fn trigger_consolidation(
     response.json().await.map_err(|e| e.to_string())
 }
 
+// ===== Audit =====
+
+/// The audit log - one line per model call.
+///
+/// The lines hold the metadata of the call and the hash of the prompt;
+/// the prompt and the answer are not in the log at all (ADR-018).
+#[tauri::command]
+pub async fn list_audit_entries(
+    backend: State<'_, BackendHandle>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    // The backend caps the list at a thousand lines - the panel shows
+    // the recent ones, not the whole file.
+    let url = format!(
+        "{}/api/v1/audit?limit={}",
+        backend.url(),
+        limit.unwrap_or(100)
+    );
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    Ok(body)
+}
+
+/// How much the calls cost: the counts, the tokens, the failures.
+#[tauri::command]
+pub async fn audit_stats(
+    backend: State<'_, BackendHandle>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/audit/stats", backend.url());
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    Ok(body)
+}
+
+/// Clear the audit log.
+///
+/// This takes the reader's own records off their machine and cannot be
+/// undone, so the answer carries the number of lines that went away -
+/// the panel has to report it.
+#[tauri::command]
+pub async fn clear_audit_log(
+    backend: State<'_, BackendHandle>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/audit", backend.url());
+
+    let response = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    // Without checking the status a failed clear would come back as a
+    // body without a count, and the panel would report "cleared 0".
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    Ok(body)
+}
+
 // ===== Native =====
 
 // ===== Opening the source at its position =====

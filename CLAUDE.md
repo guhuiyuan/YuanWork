@@ -8,10 +8,10 @@
 |------|------|----------|
 | 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 66 条 |
 | 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 56 条 |
-| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 91/94 完成 |
+| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 92/94 完成 |
 
 **当前阶段**：Phase 4 — 代码生成
-**下一步**：TASK-091 旧二进制格式不再被尝试、TASK-093 图谱有关系边、TASK-094 审计接到右栏
+**下一步**：TASK-091 旧二进制格式不再被尝试、TASK-093 图谱有关系边
 
 规则：
 1. 任何代码改动必须对应 `tasks.md` 中的一个 Task，不得做范围外的事。

@@ -1,6 +1,7 @@
 import { useAppStore } from "../store";
 import { triggerConsolidation, searchEpisodic } from "../api/backend";
 import { traceStepLabel, type TraceStep } from "../api/trace.ts";
+import { AuditTab } from "./AuditTab.tsx";
 import { useState } from "react";
 
 export function RightPanel() {
@@ -66,14 +67,7 @@ export function RightPanel() {
           </div>
         )}
 
-        {tab === "audit" && (
-          <div className="hint">
-            <p>审计日志（阶段 3 启用）</p>
-            <p style={{ marginTop: 8, fontSize: 12 }}>
-              记录每次 LLM 调用的时间、token 数、模型、查询摘要（不存全文）。
-            </p>
-          </div>
-        )}
+        {tab === "audit" && <AuditTab />}
       </div>
 
       <style>{rightStyles}</style>

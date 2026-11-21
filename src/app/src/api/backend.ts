@@ -7,6 +7,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { anchorOf } from "./citations.ts";
 import { parseSseFrame, parseSseFrames, type RawSseFrame } from "./sse.ts";
+import {
+  AUDIT_LIMIT,
+  type AuditClearResult,
+  type AuditListPayload,
+  type AuditStats,
+} from "./audit.ts";
 import type {
   Citation,
   KbFile,
@@ -782,4 +788,46 @@ export async function triggerConsolidation() {
     method: "POST",
     body: JSON.stringify({ reason: "manual", force: false }),
   });
+}
+
+// ===== Audit =====
+
+/**
+ * The audit log - one line per model call.
+ *
+ * The lines hold the metadata of the call and the hash of the prompt;
+ * the prompt itself is not in the log and never reaches the screen
+ * (ADR-018).
+ */
+export async function listAuditEntries(
+  limit: number = AUDIT_LIMIT
+): Promise<AuditListPayload> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("list_audit_entries", { limit });
+    return toJson<AuditListPayload>(raw);
+  }
+  return callBackend<AuditListPayload>(`/audit?limit=${limit}`);
+}
+
+/** How much the calls cost: the counts, the tokens, the failures. */
+export async function auditStats(): Promise<AuditStats> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("audit_stats");
+    return toJson<AuditStats>(raw);
+  }
+  return callBackend<AuditStats>("/audit/stats");
+}
+
+/**
+ * Clear the audit log.
+ *
+ * This takes the reader's own records off their machine and cannot be
+ * undone - so the caller asks first, and says how many went away.
+ */
+export async function clearAuditLog(): Promise<AuditClearResult> {
+  if (isTauri) {
+    const raw = await invoke<unknown>("clear_audit_log");
+    return toJson<AuditClearResult>(raw);
+  }
+  return callBackend<AuditClearResult>("/audit", { method: "DELETE" });
 }

@@ -11,7 +11,7 @@ use serde_json::json;
 /// The commands the webview may invoke.
 ///
 /// Keep in sync with `generate_handler!` in `lib.rs`.
-const COMMAND_NAMES: [&str; 28] = [
+const COMMAND_NAMES: [&str; 31] = [
     "chat_stream",
     "ingest_directory",
     "get_ingest_status",
@@ -40,12 +40,15 @@ const COMMAND_NAMES: [&str; 28] = [
     "add_workspace_file",
     "remove_workspace_entry",
     "rebuild_workspace",
+    "list_audit_entries",
+    "audit_stats",
+    "clear_audit_log",
 ];
 
 /// The commands that check the backend's HTTP status before treating the
 /// body as a result. The other ones take the body as it comes, so a
 /// backend error surfaces as "no data" instead of an error.
-const STATUS_CHECKING_COMMANDS: [&str; 12] = [
+const STATUS_CHECKING_COMMANDS: [&str; 15] = [
     "list_kb_files",
     "kb_stats",
     "delete_kb_file",
@@ -58,6 +61,9 @@ const STATUS_CHECKING_COMMANDS: [&str; 12] = [
     "add_workspace_file",
     "remove_workspace_entry",
     "rebuild_workspace",
+    "list_audit_entries",
+    "audit_stats",
+    "clear_audit_log",
 ];
 
 #[test]
@@ -513,4 +519,64 @@ fn the_removal_survives_a_backend_that_answers_with_nothing() {
         command_body(commands, "remove_workspace_entry").contains("text.trim().is_empty()"),
         "an empty answer is not handled"
     );
+}
+
+// ===== the commands TASK-094 added =====
+
+/// The audit log - the panel on the right reads it.
+const AUDIT_COMMANDS: [&str; 3] = [
+    "list_audit_entries",
+    "audit_stats",
+    "clear_audit_log",
+];
+
+#[test]
+fn the_audit_commands_are_all_registered() {
+    /// Without the bridge the desktop app cannot reach the audit log at
+    /// all - the panel would be empty on the very machine the records
+    /// are on.
+    let lib = include_str!("../src/lib.rs");
+    for name in AUDIT_COMMANDS {
+        assert!(
+            COMMAND_NAMES.contains(&name),
+            "command `{}` is not in the command list",
+            name
+        );
+        assert!(
+            lib.contains(name),
+            "command `{}` is not registered in lib.rs",
+            name
+        );
+    }
+}
+
+#[test]
+fn the_audit_commands_read_the_audit_endpoints() {
+    /// The paths are the whole contract with the backend: ask for the
+    /// wrong one and the panel shows an empty table instead of what is
+    /// on the disk.
+    let commands = include_str!("../src/commands.rs");
+    assert!(commands.contains("/api/v1/audit/stats"));
+    assert!(commands.contains("/api/v1/audit?limit="));
+    assert!(commands.contains("/api/v1/audit\""));
+}
+
+#[test]
+fn the_audit_commands_use_the_right_verbs() {
+    /// The list and the totals are read with a GET; the log is cleared
+    /// with a DELETE - a POST would not clear anything.
+    let commands = include_str!("../src/commands.rs");
+    assert!(command_body(commands, "list_audit_entries").contains(".get(&url)"));
+    assert!(command_body(commands, "audit_stats").contains(".get(&url)"));
+    assert!(command_body(commands, "clear_audit_log").contains(".delete(&url)"));
+}
+
+#[test]
+fn the_clear_answers_with_the_number_of_entries_that_went_away() {
+    /// The panel has to report how many records were removed - the
+    /// count comes from the backend, so the bridge must not drop it.
+    let commands = include_str!("../src/commands.rs");
+    let body = command_body(commands, "clear_audit_log");
+    assert!(body.contains("is_success()"), "a failed clear is not an error");
+    assert!(body.contains("Ok(body)"), "the answer of the clear is dropped");
 }

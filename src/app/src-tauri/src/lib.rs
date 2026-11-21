@@ -127,6 +127,9 @@ pub fn run() {
             commands::add_workspace_file,
             commands::remove_workspace_entry,
             commands::rebuild_workspace,
+            commands::list_audit_entries,
+            commands::audit_stats,
+            commands::clear_audit_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
