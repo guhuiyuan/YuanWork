@@ -202,13 +202,18 @@ export function useIngest() {
    */
   const runJob = useCallback(async (job: IngestJob, token: number): Promise<boolean> => {
     const cancelled = () => useAppStore.getState().ingestToken !== token;
-    const total = job.files_queued ?? 0;
+    // null - the job counts the workspace itself and has not said how
+    // much work there is yet (ADR-052). 0 - there is nothing to do.
+    const queued = job.files_queued ?? null;
 
     setIngestState({
       ingesting: true,
-      message: total
-        ? `正在索引 ${total} 个文件…`
-        : "工作域里没有可索引的文件",
+      message:
+        queued === null
+          ? "正在统计工作域…"
+          : queued
+            ? `正在索引 ${queued} 个文件…`
+            : "工作域里没有可索引的文件",
     });
 
     const started = Date.now();
@@ -299,12 +304,14 @@ export function useIngest() {
         return false;
       }
       const done = status.files_done ?? 0;
-      const count = status.files_total ?? total;
+      const count = status.files_total ?? 0;
       setIngestState({
         ingesting: true,
         message: count
           ? `正在索引…（${done}/${count}）`
-          : "工作域里没有可索引的文件",
+          : queued === null
+            ? "正在统计工作域…"
+            : "工作域里没有可索引的文件",
       });
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     }

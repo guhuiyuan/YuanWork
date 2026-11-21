@@ -8,6 +8,7 @@ indexed — it only remembers what the user said is in scope.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -79,11 +80,21 @@ class Workspace:
         Folders are expanded, single files are taken as they are, and a file
         that is covered twice (a file added by hand *and* sitting in an
         added folder) appears once.
+
+        The expansion runs in a worker thread. A workspace can hold a
+        hundred thousand files, and the walk is slow synchronous disk
+        I/O - doing it on the event loop would stall every other
+        request for as long as it takes (ADR-052).
         """
+        entries = await self.list_entries(included_only=included_only)
+        return await asyncio.to_thread(self._expand_entries, entries)
+
+    def _expand_entries(self, entries: list[dict]) -> list[Path]:
+        """The files the workspace entries cover - the slow part, on a thread."""
         files: list[Path] = []
         seen: set[str] = set()
 
-        for entry in await self.list_entries(included_only=included_only):
+        for entry in entries:
             target = Path(entry["path"])
             if entry["kind"] == "file":
                 candidates = [target]

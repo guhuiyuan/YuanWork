@@ -562,17 +562,6 @@ class IngestionPipeline:
 
         return ready, unsupported, oversized
 
-    async def workspace_build_size(self) -> int:
-        """How many files the workspace build will actually work on.
-
-        The workspace covers far more files than can be indexed - a
-        code project is mostly source. The progress bar and the job
-        count the work, not the files that are merely there.
-        """
-        files = await self.workspace.list_files(included_only=True)
-        ready, _unsupported, oversized = self.partition_workspace_files(files)
-        return len(ready) + len(oversized)
-
     async def build_workspace(
         self,
         force: bool = False,
@@ -615,6 +604,15 @@ class IngestionPipeline:
             # come back to them.
             await self._report_progress(
                 on_progress, reported, total, Path(oversized[0]["path"])
+            )
+        elif total:
+            # The denominator goes out before the first file is read.
+            # The job that draws the progress bar needs to know how
+            # much work there is, and the only place that knows is this
+            # walk - the request that started the job did not walk the
+            # workspace at all (ADR-052).
+            await self._report_progress(
+                on_progress, reported, total, Path(ready[0])
             )
 
         ingestor = BatchIngestor(self)

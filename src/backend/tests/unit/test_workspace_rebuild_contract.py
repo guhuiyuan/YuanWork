@@ -135,7 +135,11 @@ def make_file(dir_path: Path, name: str, content: str | None = None) -> Path:
 async def test_the_rebuild_returns_a_job(
     client: TestClient, store: SQLiteStore, docs: Path
 ):
-    """The rebuild answers with a job the frontend can poll."""
+    """The rebuild answers with a job the frontend can poll.
+
+    The answer comes back before the workspace is walked: the count is
+    the job's to give, and it gives it in the status (ADR-052).
+    """
     await Workspace(store).add_path(make_file(docs, "a.md"))
 
     resp = client.post("/api/v1/ingest/rebuild")
@@ -143,8 +147,12 @@ async def test_the_rebuild_returns_a_job(
     assert resp.status_code == 200
     body = resp.json()
     assert body["job_id"]
-    assert body["files_queued"] == 1
-    assert body["estimated_seconds"] >= 0
+    # null - "not counted yet", not "nothing to do".
+    assert body["files_queued"] is None
+    assert body["estimated_seconds"] is None
+
+    status = client.get(f"/api/v1/ingest/status/{body['job_id']}").json()
+    assert status["files_total"] == 1
 
 
 async def test_the_job_total_is_the_number_of_files_the_workspace_covers(
@@ -169,7 +177,7 @@ async def test_the_job_total_is_the_number_of_files_the_workspace_covers(
     resp = client.post("/api/v1/ingest/rebuild")
     body = resp.json()
 
-    assert body["files_queued"] == 3
+    assert body["files_queued"] is None
 
     job = await store.get_ingest_job(body["job_id"])
     assert job["files_total"] == 3
@@ -207,14 +215,16 @@ async def test_a_file_that_is_already_indexed_is_not_indexed_twice(
     await Workspace(store).add_path(doc)
 
     first = client.post("/api/v1/ingest/rebuild").json()
-    assert first["files_queued"] == 1
+    assert first["files_queued"] is None
 
     rows = await store.list_files()
     assert len(rows) == 1
 
     second = client.post("/api/v1/ingest/rebuild").json()
 
-    assert second["files_queued"] == 1
+    assert second["files_queued"] is None
+    job = await store.get_ingest_job(second["job_id"])
+    assert job["files_total"] == 1
     rows = await store.list_files()
     assert len(rows) == 1, "the file was indexed a second time"
 
@@ -227,11 +237,39 @@ async def test_an_empty_workspace_is_not_an_error(
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["files_queued"] == 0
+    assert body["files_queued"] is None
 
     status = client.get(f"/api/v1/ingest/status/{body['job_id']}").json()
     assert status["status"] == "completed"
     assert status["error"] is None
+    assert status["files_total"] == 0
+
+
+async def test_the_rebuild_walks_the_workspace_once(
+    client: TestClient, store: SQLiteStore, docs: Path, monkeypatch
+):
+    """One walk, not two.
+
+    The request must not walk the workspace - it answers before the
+    build starts. The job walks it once, and the count it publishes
+    comes from that same walk, so the count and the work can never be
+    two different lists (ADR-052).
+    """
+    make_file(docs, "a.md")
+    await Workspace(store).add_path(docs)
+
+    calls: list[bool] = []
+    original = Workspace.list_files
+
+    async def counted(self, included_only: bool = True):
+        calls.append(included_only)
+        return await original(self, included_only=included_only)
+
+    monkeypatch.setattr(Workspace, "list_files", counted)
+
+    client.post("/api/v1/ingest/rebuild")
+
+    assert len(calls) == 1, "the workspace was walked more than once"
 
 
 # --------------------------------------------------------------------------
@@ -340,10 +378,10 @@ async def test_the_job_counts_the_work_not_every_file_in_the_workspace(
 
     body = client.post("/api/v1/ingest/rebuild").json()
 
-    assert body["files_queued"] == 1, "the file nobody can index was counted"
+    assert body["files_queued"] is None
 
     job = await store.get_ingest_job(body["job_id"])
-    assert job["files_total"] == 1
+    assert job["files_total"] == 1, "the file nobody can index was counted"
 
 
 async def test_the_progress_counts_the_files_that_are_already_indexed(

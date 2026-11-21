@@ -247,25 +247,22 @@ async def rebuild_workspace(
     single files added by hand. This kicks off a background job over
     exactly those files - poll /ingest/status/{job_id} for progress,
     the same job shape as the folder build (TASK-051).
+
+    The answer comes back at once: the job walks the workspace itself
+    and reports how much work there is, so the request never waits on
+    a hundred thousand files (ADR-052). `files_queued` is therefore
+    null here - "not counted yet", not "nothing to do". The count
+    arrives in the job's `files_total` before the first file is read.
     """
-    from yuanwork.ingestion.pipeline import IngestionPipeline
-
-    # How much work there is - the files the build will actually read.
-    # The workspace covers many more files than that (a code project is
-    # mostly source), and the number that goes on the progress bar has
-    # to be the work, not the files that are merely there.
-    pipeline = IngestionPipeline.from_app(request.app)
-    total = await pipeline.workspace_build_size()
-
     job_id = str(uuid.uuid4())
-    await _create_job(request, job_id, total)
+    await _create_job(request, job_id, 0)
 
     background_tasks.add_task(_run_rebuild_job, request.app, job_id)
 
     return IngestJobResponse(
         job_id=job_id,
-        files_queued=total,
-        estimated_seconds=total * 2.0,  # rough estimate
+        files_queued=None,
+        estimated_seconds=None,
     )
 
 
@@ -375,8 +372,11 @@ async def _run_rebuild_job(app, job_id: str) -> None:
     await sqlite.upsert_ingest_job(job_id=job_id, status="running")
 
     async def _on_progress(done: int, total: int, current: str) -> None:
-        # The denominator is what the workspace covers, so the progress
-        # bar counts the files that cannot be indexed as well.
+        # The denominator is the work, not the files that are merely
+        # there - and it comes from this job's own walk of the
+        # workspace, published before the first file is read
+        # (ADR-052). The request that started the job did not walk the
+        # workspace at all.
         await sqlite.upsert_ingest_job(
             job_id=job_id,
             status="running",

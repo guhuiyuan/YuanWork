@@ -143,16 +143,16 @@ def main() -> int:
         job_id = running
         print(f"有一轮建库正在跑，等它：{job_id}")
     else:
-        # 路由要先数一遍工作域覆盖的文件才回答——15 万个文件要一分多钟。
+        # 路由立刻回答——工作域是后台作业自己走的（ADR-052）。
         job = call("/ingest/rebuild", method="POST", timeout=1800.0)
         job_id = job["job_id"]
-        print(f"重建已启动：{job_id}（{job['files_queued']} 个文件）")
+        print(f"重建已启动：{job_id}")
 
     started = time.time()
     status: dict = {}
     while True:
-        # 建库时后端在数文件与算哈希，这段��间事件循环被占着，
-        # 状态端点会晚一点才答——所以这里的超时给得宽。
+        # 建库时后端在数文件与算哈希——数文件在工作线程里，算哈希
+        # 也在线程里，所以状态端点照常答得上。
         status = call(f"/ingest/status/{job_id}", timeout=180.0)
         if status["status"] in ("completed", "failed"):
             break
@@ -161,7 +161,10 @@ def main() -> int:
             return 1
         time.sleep(5.0)
 
-    print(f"建库结束：{status['status']}，用时 {time.time() - started:.0f} 秒")
+    print(
+        f"建库结束：{status['status']}，用时 {time.time() - started:.0f} 秒"
+        f"（处理 {status.get('files_total')} 个文件）"
+    )
     after = call("/kb/stats")
     print(f"建库后：{after['total_files']} 个文件 / {after['total_chunks']} 个切片")
 

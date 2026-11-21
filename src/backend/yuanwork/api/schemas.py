@@ -65,10 +65,16 @@ class IngestFileRequest(BaseModel):
 
 
 class IngestJobResponse(BaseModel):
-    """Response for an ingestion job."""
+    """Response for an ingestion job.
+
+    `files_queued` is null when the job counts the work itself: the
+    workspace build walks the workspace in the background and reports
+    the count in the job status (ADR-052). Null means "not counted
+    yet" - not "nothing to do".
+    """
 
     job_id: str
-    files_queued: int
+    files_queued: int | None = None
     files_skipped: int = 0
     estimated_seconds: float | None = None
 

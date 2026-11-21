@@ -328,8 +328,13 @@ export async function pickFile(): Promise<string | null> {
 
 export interface IngestJob {
   job_id: string;
-  files_queued: number;
-  estimated_seconds: number;
+  /**
+   * How many files the job will work on - null when the job counts the
+   * work itself (the workspace build walks the workspace in the
+   * background). Null means "not counted yet", not "nothing to do".
+   */
+  files_queued: number | null;
+  estimated_seconds: number | null;
 }
 
 export interface IngestStatus {
