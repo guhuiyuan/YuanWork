@@ -85,9 +85,38 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
 
 1. SDD 技能自己的脚本:python 解释器 + 路径**整段**命中 ``skills/sdd/scripts/``
    或 ``.claude/sdd/`` 的 ``.py`` 文件,**且**落在可信根(项目根 / 工作目录 /
-   ``~/.claude``)下 —— 子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py`` 蒙混过关
+   ``~/.claude``)下 —— 子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py`` 蒙混过关;
+   而 ``skills/sdd/scripts/`` **只认固定文件名**(见 SDD_SCRIPT_NAMES)——
+   那个目录 AI 自己就能写,按目录信任等于给它一个「写个 .py 再执行」的口子
 2. git 的安全子命令:status/diff/log/show/rev-parse/branch/add/commit
-3. 额外命令:读 ``sdd-hook-allow.json`` 的 ``extra`` 列表(前缀匹配)
+3. 只读命令(ls/cat/head/grep/find/diff/…):单个跑本来就会被内建无害命令表
+   放行,这里补的是**链式形态**里的它们
+4. 额外命令:读 ``sdd-hook-allow.json`` 的 ``extra`` 列表(前缀匹配)
+
+**复合命令按段判定**
+
+一条命令里有 ``&&`` ``||`` ``;`` ``|`` 或换行时,按 shell 习惯在**引号外**拆成
+若干段,**每段都要单独通过判定,全过才整体放行**:
+
+- ``cd X && pytest`` / ``sleep 5 && cd X && pytest`` / ``cat f | head -20``
+  → 放行(``cd`` 段直接跳过;只读段按路径判定)
+- ``python x.py && rm -rf /`` → **不放行** —— ``rm`` 那一段过不了,
+  整条就不放行
+
+**拆段必须与 bash 一致** —— 反斜杠转义是实测出来的洞:bash 里 ``\\"`` 是
+「一个字面引号」,**不**开启引号状态;只认引号的拆段器会把它当成开引号,
+于是后面的 ``&& rm -rf /`` 全被吞进第一段,第二段压根没进判定
+(实测 ``true \\" && git push`` 被整条放行,``git push`` 真的执行了)。
+现在引号、反斜杠、``2>&1`` 与 ``>&file`` 的处理都对齐 bash(见 scan())。
+
+**只读命令的路径判定**(fail-closed,任何「不确定」都按不放行处理):
+
+- 有效工作目录(链里 ``cd`` 之后的目录)必须在项目内
+- 路径参数要展开环境变量(``$HOME``)、``~`` 与 Git-Bash 风格绝对路径
+  (``/c/Users/...``);**展开不出确定值就不放行**
+- 含通配符的参数:展开结果不可知 → 只放行「相对路径 + 目录部分在项目内」
+- 选项里的路径(``--from-file=…`` ``--output=…``)同样要过这一关
+- 目标路径里不能有 ``.claude`` / ``.git`` 段
 
 **不放行**:
 
@@ -95,15 +124,19 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
 - **shell 与脚本解释器**(sh / bash / cmd / powershell / perl / ruby / node / npx /
   osascript / wscript …)与**包装器**(env / xargs):它们能执行任意命令,
   白名单里写一条 ``sh -c "任意命令"`` 就是开后门
-- ``find`` 带 ``-exec`` / ``-delete``
+- ``find`` 带 ``-exec`` / ``-delete`` / ``-fprintf`` / ``-fls``
 - git push / reset / clean,以及任何会改变 git 行为的**前置选项**
-  (``-c`` 能定义 alias、``--exec-path`` 能换掉子命令查找路径)
+  (``-c`` 能定义 alias、``--exec-path`` 能换掉子命令查找路径);
+  ``-C`` 指向**别的仓库**且子命令会写(add/commit/branch)时也不放行;
+  ``--output`` / ``--no-index`` 也不放行(前者能写任意路径,后者能读任意文件)
 - 任意 python(``python -c`` / ``python -m 任意模块``);解释器必须钉死脚本
 - 太松的白名单模式(例如白名单里写一条 ``python`` 或一条 ``sh``)
-- 带 shell 复合操作符的命令(``&&`` ``||`` ``;`` ``|`` ``&`` 重定向)
-  —— 否则 ``python 某脚本 && rm -rf /`` 会被整条放行
+- **文件重定向**(``>`` ``>>`` ``<``)—— 能写文件;
+  ``>&file`` 是「重定向到文件」而不是 fd 复制,同样不放行
+- **后台运行**(单个 ``&``)—— 脱离监督
 - **命令替换**(``$( )`` 与反引号)—— 在**整条命令**上查,包括 ``cd`` 的参数里:
   ``cd $(whoami) && pytest`` 曾经在剥掉 cd 前缀后逃过检查
+- **引号没闭合**的整条命令(shell 会报语法错)
 
 ## 安全边界
 
@@ -111,11 +144,12 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
   Claude Code 里 deny/ask 优先于 hook 的返回值,所以不会削弱已有安全规则
 - 删掉本文件与 settings.json 里的条目即可完全回退
 - 设 ``SDD_HOOK_LOG=1`` 可把放行记录写到同目录 ``sdd-hook-audit.log``
+- **hook 不是沙箱**:能写项目内文件的 AI,仍然可以往「白名单会执行的脚本」里
+  塞代码(比如 pytest 的 conftest)。这一层由 ``permissions.deny`` 与人工审阅兜底
 """
 
 import json
 import os
-import re
 import sys
 
 ALLOWLIST_FILE = 'sdd-hook-allow.json'
@@ -132,9 +166,39 @@ SCRIPT_DIR_SEGMENTS = (
     ('.claude', 'sdd'),
 )
 
+# SDD 技能自己的脚本 —— **按文件名**信任,不是按目录信任。
+#
+# 按目录信任是循环论证:``skills/sdd/scripts/`` 就在项目目录里,而写文件工具
+# 允许写项目内的任意路径 → AI 自己写一个 .py 就能被当成「自家脚本」执行,
+# 等于开了一个任意代码执行的口子(实测:Write 一个 payload.py → python 它 →
+# 真的执行了)。所以这个目录只认下面这几个固定文件名。
+#
+# ``.claude/sdd/`` 那条不受影响:它在 ``.claude/`` 下面,写文件工具本来就
+# 拒写整个 ``.claude/``,AI 改不了它。
+SDD_SCRIPT_NAMES = frozenset({
+    'init_specs.py',
+    'validate_specs.py',
+    'update_claude_md.py',
+    'verify_acceptance.py',
+    'export_openspec.py',
+    'install_hook.py',
+    'hook_probe.py',
+})
+
 # git 的安全子命令 —— 刻意不含 push / remote / reset / clean
 GIT_SAFE_SUBCOMMANDS = frozenset({
     'status', 'diff', 'log', 'show', 'rev-parse', 'branch', 'add', 'commit',
+})
+
+# 会**写**仓库的 git 子命令 —— 配合 -C 时必须限制在项目内
+GIT_WRITING_SUBCOMMANDS = frozenset({'add', 'commit', 'branch'})
+
+# 会写文件或读任意文件的 git 选项 —— 一律不放行
+#   --output=FILE      把 diff 写进任意路径(实测能写 .claude/ 与 .git/)
+#   --no-index         让 git diff 读任意两个文件
+#   --pathspec-from-file  从任意文件读路径列表
+GIT_WRITE_OPTIONS = frozenset({
+    '--output', '--no-index', '--output-directory', '--pathspec-from-file',
 })
 
 # 内置的默认额外白名单:各语言"跑本项目测试"的标准命令。
@@ -175,8 +239,10 @@ DENIED_EXECUTABLES = frozenset({
     'env', 'xargs',
 })
 
-# find 本身常用(找文件),但 -exec / -delete 能执行命令 → 见到这些参数就拒
-FIND_EXEC_FLAGS = ('-exec', '-execdir', '-ok', '-okdir', '-delete')
+# find 本身常用(找文件),但 -exec / -delete 能执行命令,
+# -fprintf / -fls 能把内容写进任意文件 → 见到这些参数就拒
+FIND_EXEC_FLAGS = ('-exec', '-execdir', '-ok', '-okdir', '-delete',
+                   '-fprintf', '-fls')
 
 # git 唯一允许出现在子命令**之前**的选项 —— 只改工作目录,无害。
 #
@@ -194,6 +260,28 @@ PYTHON_PREFIX = ('python',)
 
 # 这些 python 选项后面还跟一个值,跳选项时要把值一起跳过
 PYTHON_VALUE_OPTIONS = frozenset({'-X', '-W', '--check-hash-based-pycs'})
+
+# 只读命令 —— 与 Claude Code 内建的「无害命令表」对齐。
+#
+# 单个跑这些命令本来就会被 harness 放行(不需要分类器);这里补的是**复合命令链**
+# 里的它们:链形态不再适用内建的只读判定,于是要由 hook 逐段放行。
+#
+# 刻意**不含** env / printenv / set —— 那些会把环境变量(含 API key)印出来。
+READONLY_COMMANDS = frozenset({
+    'ls', 'dir', 'pwd', 'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep',
+    'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname', 'realpath',
+    'stat', 'file', 'du', 'df', 'tree', 'which', 'type', 'whoami', 'date',
+    'sleep', 'test', 'true', 'false', 'echo', 'find', 'md5sum', 'sha256sum',
+})
+
+# 会**读文件**的只读命令 —— 它们的路径参数必须落在项目内,
+# 否则 `cat ~/.ssh/id_rsa` 这种读密钥的路径会被链式放行。
+# ls 也在里面:`ls -l $HOME/.ssh` 会泄露密钥目录的结构。
+READONLY_FILE_COMMANDS = frozenset({
+    'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'diff', 'cmp',
+    'sort', 'stat', 'file', 'find', 'du', 'tree', 'cut', 'md5sum', 'sha256sum',
+    'ls',
+})
 
 # 带文件路径的工具 —— 放行与否只看路径,不看命令
 PATH_TOOLS = ('Write', 'Edit', 'MultiEdit', 'NotebookEdit')
@@ -222,26 +310,145 @@ def _is_python_exe(token):
     return any(base.startswith(prefix) for prefix in PYTHON_PREFIX)
 
 
-def tokenize(cmd):
-    """按 shell 习惯切词(去掉引号,不做变量展开)。"""
-    tokens, cur, quote = [], '', None
-    for ch in cmd:
-        if quote:
-            if ch == quote:
+def scan(cmd):
+    """按 **shell 习惯**扫描一条命令。
+
+    返回 ``(segments, writes, unterminated)``:
+
+    - ``segments`` —— 每段是一个 token 列表;切分点是引号外的
+      ``&&`` ``||`` ``;`` ``|`` 与换行
+    - ``writes`` —— 命令里有文件重定向或后台运行
+    - ``unterminated`` —— 引号没闭合(shell 会报语法错,一律按不放行处理)
+
+    **反斜杠转义必须按 bash 处理** —— 这是实测出来的洞:
+    bash 里 ``\\"`` 是「一个字面引号」,**不**开启引号状态;而只认引号的拆段器
+    会把它当成开引号,于是后面的 ``&& rm -rf /`` 全被吞进第一段,第二段
+    压根没进判定 → ``true \\" && git push`` 被整条放行(实测第二段真的执行了)。
+
+    规则(与 bash 一致):
+
+    - 引号外:``\\`` 转义下一个字符(该字符原样入词)
+    - 单引号内:全部字面,没有转义
+    - 双引号内:``\\`` 只对 ``$ `` `` ` `` ``"`` ``\\`` 与换行有转义意义
+    """
+    segments = []
+    raws = []
+    tokens = []
+    cur = ''
+    quote = None
+    writes = False
+    i, n = 0, len(cmd)
+    seg_start = 0
+
+    def end_token():
+        nonlocal cur
+        if cur:
+            tokens.append(cur)
+            cur = ''
+
+    def end_segment(upto):
+        end_token()
+        if tokens:
+            segments.append(list(tokens))
+            raws.append(cmd[seg_start:upto].strip())
+            del tokens[:]
+
+    while i < n:
+        ch = cmd[i]
+        if quote == "'":
+            # 单引号内全是字面量,没有转义
+            if ch == "'":
                 quote = None
             else:
                 cur += ch
-        elif ch in ('"', "'"):
-            quote = ch
-        elif ch.isspace():
-            if cur:
-                tokens.append(cur)
-                cur = ''
-        else:
+            i += 1
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+                i += 1
+                continue
+            if ch == '\\':
+                nxt = cmd[i + 1:i + 2]
+                if nxt in ('$', '`', '"', '\\'):
+                    cur += nxt
+                    i += 2
+                    continue
+                if nxt == '\n':
+                    i += 2
+                    continue
+                cur += ch      # 双引号内 \ 跟别的字符 → 反斜杠是字面量
+                i += 1
+                continue
             cur += ch
-    if cur:
-        tokens.append(cur)
-    return tokens
+            i += 1
+            continue
+        # ---- 引号外 ----
+        if ch == '\\':
+            nxt = cmd[i + 1:i + 2]
+            if nxt == '\n':
+                i += 2
+                continue
+            if nxt:
+                cur += nxt      # 转义下一个字符,原样入词
+                i += 2
+                continue
+            cur += ch
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            i += 1
+            continue
+        if cmd[i:i + 2] in ('&&', '||'):
+            end_segment(i)
+            i += 2
+            seg_start = i
+            continue
+        if ch in (';', '|', '\n', '\r'):
+            end_segment(i)
+            i += 1
+            seg_start = i
+            continue
+        if ch == '>':
+            # fd 复制只认 `>&` 后面跟数字或 `-`(2>&1 / 2>&-)。
+            # `>&file` 是把输出**重定向到那个文件**(会创建并截断它)——
+            # 实测 `echo x 1>&~/.bashrc` 就是任意路径写原语,不能放过。
+            if cmd[i + 1:i + 2] == '&':
+                after = cmd[i + 2:i + 3]
+                if after.isdigit() or after == '-':
+                    cur += '>&'
+                    i += 2
+                    continue
+            writes = True
+            cur += ch
+            i += 1
+            continue
+        if ch == '<':
+            writes = True
+            cur += ch
+            i += 1
+            continue
+        if ch == '&':
+            writes = True          # 后台运行
+            cur += ch
+            i += 1
+            continue
+        if ch.isspace():
+            end_token()
+            i += 1
+            continue
+        cur += ch
+        i += 1
+
+    end_segment(i)
+    return segments, raws, writes, quote is not None
+
+
+def tokenize(cmd):
+    """切词(按 shell 规则处理引号与转义,不做变量展开)。"""
+    segments, _, _, _ = scan(cmd)
+    return segments[0] if segments else []
 
 
 def canon_path(path):
@@ -316,42 +523,198 @@ def has_substitution(cmd):
     return '`' in cmd or '$(' in cmd
 
 
-def has_compound_operators(cmd):
-    """命令里有没有 shell 复合操作符(``& | ; > <``)。
+def split_segments(cmd):
+    """把一条命令拆成若干独立命令段。
 
-    只在引号外才算,这样 ``git commit -m "fix -> bug"`` 不会被误杀。
+    切分与转义规则全交给 scan()(与 bash 一致),这里只做包装:
+
+    返回 ``(段列表, 段原文列表, 是否有写操作, 引号是否未闭合)``。
+
+    - 文件重定向(``>`` ``>>`` ``<``)→ 写操作,整条不放行
+    - 后台运行(单个 ``&``)→ 脱离监督,整条不放行
+    - ``2>&1`` 这种 **fd 复制**不算写操作(它只是把 stderr 并到 stdout)
+    - 引号未闭合 → shell 会报语法错,一律不放行
     """
-    quote = None
-    for ch in cmd:
-        if quote:
-            if ch == quote:
-                quote = None
-        else:
-            if ch in ('"', "'"):
-                quote = ch
-            elif ch in '&|;><':
-                return True
-            elif ch in '\n\r':
-                return True
-    return False
+    segments, raws, writes, unterminated = scan(cmd)
+    return segments, raws, writes, unterminated
 
 
-def has_unsafe_operators(cmd):
-    """命令替换 + 复合操作符(保留旧名,给外部调用方用)。"""
-    return has_substitution(cmd) or has_compound_operators(cmd)
+# 通配符与花括号 —— 展开结果不可知,不能当普通路径处理
+GLOB_CHARS = ('*', '?', '[', ']', '{', '}')
 
 
-_CD_PREFIX = re.compile(
-    r'^\s*cd\s+(?:"[^"]*"|\'[^\']*\'|[^\s&|;]+)\s*&&\s*')
+def has_glob(text):
+    return any(ch in text for ch in GLOB_CHARS)
 
 
-def strip_leading_cd(cmd):
-    """剥掉开头的 ``cd <路径> &&`` 前缀(只是换目录,无害)。"""
-    while True:
-        m = _CD_PREFIX.match(cmd)
-        if not m:
-            return cmd
-        cmd = cmd[m.end():]
+def looks_like_path(token):
+    """这个参数像不像一个路径。"""
+    if not token:
+        return False
+    if token.startswith('~'):
+        return True
+    if '/' in token or '\\' in token:
+        return True
+    return os.path.isabs(token)
+
+
+# 看起来像 HTTP 方法的词 —— 规范里「外加一次核对:`GET /api/x`」这种是接口说明
+COMMAND_STOPWORDS = frozenset({
+    'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS',
+})
+
+
+def looks_like_command(text):
+    """这段文本像不像一条能跑的命令。
+
+    规范里的「验证命令」字段常常写成散文:
+    `` `cmd` 与 `cmd2`，外加一次核对(`GET /api/x`) ``
+    —— 后面那些反引号片段是**说明**,不是命令,不能进白名单。
+
+    判据:
+
+    - 含中文 → 散文
+    - 第一个词是 HTTP 方法 → 接口说明
+    - 没有空格 → 不是一条完整命令(单个词由内置白名单覆盖)
+    """
+    if not text:
+        return False
+    if any('一' <= ch <= '鿿' for ch in text):
+        return False
+    parts = text.split()
+    if len(parts) < 2:
+        return False
+    if parts[0].upper() in COMMAND_STOPWORDS:
+        return False
+    return True
+
+
+def trusted_dirs():
+    """可以当作「项目内」的可信目录:项目根 + 当前工作目录。"""
+    out = []
+    for path in (project_root(), os.getcwd()):
+        canon = canon_path(path)
+        if canon and canon not in out:
+            out.append(canon)
+    return out
+
+
+def has_denied_segment(path):
+    """路径里有没有 .claude / .git 这样的目录段。"""
+    return any(part in WRITE_DENY_DIRS for part in path.split('/'))
+
+
+def expand_path_token(tok):
+    """把路径参数规范化:展开环境变量、``~`` 与 MSYS 风格路径。
+
+    展开不出确定值(未定义变量、``~user``)时返回 ``''`` —— 调用方按
+    「无法验证 → 不放行」处理(fail-closed)。
+
+    实测出来的洞:``cat $HOME/.ssh/id_ed25519`` 若不展开,会被当成项目内的
+    相对路径放行,实际打印的是真私钥。
+    """
+    if not tok:
+        return ''
+    text = tok
+    if '$' in text or '%' in text:
+        text = os.path.expandvars(text)
+        if '$' in text or '%' in text:
+            return ''          # 未定义的变量 → 无法验证
+    if text.startswith('~'):
+        text = os.path.expanduser(text)
+        if text.startswith('~'):
+            return ''          # ~user 形式在 Windows 上不展开
+    # Git Bash / MSYS 风格绝对路径:/c/Users/... → C:/Users/...
+    if len(text) >= 3 and text[0] == '/' and text[1].isalpha() and text[2] == '/':
+        text = '%s:%s' % (text[1].upper(), text[2:])
+    return text
+
+
+def resolve_against(token, base):
+    """把参数解析成绝对路径(相对 base 目录)。
+
+    ``~`` 与绝对路径按原样解析;相对路径挂在 base 下面。
+    """
+    text = expand_path_token(token)
+    if not text:
+        return ''
+    if os.path.isabs(text):
+        return canon_path(text)
+    try:
+        return canon_path(os.path.join(base, text))
+    except Exception:
+        return ''
+
+
+def resolve_dir(target, base):
+    """解析 cd 的目标目录(相对当前 base)。"""
+    if not target or target == '-':
+        return base
+    resolved = resolve_against(target, base)
+    return resolved or base
+
+
+def path_args_inside(tokens, base=None):
+    """只读命令的路径参数必须落在**项目目录**内。
+
+    规则(fail-closed):
+
+    1. 有效工作目录(base)必须在项目内 —— 已经 cd 到项目外就不放行
+       (否则 ``cd ~/.ssh && cat id_rsa`` 会漏掉)
+    2. 每个路径样式的参数都要解析到项目内,且路径里不能有 .claude / .git
+    3. 含通配符的参数:展开结果不可知 → 只放行「相对路径 + 目录部分在项目内」
+    4. 选项里的路径(``--from-file=…`` ``--output=…``)同样要过这一关
+    """
+    base_dir = base or os.getcwd()
+    roots = trusted_dirs()
+    if not roots:
+        return False
+    base_canon = canon_path(base_dir)
+    if not base_canon or not any(within(r, base_canon) for r in roots):
+        return False          # 已经离开项目 → 整段不放行
+    for tok in tokens[1:]:
+        value = tok
+        if tok.startswith('-'):
+            if '=' not in tok:
+                continue       # 单独的选项,值在下一个 token
+            value = tok.split('=', 1)[1]
+            if not value:
+                continue
+        if not value:
+            continue
+        if not (looks_like_path(value) or has_glob(value)):
+            # 不是路径样子的参数:只有在当前目录下**确实存在**时才按路径算
+            # (否则 grep 的模式词会被误判成路径)
+            try:
+                exists = os.path.exists(os.path.join(base_dir, value))
+            except Exception:
+                exists = False
+            if not exists:
+                continue
+        if has_glob(value):
+            # 通配符:展开结果不可知。只放行「相对路径 + 目录部分在项目内」
+            if os.path.isabs(value) or value.startswith('~'):
+                return False
+            cut = len(value)
+            for ch in GLOB_CHARS:
+                pos = value.find(ch)
+                if pos >= 0:
+                    cut = min(cut, pos)
+            head = value[:cut]
+            dirpart = head[:head.rfind('/') + 1] if '/' in head else ''
+            if dirpart:
+                target = resolve_against(dirpart.rstrip('/'), base_dir)
+                if not target or not any(within(r, target) for r in roots):
+                    return False
+            continue
+        target = resolve_against(value, base_dir)
+        if not target:
+            return False      # 展开不出确定值 → 不放行
+        if not any(within(r, target) for r in roots):
+            return False
+        if has_denied_segment(target):
+            return False      # .claude / .git
+    return True
 
 
 def match_sdd_script(tokens):
@@ -382,34 +745,63 @@ def match_sdd_script(tokens):
         return None
     if not any(within(root, norm) for root in trusted_roots()):
         return None
+    # skills/sdd/scripts/ 只认固定的文件名 —— 那个目录 AI 自己就能写,
+    # 按目录信任等于给它一个「写一个 .py 再执行它」的口子(实测过)。
+    if contains_segments(norm, ('skills', 'sdd', 'scripts')):
+        if os.path.basename(norm).lower() not in SDD_SCRIPT_NAMES:
+            return None
     # 展示用原始大小写(canon_path 会把 Windows 路径转小写,看着不像真路径)
     return os.path.normpath(cand).replace('\\', '/')
 
 
-def match_git(tokens):
-    """命令行是否是 git 的安全子命令。命中返回 "git <子命令>"。"""
+def match_git(tokens, base=None):
+    """命令行是否是 git 的安全子命令。命中返回 "git <子命令>"。
+
+    两处收紧(都是实测出来的洞):
+
+    - ``-C <别的仓库>`` + 会写的子命令(git add / commit / branch)→ 不放行。
+      ``-C`` 的作用范围和 ``--git-dir`` 等价:命令对哪个仓库生效完全由它决定,
+      放着不管等于借白名单往别的项目的 .git/ 里写。只读子命令(status/diff/log…)
+      无所谓,目标在外面也放行。
+    - 子命令后面带 ``--output`` / ``--no-index`` 等 → 不放行。
+      ``git diff --output=<路径>`` 能把内容写进任意路径(含 .claude/ 与 .git/),
+      ``git diff --no-index a b`` 能读任意两个文件。
+    """
     if not tokens:
         return None
-    base = os.path.basename(tokens[0]).lower()
-    if base.endswith('.exe'):
-        base = base[:-4]
-    if base != 'git':
+    name = os.path.basename(tokens[0]).lower()
+    if name.endswith('.exe'):
+        name = name[:-4]
+    if name != 'git':
         return None
     idx = 1
     sub = None
+    c_target = ''
     while idx < len(tokens):
         tok = tokens[idx]
         if tok in GIT_ALLOWED_VALUE_OPTIONS:
+            if idx + 1 >= len(tokens):
+                return None
+            c_target = tokens[idx + 1]
             idx += 2
             continue
         if tok.startswith('-'):
             # 任何别的选项都可能改变 git 的行为,一律不放行
             return None
         sub = tok
+        idx += 1
         break
-    if sub in GIT_SAFE_SUBCOMMANDS:
-        return 'git %s' % sub
-    return None
+    if sub not in GIT_SAFE_SUBCOMMANDS:
+        return None
+    for tok in tokens[idx:]:
+        if tok.startswith('-') and tok.split('=', 1)[0] in GIT_WRITE_OPTIONS:
+            return None
+    if c_target and sub in GIT_WRITING_SUBCOMMANDS:
+        resolved = resolve_against(c_target, base or os.getcwd())
+        roots = trusted_dirs()
+        if not resolved or not any(within(r, resolved) for r in roots):
+            return None
+    return 'git %s' % sub
 
 
 def allowlist_candidates():
@@ -607,23 +999,13 @@ def evaluate_tool(tool_name, tool_input, tools=None, root=None, write_paths=None
     return None
 
 
-def evaluate(command, extra=None):
-    """判定一条命令是否放行。命中返回理由,否则返回 None。
+def evaluate_segment(tokens, extra, base=None, raw=None):
+    """判定**单个**命令段。命中返回理由,否则返回 None。
 
-    单独抽出来是为了能直接写单元测试。
+    ``tokens`` 是按 shell 规则切出来的词;``raw`` 是这一段的原文
+    (白名单里手写的、带引号的模式要靠它才匹配得上)。
+    ``base`` 是链里前面 ``cd`` 之后的当前目录,只读命令的路径判定要用。
     """
-    if not isinstance(command, str) or not command.strip():
-        return None
-    # 命令替换必须在**剥 cd 前缀之前**查:藏在 cd 参数里的 $( ) / 反引号
-    # 会被剥掉,实测 `cd $(whoami) && pytest` 会被整条放行。
-    if has_substitution(command):
-        return None
-    # 再剥掉开头的 `cd <路径> &&` —— 它只是换目录,本身无害。
-    # 顺序很重要:先剥 cd 再查复合操作符,否则 cd 里的 && 会把整条命令误杀。
-    body = strip_leading_cd(command)
-    if has_compound_operators(body):
-        return None
-    tokens = tokenize(body)
     if not tokens:
         return None
     # 危险可执行文件一律不放行 —— 白名单是用户可编辑的,不能成为后门
@@ -632,21 +1014,64 @@ def evaluate(command, extra=None):
         exe = exe[:-4]
     if exe in DENIED_EXECUTABLES:
         return None
-    # find 本身常用(找文件),但 -exec / -delete 能执行命令
+    # find 本身常用(找文件),但 -exec / -delete / -fprintf / -fls 能执行命令或写文件
     if exe == 'find' and any(tok in FIND_EXEC_FLAGS for tok in tokens[1:]):
         return None
     hit = match_sdd_script(tokens)
     if hit:
         return 'SDD 技能脚本: %s' % hit
-    hit = match_git(tokens)
+    hit = match_git(tokens, base)
     if hit:
-        return 'git 安全子命令: %s' % hit
-    if extra is None:
-        extra, _, _ = load_allowlist()
-    hit = match_extra(body, tokens, extra)
+        return hit
+    # 只读命令:单个跑本来就会被 harness 放行,这里补的是链式形态
+    if exe in READONLY_COMMANDS:
+        if exe in READONLY_FILE_COMMANDS and not path_args_inside(tokens, base):
+            return None
+        return '只读命令: %s' % exe
+    hit = match_extra(raw if raw is not None else ' '.join(tokens), tokens, extra)
     if hit:
         return '额外白名单: %s' % hit
     return None
+
+
+def evaluate(command, extra=None):
+    """判定一条命令是否放行。命中返回理由,否则返回 None。
+
+    **复合命令按 shell 习惯拆成若干段,每段都要单独通过判定,全过才整体放行。**
+    这样 `cd X && pytest`、`sleep 5 && cd X && pytest`、`cat f | head -20`
+    这类常见形态能跑,而 `python x.py && rm -rf /` 仍然被拒(rm 那一段过不了)。
+
+    仍然整条不放行的:
+
+    - **命令替换**(`$( )` 与反引号)—— 在整条命令上查,双引号里照样会被展开
+    - **文件重定向**(``>`` ``>>`` ``<``)—— 能写文件
+    - **后台运行**(单个 ``&``)—— 脱离监督
+    - **引号没闭合** —— shell 会报语法错,一律不放行
+    """
+    if not isinstance(command, str) or not command.strip():
+        return None
+    # 命令替换要在**拆段之前**查:藏在 cd 参数里的 $( ) / 反引号
+    if has_substitution(command):
+        return None
+    segments, raws, writes, unterminated = split_segments(command)
+    if not segments or writes or unterminated:
+        return None
+    if extra is None:
+        extra, _, _ = load_allowlist()
+    reasons = []
+    base = os.getcwd()  # 链里 cd 之后的当前目录
+    for tokens, raw in zip(segments, raws):
+        if tokens and tokens[0].lower() == 'cd':
+            # 只是换目录 —— 无害,但要记住去了哪,后面的路径按它解析
+            base = resolve_dir(tokens[1] if len(tokens) > 1 else '', base)
+            continue
+        reason = evaluate_segment(tokens, extra, base, raw)
+        if not reason:
+            return None  # 有一段过不了 → 整条不放行
+        reasons.append(reason)
+    if not reasons:
+        return None
+    return ' + '.join(reasons)
 
 
 def emit_allow(reason):
