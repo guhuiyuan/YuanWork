@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 class PptxParser(BaseParser):
     """Parse PPTX files, preserving slide-level structure."""
 
-    SUPPORTED_EXTENSIONS = ("pptx", "ppt")
+    # The old binary `.ppt` is not here - python-pptx cannot open it and
+    # this release does not convert it (proposal.md §2.2).
+    SUPPORTED_EXTENSIONS = ("pptx",)
 
     async def parse(self, file_path: Path, doc_id: str) -> list[RawBlock]:
         """Parse PPTX into slide-level blocks."""

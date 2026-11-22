@@ -266,17 +266,13 @@ export function useIngest() {
         // that could not be read - the user should not have to tell
         // them apart.
         const unreadable = Math.max(0, total - unsupported);
-        if (unreadable > 0) {
-          // The build did not fail - it read what it could. Say so.
-          showToast(
-            `已索引 ${indexed} 个文件，${unreadable} 个文件读不进来（见侧栏）`,
-            "info"
-          );
-        } else if (total > 0) {
-          showToast(
-            `已索引 ${indexed} 个文件，${total} 个文件格式不支持（见侧栏）`,
-            "info"
-          );
+        if (unreadable > 0 || unsupported > 0) {
+          // The build did not fail - it read what it could. Say so,
+          // and say which of the two things happened.
+          const said = [`已索引 ${indexed} 个文件`];
+          if (unreadable > 0) said.push(`${unreadable} 个文件读不进来`);
+          if (unsupported > 0) said.push(`${unsupported} 个文件格式不支持`);
+          showToast(`${said.join("，")}（见侧栏）`, "info");
         } else {
           showToast(
             indexed

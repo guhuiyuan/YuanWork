@@ -16,7 +16,11 @@ logger = logging.getLogger(__name__)
 class DocxParser(BaseParser):
     """Parse Word documents, preserving heading structure."""
 
-    SUPPORTED_EXTENSIONS = ("docx", "doc")
+    # The old binary `.doc` is not here. It is a compound document
+    # python-docx cannot open, and this release does not convert it
+    # (proposal.md §2.2) - so the dispatcher must not claim to read it,
+    # or every build tries and fails.
+    SUPPORTED_EXTENSIONS = ("docx",)
 
     async def parse(self, file_path: Path, doc_id: str) -> list[RawBlock]:
         """Parse .docx into heading-grouped blocks."""

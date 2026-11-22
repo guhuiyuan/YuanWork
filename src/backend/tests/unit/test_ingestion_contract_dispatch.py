@@ -34,11 +34,8 @@ from unit.ingestion_fixtures import (
 EXPECTED_DISPATCH = {
     "pdf": "PDFParser",
     "docx": "DocxParser",
-    "doc": "DocxParser",
     "pptx": "PptxParser",
-    "ppt": "PptxParser",
     "xlsx": "XlsxParser",
-    "xls": "XlsxParser",
     "md": "MarkdownTxtParser",
     "markdown": "MarkdownTxtParser",
     "txt": "MarkdownTxtParser",
@@ -51,6 +48,11 @@ EXPECTED_DISPATCH = {
     "webp": "ImageParser",
 }
 
+#: The old binary formats. This release does not convert them
+#: (proposal.md §2.2), so the dispatcher must not claim to read them:
+#: as long as it did, every build went and tried, and failed (TASK-091).
+LEGACY_BINARY = ("doc", "ppt", "xls")
+
 
 @pytest.mark.parametrize("ext,parser_name", sorted(EXPECTED_DISPATCH.items()))
 def test_extension_maps_to_expected_parser(ext: str, parser_name: str):
@@ -60,11 +62,17 @@ def test_extension_maps_to_expected_parser(ext: str, parser_name: str):
     assert type(parser).__name__ == parser_name
 
 
-def test_supported_extension_set_is_exactly_17():
+def test_supported_extension_set_is_exactly_14():
     dispatcher = ParserDispatcher()
     exts = dispatcher.supported_extensions()
-    assert len(exts) == 17
+    assert len(exts) == 14
     assert exts == set(EXPECTED_DISPATCH)
+
+
+@pytest.mark.parametrize("ext", LEGACY_BINARY)
+def test_the_old_binary_formats_have_no_parser(ext: str):
+    """The claim is the promise — and the promise could not be kept."""
+    assert ParserDispatcher().get_parser(Path(f"sample.{ext}")) is None
 
 
 @pytest.mark.parametrize("ext", sorted(EXPECTED_DISPATCH))
@@ -167,7 +175,9 @@ async def test_pipeline_skips_file_without_a_parser(temp_dir: Path):
     )
     result = await pipeline.ingest_file(path)
     assert result["status"] == "skipped"
-    assert "No parser for extension" in result["error"]
+    # The reason is in the reader's words, not a code (AC-E-004).
+    assert "不支持的文件类型" in result["reason"]
+    assert ".xyz" in result["reason"]
 
 
 async def test_doc_id_derives_from_path_and_content_hash(temp_dir: Path):

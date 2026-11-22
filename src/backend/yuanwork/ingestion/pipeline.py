@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from yuanwork.ingestion.chunker.structural_chunker import StructuralChunker
 from yuanwork.ingestion.chunker.token_counter import TokenCounter, content_token_limit
-from yuanwork.ingestion.parser.dispatcher import ParserDispatcher
+from yuanwork.ingestion.parser.dispatcher import ParserDispatcher, unsupported_reason
 from yuanwork.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -245,9 +245,12 @@ class IngestionPipeline:
         # Get parser
         parser = self.dispatcher.get_parser(file_path)
         if parser is None:
+            # A format this release does not read. The reason says which
+            # one and what to do about it - in the reader's words
+            # (AC-E-004).
             return {
                 "status": "skipped",
-                "error": f"No parser for extension: {file_path.suffix}",
+                "reason": unsupported_reason(file_path),
                 "path": str(file_path),
             }
 
@@ -442,13 +445,23 @@ class IngestionPipeline:
         written in batches at a capped rate, and the core layer's pages
         are compiled in the background - the build is finished when the
         long tail is searchable (AC-F-026, TASK-045).
+
+        The files whose format nobody supports are **not** read - and
+        they are not dropped either: they come back in the result, with
+        the reason. A folder build that swallowed them would be a build
+        that lost files without saying so (AC-E-004, TASK-091).
         """
         from yuanwork.ingestion.batch import BatchIngestor
 
+        dir_path = Path(dir_path)
+        ready, unsupported = self.partition_directory_files(dir_path, recursive)
+
         ingestor = BatchIngestor(self)
-        return await ingestor.ingest(
-            dir_path, recursive=recursive, force=force, on_progress=on_progress
+        result = await ingestor.ingest(
+            files=ready, force=force, on_progress=on_progress
         )
+        result["unsupported_files"] = unsupported
+        return result
 
     async def ingest_directory(
         self,
@@ -463,6 +476,10 @@ class IngestionPipeline:
         `build_directory`: it reads in parallel and writes in batches
         (TASK-045).
 
+        The files whose format nobody supports are not read, and they
+        are reported with the reason - the same two groups the bulk
+        build sorts the folder into (AC-E-004).
+
         `on_progress(done, total, current_path)` is called after every
         file, so a caller can show live progress instead of a spinner
         that never moves.
@@ -471,9 +488,15 @@ class IngestionPipeline:
         if not dir_path.exists() or not dir_path.is_dir():
             return {"status": "error", "error": "Directory not found"}
 
-        files = self.supported_files(dir_path, recursive)
+        files, unsupported = self.partition_directory_files(dir_path, recursive)
 
-        results = {"indexed": 0, "skipped": 0, "errors": 0, "files": []}
+        results = {
+            "indexed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "files": [],
+            "unsupported_files": unsupported,
+        }
         total = len(files)
 
         # The slices are written in batches: one embedding call per
@@ -506,6 +529,17 @@ class IngestionPipeline:
 
         return results
 
+    def directory_files(self, dir_path: Path, recursive: bool = True) -> list[Path]:
+        """Every file in a directory - the ones nobody supports included.
+
+        The build walks the folder once and sorts what it finds; this
+        is the walk, without the sorting.
+        """
+        dir_path = Path(dir_path)
+        if recursive:
+            return [f for f in dir_path.rglob("*") if f.is_file()]
+        return [f for f in dir_path.glob("*") if f.is_file()]
+
     def supported_files(self, dir_path: Path, recursive: bool = True) -> list[Path]:
         """The files in a directory that this pipeline would actually index.
 
@@ -513,13 +547,56 @@ class IngestionPipeline:
         guessing from every file in the directory - the count of
         unsupported files would otherwise make the progress bar lie.
         """
-        dir_path = Path(dir_path)
         supported = self.dispatcher.supported_extensions()
-        if recursive:
-            files = [f for f in dir_path.rglob("*") if f.is_file()]
-        else:
-            files = [f for f in dir_path.glob("*") if f.is_file()]
-        return [f for f in files if f.suffix.lower().lstrip(".") in supported]
+        return [
+            f
+            for f in self.directory_files(dir_path, recursive)
+            if f.suffix.lower().lstrip(".") in supported
+        ]
+
+    def partition_by_format(self, files: list[Path]) -> tuple[list[Path], list[dict]]:
+        """Sort files into: this release reads them, this release does not.
+
+        The two groups are what the build makes of a set of files, and
+        they are told apart the same way everywhere - the job that says
+        how much work there is, and the build that does the work.
+
+        A file whose format nobody supports is **not** read at all: the
+        build does not go and try it. That includes the old binary
+        formats, which the specification excludes (proposal.md §2.2) -
+        the dispatcher no longer claims to read them, so a rebuild
+        stops trying and failing on them (TASK-091).
+
+        The files nobody supports are still reported, with the reason -
+        not read is not the same as dropped (AC-E-004).
+        """
+        supported = set(self.dispatcher.supported_extensions())
+
+        ready: list[Path] = []
+        unsupported: list[dict] = []
+        for file_path in files:
+            suffix = file_path.suffix.lower().lstrip(".")
+            if suffix not in supported:
+                unsupported.append(
+                    {
+                        "path": str(file_path),
+                        "reason": unsupported_reason(file_path),
+                    }
+                )
+                continue
+            ready.append(file_path)
+
+        return ready, unsupported
+
+    def partition_directory_files(
+        self, dir_path: Path, recursive: bool = True
+    ) -> tuple[list[Path], list[dict]]:
+        """The files of a folder: the ones to read, and the ones not.
+
+        The same two groups the workspace build sorts its files into -
+        a folder build tells the two apart the same way (AC-E-004).
+        """
+        return self.partition_by_format(self.directory_files(dir_path, recursive))
 
     def partition_workspace_files(
         self, files: list[Path]
@@ -529,23 +606,18 @@ class IngestionPipeline:
         The three groups are what the build makes of a workspace, and
         they are told apart the same way everywhere - the job that says
         how much work there is, and the build that does the work.
+
+        A file whose format nobody supports is **not** read at all: the
+        build does not go and try it. That includes the old binary
+        formats, which the specification excludes (proposal.md §2.2) -
+        the dispatcher no longer claims to read them, so a rebuild
+        stops trying and failing on them (TASK-091).
         """
-        supported = set(self.dispatcher.supported_extensions())
+        ready, unsupported = self.partition_by_format(files)
 
-        ready: list[Path] = []
-        unsupported: list[dict] = []
         oversized: list[dict] = []
-        for file_path in files:
-            suffix = file_path.suffix.lower().lstrip(".")
-            if suffix not in supported:
-                unsupported.append(
-                    {
-                        "path": str(file_path),
-                        "reason": f"不支持的文件类型：{file_path.suffix or '（无扩展名）'}",
-                    }
-                )
-                continue
-
+        kept: list[Path] = []
+        for file_path in ready:
             size = self._file_size(file_path)
             if size is not None and self.max_file_size and size > self.max_file_size:
                 limit_mb = max(1, self.max_file_size // (1024 * 1024))
@@ -557,10 +629,9 @@ class IngestionPipeline:
                     }
                 )
                 continue
+            kept.append(file_path)
 
-            ready.append(file_path)
-
-        return ready, unsupported, oversized
+        return kept, unsupported, oversized
 
     async def build_workspace(
         self,
@@ -671,7 +742,7 @@ class IngestionPipeline:
                 results["unsupported"] += 1
                 results["unsupported_files"].append({
                     "path": str(file_path),
-                    "reason": f"不支持的文件类型：{file_path.suffix or '（无扩展名）'}",
+                    "reason": unsupported_reason(file_path),
                 })
                 await self._report_progress(on_progress, done, total, file_path)
                 continue

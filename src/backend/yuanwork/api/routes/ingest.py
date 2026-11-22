@@ -23,6 +23,10 @@ from yuanwork.api.schemas import (
     IngestJobResponse,
     IngestStatusResponse,
 )
+from yuanwork.ingestion.parser.dispatcher import (
+    LEGACY_BINARY_EXTENSIONS,
+    UNSUPPORTED_MARKER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +44,19 @@ MAX_FAILED_FILES = 300
 #: (AC-E-003).
 _NOT_A_FAILURE = ("already_indexed", "modified")
 
-#: The old binary formats are registered as supported but cannot be
-#: read (AC-E-004) - the reason has to be in words, not in a stack.
-_LEGACY_EXTENSIONS = (".doc", ".ppt", ".xls")
+#: The two lists a file can be in. Every entry says which one it is in,
+#: so the count and the list cannot disagree (AC-E-004).
+KIND_UNREADABLE = "unreadable"
+KIND_UNSUPPORTED = "unsupported"
 
 #: The errors the old binary formats produce.
+#:
+#: The dispatcher no longer claims to read them (proposal.md §2.2), so a
+#: build of this release never gets that far: the files are reported as
+#: "a format nobody supports" before anybody tries to read them. This
+#: branch is for the entries that arrive from elsewhere - an index
+#: written by an older release, or a caller that put the file into the
+#: list itself. The reason has to be in words, not in a stack.
 _LEGACY_ERRORS = ("BadZipFile", "KeyError", "PackageNotFoundError")
 
 
@@ -53,7 +65,7 @@ def _failure_reason(entry: dict) -> str:
     if entry.get("status") == "error":
         error = str(entry.get("error") or "")
         suffix = Path(str(entry.get("path") or "")).suffix.lower()
-        if suffix in _LEGACY_EXTENSIONS and any(
+        if suffix in LEGACY_BINARY_EXTENSIONS and any(
             error.startswith(prefix) for prefix in _LEGACY_ERRORS
         ):
             return f"旧版二进制格式（{suffix}）读不出来，请另存为新版"
@@ -64,6 +76,12 @@ def _failure_reason(entry: dict) -> str:
     return reason or "未知原因"
 
 
+def _legacy_rank(path: str) -> int:
+    """0 for the old binary formats, 1 for everything else."""
+    suffix = Path(str(path or "")).suffix.lower()
+    return 0 if suffix in LEGACY_BINARY_EXTENSIONS else 1
+
+
 def _collect_failed_files(result: dict) -> tuple[list[dict], int, int]:
     """The files the build could not read, and how many there were.
 
@@ -71,6 +89,17 @@ def _collect_failed_files(result: dict) -> tuple[list[dict], int, int]:
     user has to know about. The unsupported ones come after - there can
     be a hundred thousand of them, and they are all saying the same
     thing (AC-E-004).
+
+    Among the unsupported ones the old binary formats come first. They
+    are the files the user can do something about ("save it as the new
+    format"), there are only a few dozen of them, and the list is
+    capped - without this they would be buried under a hundred
+    thousand of code files that all say the same thing, and the cap
+    would hide them altogether (TASK-091).
+
+    Every entry says which list it belongs to ("kind"), so the count
+    and the list cannot disagree: the sidebar reads the same signal the
+    backend used.
 
     Returns the list (capped), how many there were in all, and how many
     of them are simply a format nobody supports - the two are different
@@ -83,7 +112,8 @@ def _collect_failed_files(result: dict) -> tuple[list[dict], int, int]:
         unsupported.append(
             {
                 "path": str(entry.get("path") or ""),
-                "error": str(entry.get("reason") or "不支持的文件类型"),
+                "error": str(entry.get("reason") or UNSUPPORTED_MARKER),
+                "kind": KIND_UNSUPPORTED,
             }
         )
 
@@ -94,18 +124,48 @@ def _collect_failed_files(result: dict) -> tuple[list[dict], int, int]:
                 {
                     "path": str(entry.get("path") or ""),
                     "error": _failure_reason(entry),
+                    "kind": KIND_UNREADABLE,
                 }
             )
         elif status == "skipped" and entry.get("reason") not in _NOT_A_FAILURE:
-            broken.append(
-                {
-                    "path": str(entry.get("path") or ""),
-                    "error": _failure_reason(entry),
-                }
-            )
+            reason = str(entry.get("reason") or "")
+            if reason.startswith(UNSUPPORTED_MARKER):
+                # A format nobody supports - the same thing the
+                # unsupported list says, said by another road (the
+                # single-file route asks the pipeline about one file).
+                unsupported.append(
+                    {
+                        "path": str(entry.get("path") or ""),
+                        "error": reason,
+                        "kind": KIND_UNSUPPORTED,
+                    }
+                )
+            else:
+                broken.append(
+                    {
+                        "path": str(entry.get("path") or ""),
+                        "error": _failure_reason(entry),
+                        "kind": KIND_UNREADABLE,
+                    }
+                )
 
-    every = broken + unsupported
-    return every[:MAX_FAILED_FILES], len(every), len(unsupported)
+    # The old binary formats first - see the docstring.
+    unsupported.sort(key=lambda entry: _legacy_rank(entry.get("path")))
+
+    total = len(broken) + len(unsupported)
+
+    # The cap must not bury the old binary formats: they are the files
+    # the user can do something about, and there are only a few dozen
+    # of them. So they get a place of their own - the files that could
+    # not be read fill the rest (TASK-091).
+    legacy = [entry for entry in unsupported if _legacy_rank(entry["path"]) == 0]
+    others = [entry for entry in unsupported if _legacy_rank(entry["path"]) != 0]
+    room = max(0, MAX_FAILED_FILES - len(legacy))
+    shown_broken = broken[:room]
+    left = max(0, MAX_FAILED_FILES - len(shown_broken) - len(legacy))
+
+    every = shown_broken + legacy + others[:left]
+    return every, total, len(unsupported)
 
 
 def _job_outcome(result: dict) -> tuple[str, str | None]:
@@ -411,7 +471,14 @@ async def _run_rebuild_job(app, job_id: str) -> None:
 
 
 async def _run_ingest_file_job(app, job_id: str, path) -> None:
-    """Background task to process a single-file ingestion job."""
+    """Background task to process a single-file ingestion job.
+
+    The answer of the pipeline is kept: a file this release does not
+    read is reported with the reason, exactly as a folder build reports
+    it. The reason was computed and thrown away before - the job said
+    "completed" and nobody could tell why the file was not in the
+    knowledge base (AC-E-004).
+    """
     from yuanwork.api.deps import get_sqlite_store
     from yuanwork.ingestion.pipeline import IngestionPipeline
 
@@ -420,14 +487,23 @@ async def _run_ingest_file_job(app, job_id: str, path) -> None:
 
     try:
         pipeline = IngestionPipeline.from_app(app)
-        await pipeline.ingest_file(path)
+        result = await pipeline.ingest_file(path)
+
+        failed, failed_total, unsupported_total = _collect_failed_files(
+            {"files": [{"path": str(path), **result}]}
+        )
+        broken = result.get("status") == "error"
 
         await sqlite.upsert_ingest_job(
             job_id=job_id,
-            status="completed",
+            status="failed" if broken else "completed",
             progress=1.0,
+            error=str(result.get("error")) if broken else None,
             files_done=1,
             current_file=None,
+            failed_files=json.dumps(failed, ensure_ascii=False),
+            failed_total=failed_total,
+            unsupported_total=unsupported_total,
         )
     except Exception as e:
         logger.exception(f"Ingest job {job_id} failed")

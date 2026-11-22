@@ -248,11 +248,28 @@ export function Sidebar() {
 }
 
 /**
+ * The marker the backend writes on a file whose format nobody supports.
+ *
+ * The two lists are told apart by the reason, and the backend decides
+ * which list a file belongs to: the reason of an unsupported file
+ * starts with this marker, and the reason of a file that could not be
+ * read never does. The check is a prefix, not a search - a file whose
+ * parse failed says something about *that* file (AC-E-004).
+ */
+const UNSUPPORTED_MARKER = "不支持的文件类型";
+
+/**
  * The files the last build could not read.
  *
  * The user asked for a folder and saw nothing: the files that could
  * not be read have to be right there, with the reason - not a count
  * buried in the log (AC-E-004).
+ *
+ * There are two lists, and they are two different problems: a file
+ * that could not be read, and a format this release does not support.
+ * The old binary formats (`.doc` / `.ppt` / `.xls`) are the second
+ * kind, not the first - the specification excludes them, so calling
+ * them "could not be read" would be wrong.
  *
  * The list is capped by the backend, and the count is the real one, so
  * the section says how many there are even when it cannot show them
@@ -263,11 +280,32 @@ function FailedFiles() {
   const failedTotal = useAppStore((s) => s.failedTotal);
   const unsupportedTotal = useAppStore((s) => s.unsupportedTotal);
   const [open, setOpen] = useState(false);
-  const [showAll, setShowAll] = useState(false);
+  // Two lists, two switches: they are two different problems, and
+  // collapsing one of them must not collapse the other.
+  const [showAllUnreadable, setShowAllUnreadable] = useState(false);
+  const [showAllUnsupported, setShowAllUnsupported] = useState(false);
+
+  // The two lists, told apart by the reason the backend wrote.
+  const unsupportedFiles = failedFiles.filter((file) =>
+    file.error.startsWith(UNSUPPORTED_MARKER)
+  );
+  const unreadableFiles = failedFiles.filter(
+    (file) => !file.error.startsWith(UNSUPPORTED_MARKER)
+  );
+
+  // The count of the files that could not be read. The total counts
+  // every file the build did not index, and the unsupported ones are in
+  // it - so the unreadable ones are what is left.
+  const unreadableTotal = Math.max(0, failedTotal - unsupportedTotal);
 
   if (failedTotal === 0 && unsupportedTotal === 0) return null;
 
-  const shown = showAll ? failedFiles : failedFiles.slice(0, 10);
+  const shownUnreadable = showAllUnreadable
+    ? unreadableFiles
+    : unreadableFiles.slice(0, 10);
+  const shownUnsupported = showAllUnsupported
+    ? unsupportedFiles
+    : unsupportedFiles.slice(0, 10);
 
   return (
     <>
@@ -277,32 +315,66 @@ function FailedFiles() {
         title="这些文件没有进知识库——点开看是哪些、为什么"
       >
         <span>
-          读不进来的文件（{failedTotal}）
-          {unsupportedTotal > 0 ? ` · 不支持的格式（${unsupportedTotal}）` : ""}
+          读不进来的文件（{unreadableTotal}）
+          {unsupportedTotal > 0 ? ` · 格式不支持（${unsupportedTotal}）` : ""}
         </span>
         <span>{open ? "▾" : "▸"}</span>
       </button>
 
       {open && (
         <>
-          {shown.map((file) => (
-            <div className="failed__row" key={file.path} title={file.path}>
-              <div className="failed__name">{baseName(file.path)}</div>
-              <div className="failed__reason">{file.error}</div>
-            </div>
-          ))}
-          {failedFiles.length > 10 && (
-            <button
-              className="failed__more"
-              onClick={() => setShowAll(!showAll)}
-            >
-              {showAll ? "收起" : `查看全部 ${failedFiles.length} 个`}
-            </button>
+          {unreadableFiles.length > 0 && (
+            <>
+              <div className="failed__group">
+                读不进来的文件（{unreadableTotal}）
+              </div>
+              {shownUnreadable.map((file) => (
+                <div className="failed__row" key={file.path} title={file.path}>
+                  <div className="failed__name">{baseName(file.path)}</div>
+                  <div className="failed__reason">{file.error}</div>
+                </div>
+              ))}
+              {unreadableFiles.length > 10 && (
+                <button
+                  className="failed__more"
+                  onClick={() => setShowAllUnreadable(!showAllUnreadable)}
+                >
+                  {showAllUnreadable ? "收起" : `查看全部 ${unreadableTotal} 个`}
+                </button>
+              )}
+              {unreadableFiles.length < unreadableTotal && (
+                <div className="failed__note">
+                  还有 {unreadableTotal - unreadableFiles.length} 个没有列出
+                </div>
+              )}
+            </>
           )}
-          {failedFiles.length < failedTotal && (
-            <div className="failed__note">
-              还有 {failedTotal - failedFiles.length} 个没有列出
-            </div>
+
+          {unsupportedFiles.length > 0 && (
+            <>
+              <div className="failed__group">
+                格式不支持（{unsupportedTotal}）
+              </div>
+              {shownUnsupported.map((file) => (
+                <div className="failed__row" key={file.path} title={file.path}>
+                  <div className="failed__name">{baseName(file.path)}</div>
+                  <div className="failed__reason">{file.error}</div>
+                </div>
+              ))}
+              {unsupportedFiles.length > 10 && (
+                <button
+                  className="failed__more"
+                  onClick={() => setShowAllUnsupported(!showAllUnsupported)}
+                >
+                  {showAllUnsupported ? "收起" : `查看全部 ${unsupportedTotal} 个`}
+                </button>
+              )}
+              {unsupportedFiles.length < unsupportedTotal && (
+                <div className="failed__note">
+                  还有 {unsupportedTotal - unsupportedFiles.length} 个没有列出
+                </div>
+              )}
+            </>
           )}
         </>
       )}
@@ -564,6 +636,12 @@ const failedStyles = `
     cursor: pointer;
   }
   .failed__head:hover { background: var(--bg-tertiary); }
+  .failed__group {
+    margin-top: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
   .failed__row {
     padding: 4px 8px;
     border-left: 2px solid var(--border);

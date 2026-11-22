@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 class XlsxParser(BaseParser):
     """Parse Excel files, sheet by sheet."""
 
-    SUPPORTED_EXTENSIONS = ("xlsx", "xls")
+    # The old binary `.xls` is not here - openpyxl cannot open it and
+    # this release does not convert it (proposal.md §2.2).
+    SUPPORTED_EXTENSIONS = ("xlsx",)
 
     async def parse(self, file_path: Path, doc_id: str) -> list[RawBlock]:
         """Parse xlsx into sheet-level blocks."""

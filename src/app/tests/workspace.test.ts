@@ -258,6 +258,64 @@ test("the files that could not be read are in the sidebar", () => {
   assert.match(sidebarSource, /file\.error/);
 });
 
+test("the two lists are counted apart", () => {
+  // 格式不支持 ≠ 读不进来. The count on the "could not be read" title
+  // is the unreadable ones - the total counts every file the build
+  // did not index, and the unsupported ones are in it. The formats
+  // nobody supports have a title of their own.
+  assert.match(
+    sidebarSource,
+    /const unreadableTotal = Math\.max\(0, failedTotal - unsupportedTotal\)/
+  );
+  assert.match(sidebarSource, /读不进来的文件（\{unreadableTotal\}）/);
+  assert.match(sidebarSource, /格式不支持（\{unsupportedTotal\}）/);
+});
+
+test("the sidebar tells the two lists apart by the reason", () => {
+  // The backend writes the reason: a file whose format nobody
+  // supports says so, and a file that could not be read does not.
+  // Without that the old binary formats would be counted as "could
+  // not be read", which is not what they are (TASK-091).
+  assert.match(sidebarSource, /UNSUPPORTED_MARKER/);
+  assert.match(sidebarSource, /failedFiles\.filter\(/);
+  assert.match(sidebarSource, /failed__group/);
+  // The marker is a prefix, not a search: the backend writes it on the
+  // reason of an unsupported file and on nothing else.
+  assert.match(sidebarSource, /error\.startsWith\(UNSUPPORTED_MARKER\)/);
+});
+
+test("the two lists have a switch of their own", () => {
+  // 收起第二栏不该把第一栏一起收起 —— 两个互不相干的清单，
+  // 不该被一个状态绑在一起。
+  assert.match(sidebarSource, /showAllUnreadable/);
+  assert.match(sidebarSource, /showAllUnsupported/);
+  assert.match(
+    sidebarSource,
+    /onClick=\{\(\) => setShowAllUnreadable\(!showAllUnreadable\)\}/
+  );
+  assert.match(
+    sidebarSource,
+    /onClick=\{\(\) => setShowAllUnsupported\(!showAllUnsupported\)\}/
+  );
+});
+
+test("the show-all button says how many there are in all", () => {
+  // 按钮上写的是「已经列出来的条数」，旁边的「还有 N 个没有列出」
+  // 写的是总数 —— 两个口径不一致，读的人会以为清单就是全部。
+  assert.match(sidebarSource, /查看全部 \$\{unreadableTotal\} 个/);
+  assert.match(sidebarSource, /查看全部 \$\{unsupportedTotal\} 个/);
+  assert.doesNotMatch(sidebarSource, /查看全部 \{unreadableFiles\.length\} 个/);
+  assert.doesNotMatch(sidebarSource, /查看全部 \{unsupportedFiles\.length\} 个/);
+});
+
+test("the toast says which of the two things happened", () => {
+  // The build did not fail - it read what it could. The user is told
+  // how many files could not be read and how many are a format
+  // nobody supports - separately, because they are two problems.
+  assert.match(hookSource, /个文件读不进来/);
+  assert.match(hookSource, /个文件格式不支持/);
+});
+
 test("a row says what the entry is", () => {
   assert.match(sidebarSource, /entry\.kind === "folder" \? "📁" : "📄"/);
   assert.match(sidebarSource, /entry\.kind === "folder" \? "文件夹" : "文件"/);
