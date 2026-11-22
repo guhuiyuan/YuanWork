@@ -365,10 +365,10 @@ YUANWORK_PREWARM_EMBEDDING=1 python -m yuanwork
 | `doc_id = sha256(绝对路径 + 内容哈希)` | 文件改名或移动即换 `doc_id`；而去重只看内容哈希，改名后同一份内容会同时存在两个条目 |
 | 同一内容出现在两个路径 | 只保留**首次摄取**的那条记录，第二个路径不建文件元数据行 |
 | 文件监听（watcher） | **未接入**：debounce 与重新摄取逻辑是死代码，`FileWatcher` 从未被实例化，也不在启动流程里。上文"监听 → 解析 → 分块"的数据流目前只由手动摄取触发 |
-| `.doc` / `.ppt` / `.xls` | 登记在扩展名清单中，但底层库只读 OOXML 格式，实际必然失败 |
-| 扫描版 PDF | 只产出 `[Scanned page - no text extracted]` 占位块，**不做 OCR**（`PyMuPDF` 虽在依赖里，但代码从未 import） |
+| `.doc` / `.ppt` / `.xls` | **不再尝试**（TASK-091）：已从解析器的扩展名清单里摘出去，按 proposal.md §2.2 归入「格式不支持」那一档，理由说清该另存为什么 |
+| 扫描版 PDF | 只产出 `[Scanned page - no text extracted]` 占位块，**不做 OCR** —— OCR 只接在图片上（独立图片文件与文档里嵌的图片：`parser/image_parser.py` + `parser/ocr.py`），**PDF 里的扫描页还没接** |
 | 文本文件编码 | UTF-8 解码失败即按 GBK 解码并忽略非法字节，二进制文件会被当作文本入库 |
-| 切块尾部 | 切分后不足 50 字符的切片会被丢弃；若一个块的主体是空白，该块的全部内容会被静默丢失 |
+| 切块尾部 | 过短的切片**并入相邻切片**（`structural_chunker._merge_short_chunks`），放不下的才单独留着 —— 文档末尾的短句不再被丢弃（ADR-005） |
 | 全文索引目录被锁 | tantivy 写者在进程存活期间持有索引目录句柄，Windows 上索引目录删不掉、索引重建会失败（仅告警）。用临时目录跑索引测试时目录清理可能失败——`test_fts.py::test_semantic_memory_migrates_existing_fts` 在 Windows 上是 flaky 的 |
 
 ---
