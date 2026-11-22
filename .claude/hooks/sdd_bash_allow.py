@@ -84,10 +84,11 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
 ## 白名单(保守)
 
 1. SDD 技能自己的脚本:python 解释器 + 路径**整段**命中 ``skills/sdd/scripts/``
-   或 ``.claude/sdd/`` 的 ``.py`` 文件,**且**落在可信根(项目根 / 工作目录 /
-   ``~/.claude``)下 —— 子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py`` 蒙混过关;
-   而 ``skills/sdd/scripts/`` **只认固定文件名**(见 SDD_SCRIPT_NAMES)——
-   那个目录 AI 自己就能写,按目录信任等于给它一个「写个 .py 再执行」的口子
+   或 ``.claude/sdd/`` 的 ``.py`` 文件,**且**路径可信 —— 在 ``~/.claude`` 下面
+   (AI 写不到那里),或 ``.claude/sdd/`` 下,或在项目里但**与已安装的那份
+   逐字节相同**(``skills/sdd/scripts/`` AI 自己就能写,按目录信任等于给它一个
+   「写个 .py 再执行」的口子);子串比对会让 ``/tmp/evil/skills/sdd/scripts/x.py``
+   蒙混过关
 2. git 的安全子命令:status/diff/log/show/rev-parse/branch/add/commit
 3. 只读命令(ls/cat/head/grep/find/diff/…):单个跑本来就会被内建无害命令表
    放行,这里补的是**链式形态**里的它们
@@ -116,7 +117,9 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
   (``/c/Users/...``);**展开不出确定值就不放行**
 - 含通配符的参数:展开结果不可知 → 只放行「相对路径 + 目录部分在项目内」
 - 选项里的路径(``--from-file=…`` ``--output=…``)同样要过这一关
-- 目标路径里不能有 ``.claude`` / ``.git`` 段
+- 目标路径里不能有 ``.claude`` / ``.git`` 段(**带通配符也一样**)
+- ``cd`` 换到**猜不出来**的目录(``cd`` / ``cd -`` / ``cd -P ~``)时,
+  整条链都不放行 —— base 停在项目根的话,``cat .ssh/id_rsa`` 会读到家目录的私钥
 
 **不放行**:
 
@@ -125,6 +128,12 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
   osascript / wscript …)与**包装器**(env / xargs):它们能执行任意命令,
   白名单里写一条 ``sh -c "任意命令"`` 就是开后门
 - ``find`` 带 ``-exec`` / ``-delete`` / ``-fprintf`` / ``-fls``
+- **会写文件的普通命令**(cp / mv / mkdir / touch / tee / tar / unzip / rsync /
+  ln / install …)与**脚本 / 编辑器**(awk / sed / ed / vi …):白名单是用户可编辑的,
+  又由 install_hook.py 从规范的「验证命令」字段自动填 —— 名单里只要出现一条
+  ``cp``,``cp 任意文件 任意路径`` 就会被整条放行
+- 把**环境变量整个打出来**的命令(``echo $API_KEY``)—— env / printenv 被排除
+  就是为了这个,``echo`` 走的是同一个后门
 - git push / reset / clean,以及任何会改变 git 行为的**前置选项**
   (``-c`` 能定义 alias、``--exec-path`` 能换掉子命令查找路径);
   ``-C`` 指向**别的仓库**且子命令会写(add/commit/branch)时也不放行;
@@ -150,6 +159,7 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
 
 import json
 import os
+import re
 import sys
 
 ALLOWLIST_FILE = 'sdd-hook-allow.json'
@@ -159,8 +169,9 @@ AUDIT_FILE = 'sdd-hook-audit.log'
 #
 # 「子串匹配」是实测出来的洞:`python /tmp/evil/skills/sdd/scripts/payload.py`
 # 因为路径里含有 "skills/sdd/scripts/" 就被当成 SDD 脚本放行了。
-# 现在要求这几个词各自独立成段,并且脚本必须落在**可信根**下
-# (项目根 / 当前工作目录 / 用户的 ~/.claude),见 trusted_roots()。
+# 现在要求这几个词各自独立成段,并且脚本本身要**可信**：
+# 在 ~/.claude 下面，或在 .claude/sdd/ 下，或在项目里但**与已安装的那份
+# 逐字节相同**(见 script_trusted())。
 SCRIPT_DIR_SEGMENTS = (
     ('skills', 'sdd', 'scripts'),
     ('.claude', 'sdd'),
@@ -183,6 +194,7 @@ SDD_SCRIPT_NAMES = frozenset({
     'export_openspec.py',
     'install_hook.py',
     'hook_probe.py',
+    'denied_report.py',
 })
 
 # git 的安全子命令 —— 刻意不含 push / remote / reset / clean
@@ -208,6 +220,7 @@ DEFAULT_EXTRA = (
     'pytest',
     'python -m pytest',
     'python -m unittest',
+    'python --version',
     'npm test',
     'npm run test',
     'cargo test',
@@ -237,6 +250,14 @@ DENIED_EXECUTABLES = frozenset({
     'wscript', 'cscript', 'mshta', 'rundll32', 'regsvr32', 'wine',
     # 包装器
     'env', 'xargs',
+    # 会写文件的普通命令 —— 白名单是用户可编辑的,又由 install_hook.py
+    # 从规范的「验证命令」字段自动填,名单里只要出现一条 `cp`,
+    # `cp 任意文件 任意路径` 就会被整条放行(任意路径写)。
+    'cp', 'mv', 'mkdir', 'touch', 'tee', 'tar', 'unzip', 'zip', 'rsync',
+    'ln', 'install', 'mktemp', 'mkfifo', 'rename', 'truncate', 'setfacl',
+    'mount', 'umount', 'crontab', 'at', 'systemctl', 'service',
+    # 脚本 / 编辑器(能写文件,能执行命令)
+    'awk', 'gawk', 'sed', 'ed', 'ex', 'vi', 'vim', 'nano', 'emacs',
 })
 
 # find 本身常用(找文件),但 -exec / -delete 能执行命令,
@@ -274,14 +295,43 @@ READONLY_COMMANDS = frozenset({
     'sleep', 'test', 'true', 'false', 'echo', 'find', 'md5sum', 'sha256sum',
 })
 
+# **刻意不含 sed** —— 它的脚本里能藏 w(写文件)、r(读文件)、e(把模式空间
+# 交给 shell 执行)，那些都不是「只读」；`sed -i` 更是就地改文件。
+# 要在项目里看文件用 Read / Grep 工具，它们不走这条路。
+
 # 会**读文件**的只读命令 —— 它们的路径参数必须落在项目内,
 # 否则 `cat ~/.ssh/id_rsa` 这种读密钥的路径会被链式放行。
 # ls 也在里面:`ls -l $HOME/.ssh` 会泄露密钥目录的结构。
 READONLY_FILE_COMMANDS = frozenset({
     'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'diff', 'cmp',
     'sort', 'stat', 'file', 'find', 'du', 'tree', 'cut', 'md5sum', 'sha256sum',
-    'ls',
+    # uniq 与 tr 也**读文件**，dir 是 Windows 的 ls —— 少了它们，
+    # `uniq ~/.ssh/id_rsa` 就被放行：命令在只读表里，但路径参数没人查。
+    'ls', 'uniq', 'tr', 'dir',
 })
+
+# 透明包装器:只影响计时/超时,不改命令语义 —— 剥掉之后按里面的命令判定
+# (实测 `time .venv/Scripts/python.exe -m pytest …` 因为多了个 time 被拒,
+#  而里面的 pytest 明明在白名单里)
+TRANSPARENT_PREFIXES = ('time', 'timeout')
+
+#: timeout 的时长参数(`300` / `10m` / `1.5s`)—— 不是命令,剥掉
+DURATION_RE = re.compile(r'^\d+(\.\d+)?[smhd]?$')
+
+# 这些选项后面的参数是「模式/表达式」,**不是文件路径** —— 不做路径判定。
+#
+# **按命令分,而且只收真正取值的选项**。踩过的坑:曾经用一张全局名单,
+# 里面混着布尔开关(-r / -n)。`sort -r /etc/passwd` 的文件操作数因此被
+# 当成「模式」跳过路径判定 → 只读命令能读项目外的文件(含私钥)。
+# 布尔开关后面跟的是文件,不是表达式。
+PATTERN_VALUE_OPTIONS = {
+    'grep': ('-e', '--regexp', '-m', '--include', '--exclude',
+             '--include-dir', '--exclude-dir'),
+    'egrep': ('-e', '--regexp', '-m', '--include', '--exclude',
+              '--include-dir', '--exclude-dir'),
+    'fgrep': ('-e', '--regexp', '-m', '--include', '--exclude',
+              '--include-dir', '--exclude-dir'),
+}
 
 # 带文件路径的工具 —— 放行与否只看路径,不看命令
 PATH_TOOLS = ('Write', 'Edit', 'MultiEdit', 'NotebookEdit')
@@ -492,26 +542,6 @@ def contains_segments(path, segments):
     return False
 
 
-def trusted_roots():
-    """可信根:「SDD 自己的脚本」必须落在这些目录下面。
-
-    - 项目根(hook 自己所在位置往上找含 .claude/ 的那一层)
-    - 当前工作目录(从子目录启动时的兜底)
-    - 用户的 ``~/.claude``(用户级 / plugin 安装的技能都在这下面)
-
-    没有可信根这一层,路径里带 ``skills/sdd/scripts/`` 的**任意**文件
-    都会被当成自家脚本放行(实测:/tmp/evil/skills/sdd/scripts/x.py)。
-    """
-    roots = []
-    for path in (project_root(), os.getcwd(),
-                 os.path.join(os.path.expanduser('~'), '.claude')):
-        if not path:
-            continue
-        cand = canon_path(path)
-        if cand and cand not in roots:
-            roots.append(cand)
-    return roots
-
 
 def has_substitution(cmd):
     """命令里有没有命令替换 —— ``$(`` 与反引号,在**任何位置**都算不安全。
@@ -589,6 +619,24 @@ def looks_like_command(text):
     return True
 
 
+def logical_path(path):
+    """路径的「字面形态」—— 绝对化 + 统一大小写,但**不**解析符号链接/目录联接。
+
+    canon_path 会把 realpath 解析出来,而用户的 ``~/.claude/skills/sdd``
+    常常是指向别处的**目录联接**:文件明明在 ``~/.claude`` 下面,realpath 却
+    跑到别的盘上,于是「在可信根内」的判定会误伤 —— 实测在别的项目里
+    ``python ~/.claude/skills/sdd/scripts/install_hook.py`` 被拒(装不了 hook,
+    跑不了校验脚本)。
+    """
+    if not isinstance(path, str) or not path.strip():
+        return ''
+    try:
+        text = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+    except Exception:
+        return ''
+    return text.replace('\\', '/')
+
+
 def trusted_dirs():
     """可以当作「项目内」的可信目录:项目根 + 当前工作目录。"""
     out = []
@@ -602,6 +650,42 @@ def trusted_dirs():
 def has_denied_segment(path):
     """路径里有没有 .claude / .git 这样的目录段。"""
     return any(part in WRITE_DENY_DIRS for part in path.split('/'))
+
+
+def command_name(token: str) -> str:
+    """命令名(小写,去掉 .exe)。"""
+    name = os.path.basename(str(token or "")).lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def transcript_dir(root=None):
+    """本项目会话 transcript 的目录(``~/.claude/projects/<项目键>/``)。
+
+    项目键的算法与 harness 一致:路径里的非字母数字字符一律换成 ``-``。
+    (实测 YuanWork → ``d--prep-for-work-Projects-YuanWork``。)
+    """
+    root = root or project_root() or os.getcwd()
+    # harness 的算法：路径里的**非字母数字**字符一律换成 '-'
+    # (实测 d:/prep for work/Projects/YuanWork → d--prep-for-work-Projects-YuanWork)。
+    # '.' 与 '_' 也要换 —— 留着就与真实的目录名对不上，这个口子会静默失效。
+    key = ''.join(ch if (ch.isascii() and ch.isalnum()) else '-'
+                  for ch in os.path.abspath(root).replace('\\', '/'))
+    return os.path.join(os.path.expanduser('~'), '.claude', 'projects', key)
+
+
+def is_own_transcript(target: str) -> bool:
+    """这个路径是不是本项目自己的会话日志(``*.jsonl``)。
+
+    agent 要读自己的会话日志(工作流的 journal、子 agent 的 transcript)——
+    那是它自己的东西,但在项目目录之外。只认本项目那一个目录里的 .jsonl:
+    开了这个口子的是「读自己的日志」,不是「读 ~/.claude 整棵树」。
+    """
+    if not target or not target.endswith(".jsonl"):
+        return False
+    transcripts = canon_path(transcript_dir())
+    # 目标也要规范化 —— 调用方给的常常还是反斜杠的原始路径
+    # (实测:Windows 上 str(Path) 是反斜杠的,直接比前缀永远比不上)
+    return bool(transcripts) and within(transcripts, canon_path(target))
 
 
 def expand_path_token(tok):
@@ -646,12 +730,38 @@ def resolve_against(token, base):
         return ''
 
 
-def resolve_dir(target, base):
-    """解析 cd 的目标目录(相对当前 base)。"""
-    if not target or target == '-':
-        return base
-    resolved = resolve_against(target, base)
-    return resolved or base
+def cd_target(args):
+    """cd 的目标目录 —— 认得清白就返回那个目录，认不清就返回 None。
+
+    bash 的 cd 有好几种形态：``cd dir``、``cd``(→$HOME)、``cd -``(→OLDPWD)、
+    ``cd -P dir``、``cd -- dir``。只有第一种是「一个目录参数」；别的形态
+    换到了一个 hook 猜不出来的目录。
+
+    实测出来的洞：``cd && cat .ssh/id_rsa``、``cd -P ~ && cat .ssh/id_rsa``、
+    ``cd -- ~ && cat .ssh/id_rsa``、``cd - && cat .ssh/id_rsa`` —— 这些形态
+    在 bash 里真的会换到家目录，但 hook 的 base 还停在项目根，于是
+    ``cat .ssh/id_rsa`` 被当成项目内的相对路径放行，读的是家目录里的私钥。
+    """
+    for arg in args:
+        if arg == '--':
+            continue
+        if arg.startswith('-'):
+            # '-' 是 OLDPWD(猜不出来)；-P / -L / -e 之类是选项，不是目录
+            return None
+        return arg
+    return None          # 没有目录参数 → cd 回 $HOME(同样猜不出来)
+
+
+def resolve_dir(args, base):
+    """解析 cd 的目标目录(相对当前 base)。
+
+    认得清白就返回绝对路径；认不清返回 '' —— 调用方把 '' 当作
+    「base 不知道了」，后面的段一律不放行(fail-closed)。
+    """
+    target = cd_target(args)
+    if target is None:
+        return ''
+    return resolve_against(target, base)
 
 
 def path_args_inside(tokens, base=None):
@@ -669,16 +779,22 @@ def path_args_inside(tokens, base=None):
     roots = trusted_dirs()
     if not roots:
         return False
+    value_options = PATTERN_VALUE_OPTIONS.get(command_name(tokens[0]), ())
     base_canon = canon_path(base_dir)
     if not base_canon or not any(within(r, base_canon) for r in roots):
         return False          # 已经离开项目 → 整段不放行
-    for tok in tokens[1:]:
+    for idx, tok in enumerate(tokens[1:], start=1):
         value = tok
         if tok.startswith('-'):
             if '=' not in tok:
                 continue       # 单独的选项,值在下一个 token
             value = tok.split('=', 1)[1]
             if not value:
+                continue
+        else:
+            # 紧跟在「模式类选项」后面的参数是表达式,不是路径
+            # (名单按命令分 —— 见 PATTERN_VALUE_OPTIONS 那段注释)
+            if idx >= 2 and tokens[idx - 1] in value_options:
                 continue
         if not value:
             continue
@@ -706,25 +822,75 @@ def path_args_inside(tokens, base=None):
                 target = resolve_against(dirpart.rstrip('/'), base_dir)
                 if not target or not any(within(r, target) for r in roots):
                     return False
+                if has_denied_segment(target):
+                    return False      # .claude / .git —— 带通配符也不放行
+            elif has_denied_segment(head):
+                return False
             continue
         target = resolve_against(value, base_dir)
         if not target:
             return False      # 展开不出确定值 → 不放行
         if not any(within(r, target) for r in roots):
-            return False
-        if has_denied_segment(target):
+            # agent 自己的会话日志(工作流 journal、子 agent transcript)
+            # 是它自己的东西 —— 但只认本项目的那几个 .jsonl,
+            # 不开 ~/.claude 整棵树的门。
+            if not is_own_transcript(target):
+                return False
+        if has_denied_segment(target) and not is_own_transcript(target):
             return False      # .claude / .git
     return True
+
+
+def same_as_installed(logical):
+    """项目里的技能脚本,是否与**已安装的那一份**逐字节相同。
+
+    ``<项目>/skills/sdd/scripts/`` 是 AI 自己就能写的目录 —— 按目录信任等于
+    给它一个「写一个 .py 再执行它」的口子(实测过)。所以要求它跟
+    ``~/.claude/skills/sdd/scripts/`` 下那一份**逐字节相同**:
+    技能自己的仓库满足这一点(``~/.claude/skills/sdd`` 是指向它的联接),
+    而 AI 改过/新写的文件对不上 → 不放行。
+    """
+    name = os.path.basename(logical)
+    installed = os.path.join(os.path.expanduser('~'), '.claude', 'skills',
+                             'sdd', 'scripts', name)
+    try:
+        with open(installed, 'rb') as fa, open(logical, 'rb') as fb:
+            return fa.read() == fb.read()
+    except Exception:
+        return False
+
+
+def script_trusted(logical):
+    """这个技能脚本路径可信吗?
+
+    - 在 ``~/.claude`` 下面(用户级安装的技能)→ 可信 —— AI 写不到那里
+    - 在项目里且是 ``skills/sdd/scripts/`` → **AI 自己就能写** →
+      只有与已安装的那一份逐字节相同才可信
+    - ``.claude/sdd/`` → 可信(整个 ``.claude/`` AI 都写不到)
+    - 其它 → 不可信
+    """
+    if not logical:
+        return False
+    home = logical_path(os.path.join(os.path.expanduser('~'), '.claude'))
+    if within(home, logical):
+        return True
+    if contains_segments(logical, ('skills', 'sdd', 'scripts')):
+        return same_as_installed(logical)
+    if contains_segments(logical, ('.claude', 'sdd')):
+        return True
+    return False
 
 
 def match_sdd_script(tokens):
     """命令行是否是"python 解释器 + SDD 自己的脚本"。命中返回脚本路径。
 
-    两道关:
+    三道关:
     1. 目录名要**整段**命中 skills/sdd/scripts(或 .claude/sdd)—— 子串比对
        会让 /tmp/evil/skills/sdd/scripts/x.py 也算命中(实测)。
-    2. 脚本必须落在**可信根**下(项目根 / 工作目录 / ~/.claude)——
-       否则任何路径里带这个目录名的文件都会被当成自家脚本。
+    2. 路径要**可信**(script_trusted):在 ~/.claude 下面、或在项目里但与
+       已安装的那份逐字节相同 —— 不能只看目录名。
+    3. ``skills/sdd/scripts/`` 还要**认文件名**:那个目录 AI 自己就能写,
+       按目录信任等于给它一个「写个 .py 再执行它」的口子(实测过)。
     """
     if len(tokens) < 2 or not _is_python_exe(tokens[0]):
         return None
@@ -743,10 +909,9 @@ def match_sdd_script(tokens):
         return None
     if not any(contains_segments(norm, segs) for segs in SCRIPT_DIR_SEGMENTS):
         return None
-    if not any(within(root, norm) for root in trusted_roots()):
+    logical = logical_path(cand)
+    if not script_trusted(logical):
         return None
-    # skills/sdd/scripts/ 只认固定的文件名 —— 那个目录 AI 自己就能写,
-    # 按目录信任等于给它一个「写一个 .py 再执行它」的口子(实测过)。
     if contains_segments(norm, ('skills', 'sdd', 'scripts')):
         if os.path.basename(norm).lower() not in SDD_SCRIPT_NAMES:
             return None
@@ -999,6 +1164,47 @@ def evaluate_tool(tool_name, tool_input, tools=None, root=None, write_paths=None
     return None
 
 
+#: 这些只读命令的输出**就是它们的参数** —— 参数里有东西，输出里就有。
+PRINTS_ITS_ARGUMENT = frozenset({'echo', 'basename', 'dirname', 'realpath'})
+
+#: 参数里的**环境变量展开**。bash 会把变量的**值**替换进去,所以
+#: ``echo $API_KEY``、``echo $API_KEY.txt``、``echo "x${TOKEN}"`` 都会把
+#: 秘密打进 transcript。只认合法的标识符 —— ``$5`` / ``$?`` / ``$1`` 是
+#: 位置参数与状态码,不是环境变量,放过。
+VAR_REFERENCE = re.compile(
+    r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))'
+    r'|%([A-Za-z_][A-Za-z0-9_]*)%')
+
+
+def _expands_a_variable(token: str) -> bool:
+    """这个参数里有没有环境变量展开。"""
+    return bool(VAR_REFERENCE.search(str(token or '')))
+
+
+def _prints_an_expanded_variable(tokens) -> bool:
+    """参数里有没有环境变量展开(会被原样打印出来)。"""
+    return any(_expands_a_variable(tok) for tok in tokens[1:])
+
+
+def strip_transparent(tokens):
+    """剥掉 ``time`` / ``timeout 300`` 这类包装器。
+
+    它们只影响计时与超时,不改命令语义 —— 里面的命令该怎么判还怎么判。
+    """
+    out = list(tokens)
+    while out:
+        exe = os.path.basename(out[0]).lower()
+        if exe.endswith('.exe'):
+            exe = exe[:-4]
+        if exe in TRANSPARENT_PREFIXES:
+            out = out[1:]
+            if exe == 'timeout' and out and DURATION_RE.match(out[0]):
+                out = out[1:]       # `timeout 300` / `timeout 10m` 的时长
+            continue
+        break
+    return out
+
+
 def evaluate_segment(tokens, extra, base=None, raw=None):
     """判定**单个**命令段。命中返回理由,否则返回 None。
 
@@ -1008,11 +1214,19 @@ def evaluate_segment(tokens, extra, base=None, raw=None):
     """
     if not tokens:
         return None
+    tokens = strip_transparent(tokens)
+    if not tokens:
+        return None
     # 危险可执行文件一律不放行 —— 白名单是用户可编辑的,不能成为后门
     exe = os.path.basename(tokens[0]).lower()
     if exe.endswith('.exe'):
         exe = exe[:-4]
     if exe in DENIED_EXECUTABLES:
+        return None
+    # 只读命令**把参数原样打出来**时，不许打环境变量——
+    # env / printenv 之所以被排除，就是为了这个。`echo $API_KEY`
+    # 是同一件事绕了个弯。
+    if exe in PRINTS_ITS_ARGUMENT and _prints_an_expanded_variable(tokens):
         return None
     # find 本身常用(找文件),但 -exec / -delete / -fprintf / -fls 能执行命令或写文件
     if exe == 'find' and any(tok in FIND_EXEC_FLAGS for tok in tokens[1:]):
@@ -1062,8 +1276,12 @@ def evaluate(command, extra=None):
     base = os.getcwd()  # 链里 cd 之后的当前目录
     for tokens, raw in zip(segments, raws):
         if tokens and tokens[0].lower() == 'cd':
-            # 只是换目录 —— 无害,但要记住去了哪,后面的路径按它解析
-            base = resolve_dir(tokens[1] if len(tokens) > 1 else '', base)
+            # 只是换目录 —— 无害,但要记住去了哪,后面的路径按它解析。
+            # 换到哪儿猜不出来(cd / cd - / cd -P ~)就让整条链不放行：
+            # base 停在项目根的话，`cat .ssh/id_rsa` 会读到家目录里的私钥。
+            base = resolve_dir(tokens[1:], base)
+            if not base:
+                return None
             continue
         reason = evaluate_segment(tokens, extra, base, raw)
         if not reason:
@@ -1103,7 +1321,7 @@ def audit(reason):
         pass
 
 
-def main():
+def _decide():
     try:
         raw = sys.stdin.read()
     except Exception:
@@ -1135,6 +1353,21 @@ def main():
         emit_allow(reason)
         audit(reason)
     return 0
+
+
+def main():
+    """Decide, and never raise.
+
+    **Any exception must not escape** —— a hook that crashes leaves the
+    session with no gate at all; in auto mode (where the server-side
+    classifier is unreachable) that means every command gets denied.
+    So the whole thing is wrapped: on an exception it stays silent and
+    exits 0, and the normal permission flow takes over (fail-closed).
+    """
+    try:
+        return _decide()
+    except Exception:
+        return 0
 
 
 if __name__ == '__main__':

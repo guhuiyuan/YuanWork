@@ -87,7 +87,10 @@
     ".venv/Scripts/python.exe -m pytest src/backend/tests/unit/test_parent_watch.py -q",
     "cargo test --release --target-dir D:/cargo-target",
     ".venv/Scripts/python.exe -m pytest src/backend/tests -q",
-    "npm run build"
+    "npm run build",
+    ".venv/Scripts/python.exe scripts/bench/probe_graph_edges.py",
+    ".venv/Scripts/python.exe scripts/bench/probe_legacy_formats.py",
+    "YUANWORK_GRAPH_DB=D:/yuanwork/data/store.db .venv/Scripts/python.exe -m pytest src/backend/tests -q -k real",
   ],
   "tools": [],
   "write_paths": []
