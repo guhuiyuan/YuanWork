@@ -9,6 +9,7 @@ import { anchorOf } from "./citations.ts";
 import { parseSseFrame, parseSseFrames, type RawSseFrame } from "./sse.ts";
 import {
   AUDIT_LIMIT,
+  clampAuditLimit,
   type AuditClearResult,
   type AuditListPayload,
   type AuditStats,
@@ -800,8 +801,11 @@ export async function triggerConsolidation() {
  * (ADR-018).
  */
 export async function listAuditEntries(
-  limit: number = AUDIT_LIMIT
+  requested: number = AUDIT_LIMIT
 ): Promise<AuditListPayload> {
+  // The backend refuses anything above a thousand with a 422; the
+  // reader would get a raw HTTP error instead of the log (ADR-056).
+  const limit = clampAuditLimit(requested);
   if (isTauri) {
     const raw = await invoke<unknown>("list_audit_entries", { limit });
     return toJson<AuditListPayload>(raw);

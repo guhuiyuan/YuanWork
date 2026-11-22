@@ -1,11 +1,17 @@
 import { useEffect, useState } from "react";
 import {
+  applyClear,
   auditRows,
   auditSummary,
+  nextAuditLimit,
+  reasonOf,
   runClear,
   AUDIT_COLUMNS,
+  AUDIT_LIMIT,
+  AUDIT_LIMIT_MAX,
   CLEAR_LABEL,
   CONFIRM_CLEAR_LABEL,
+  EMPTY,
   formatCount,
   type AuditEntry,
   type AuditStats,
@@ -38,8 +44,15 @@ export function AuditTab() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [stats, setStats] = useState<AuditStats | null>(null);
   const [total, setTotal] = useState(0);
+  // How many lines the panel holds - it can be turned up to the
+  // thousand the backend gives out (ADR-056).
+  const [limit, setLimit] = useState(AUDIT_LIMIT);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The totals are a second requirement of their own: they can fail
+  // without the table failing, and then the panel says so.
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryKnown, setSummaryKnown] = useState(false);
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(
     null
   );
@@ -50,64 +63,105 @@ export function AuditTab() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([listAuditEntries(), auditStats()])
-      .then(([list, sums]) => {
+    // The table and the totals are two requirements of their own: one
+    // of them failing must not take the other away (AC-F-036).
+    Promise.allSettled([listAuditEntries(AUDIT_LIMIT), auditStats()]).then(
+      ([list, sums]) => {
         if (cancelled) return;
-        setEntries(list?.entries ?? []);
-        setTotal(list?.total ?? 0);
-        setStats(sums);
-        setError(null);
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return;
-        setError(`读不到审计记录：${(e as Error)?.message ?? String(e)}`);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+        if (list.status === "fulfilled") {
+          setEntries(list.value?.entries ?? []);
+          setTotal(list.value?.total ?? 0);
+          setError(null);
+        } else {
+          setError(`读不到审计记录：${reasonOf(list.reason)}`);
+        }
+        if (sums.status === "fulfilled") {
+          setStats(sums.value);
+          setSummaryKnown(true);
+          setSummaryError(null);
+        } else {
+          setStats(null);
+          setSummaryKnown(false);
+          setSummaryError(`读不到审计汇总：${reasonOf(sums.reason)}`);
+        }
+      }
+    ).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
   }, []);
 
   /**
+   * Look further back into the log.
+   *
+   * The log holds thousands of lines; the last hundred are not enough
+   * to find the call that went wrong a week ago (ADR-056).
+   */
+  async function showMore() {
+    const next = nextAuditLimit(limit);
+    setLimit(next);
+    try {
+      const list = await listAuditEntries(next);
+      setEntries(list?.entries ?? []);
+      setTotal(list?.total ?? 0);
+      setError(null);
+    } catch (e) {
+      setError(`读不到审计记录：${reasonOf(e)}`);
+    }
+  }
+
+  /**
    * Clear the log and say what happened.
    *
    * The count comes from the backend: it is the number of lines that
-   * were on the disk a moment ago. A failure is reported as a failure
-   * - the reader is not told the log was cleared when it was not
+   * were on the disk a moment ago. The log is read back afterwards, so
+   * a delete that failed on disk is a failure and not a "cleared" -
+   * the reader is never told the log was cleared when it was not
    * (AC-F-037).
    */
   async function handleClear() {
     setBusy(true);
-    const outcome = await runClear(clearAuditLog);
+    const outcome = await runClear(clearAuditLog, () =>
+      listAuditEntries(AUDIT_LIMIT)
+    );
     setBusy(false);
     setConfirming(false);
     setNotice({ text: outcome.message, ok: outcome.ok });
+    // The table is emptied only when the clear really happened.
+    const next = applyClear(entries, total, outcome);
+    setEntries(next.entries);
+    setTotal(next.total);
     if (!outcome.ok) return;
-    // The table is empty now - read the totals again so the summary
-    // is the truth rather than what it was a moment ago.
-    setEntries([]);
-    setTotal(0);
+    // The log is gone, so the totals are zero - even if they cannot be
+    // read again, they are not the numbers of a moment ago.
+    setStats(null);
+    setSummaryKnown(true);
+    setSummaryError(null);
     try {
       setStats(await auditStats());
     } catch (e) {
-      setError(`读不到审计汇总：${(e as Error)?.message ?? String(e)}`);
+      setSummaryError(`读不到审计汇总：${reasonOf(e)}`);
     }
   }
 
   const rows = auditRows(entries);
   const summary = auditSummary(stats);
+  // A number that could not be read is a dash, not a zero: the log
+  // holds calls, it is not empty.
+  const statText = (value: number) =>
+    summaryKnown ? formatCount(value) : EMPTY;
 
   return (
     <div className="audit">
       <div className="audit__summary">
         <div className="audit__stat">
-          <span className="audit__stat-value">{formatCount(summary.calls)}</span>
+          <span className="audit__stat-value">{statText(summary.calls)}</span>
           <span className="audit__stat-label">调用次数</span>
         </div>
         <div className="audit__stat">
-          <span className="audit__stat-value">{formatCount(summary.tokens)}</span>
+          <span className="audit__stat-value">{statText(summary.tokens)}</span>
           <span className="audit__stat-label">令牌数</span>
         </div>
         <div className="audit__stat">
@@ -116,11 +170,15 @@ export function AuditTab() {
               summary.failures > 0 ? "audit__stat-value--bad" : ""
             }`}
           >
-            {formatCount(summary.failures)}
+            {statText(summary.failures)}
           </span>
           <span className="audit__stat-label">失败次数</span>
         </div>
       </div>
+
+      {summaryError && (
+        <div className="audit__notice audit__notice--muted">{summaryError}</div>
+      )}
 
       <div className="audit__toolbar">
         {confirming ? (
@@ -150,6 +208,11 @@ export function AuditTab() {
             disabled={busy}
           >
             {CLEAR_LABEL}
+          </button>
+        )}
+        {total > rows.length && limit < AUDIT_LIMIT_MAX && (
+          <button className="audit__btn" onClick={showMore} disabled={busy}>
+            显示更多
           </button>
         )}
         <span className="audit__total">
@@ -297,6 +360,10 @@ const auditStyles = `
   .audit__notice--bad {
     background: var(--conflict-bg);
     color: var(--conflict-border);
+  }
+  .audit__notice--muted {
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
   }
   .audit__empty {
     color: var(--text-tertiary);

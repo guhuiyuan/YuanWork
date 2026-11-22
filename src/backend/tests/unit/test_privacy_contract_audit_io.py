@@ -137,6 +137,38 @@ def test_the_log_can_be_cleared(client):
     assert client.get("/api/v1/audit").json()["total"] == 0
 
 
+def test_a_clear_that_did_not_happen_says_so(client, monkeypatch):
+    """AC-F-037 — 「清空失败时 SHALL 告知失败，SHALL 不谎称已清空」。
+
+    The file may be locked by another process. The route used to answer
+    「cleared: N」 whatever happened, so the reader was told their
+    records were gone while they were still on the disk.
+    """
+    log(client.app.state.audit_logger)
+
+    def locked(*_args, **_kwargs):
+        raise PermissionError("the file is in use")
+
+    monkeypatch.setattr(Path, "unlink", locked)
+
+    resp = client.delete("/api/v1/audit")
+
+    assert resp.status_code == 500
+    assert "cleared" not in resp.json()
+    # the records are still there - the answer does not pretend otherwise
+    assert client.get("/api/v1/audit").json()["total"] == 1
+
+
+def test_the_logger_says_whether_the_clear_worked(logger, monkeypatch):
+    assert logger.clear() is True
+
+    def locked(*_args, **_kwargs):
+        raise PermissionError("the file is in use")
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    assert logger.clear() is False
+
+
 def test_without_a_logger_the_routes_answer_503():
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")

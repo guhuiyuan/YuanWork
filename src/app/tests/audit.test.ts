@@ -25,16 +25,23 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import {
+  applyClear,
   auditHint,
   auditRows,
   auditSummary,
+  clampAuditLimit,
+  clearSucceeded,
   formatCount,
   formatDuration,
   formatOutcome,
   formatTokens,
   formatTimestamp,
+  nextAuditLimit,
+  reasonOf,
   runClear,
   AUDIT_COLUMNS,
+  AUDIT_LIMIT,
+  AUDIT_LIMIT_MAX,
   CLEAR_LABEL,
   CONFIRM_CLEAR_LABEL,
   type AuditEntry,
@@ -108,6 +115,12 @@ test("the question and the answer never reach the table", () => {
 test("the prompt hash only shows in the tooltip", () => {
   // ADR-056: the hash is there for the reader who compares two calls,
   // not for the reader who scans the table.
+  //
+  // AC-F-036 lists the hash among the things the table shows, and
+  // ADR-056 keeps it out of the narrow columns. The two cannot both be
+  // true of a column - the panel follows ADR-056 and the row still
+  // carries the hash, in the tooltip. The wording of AC-F-036 has to
+  // be reconciled with it (CLAUDE.md rule 4).
   const row = auditRows([CALL])[0];
   assert.match(row.hint, /a1b2c3d4e5f6a7b8/);
   assert.match(row.hint, /提示词哈希/);
@@ -122,6 +135,16 @@ test("the prompt hash only shows in the tooltip", () => {
     "duration",
     "outcome",
   ]);
+});
+
+test("the two token numbers say which is which", () => {
+  // AC-F-036 asks for "the prompt and the answer token counts" - two
+  // bare numbers do not say which is which.
+  const column = AUDIT_COLUMNS.find((c) => c.key === "tokens");
+  assert.match(column?.label ?? "", /提示/);
+  assert.match(column?.label ?? "", /回答/);
+  // and the tooltip of the row says it too
+  assert.match(auditHint(CALL), /令牌：提示 640 \/ 回答 128/);
 });
 
 test("the tooltip says what the table cannot show", () => {
@@ -216,9 +239,93 @@ test("a clear that failed says so and does not claim the log is empty", async ()
 });
 
 test("the panel reports the clear, and reports a failure as a failure", () => {
-  assert.match(tabSource, /runClear\(clearAuditLog\)/);
+  assert.match(tabSource, /runClear\(clearAuditLog/);
   assert.match(tabSource, /notice\.text/);
   assert.match(tabSource, /notice\.ok/);
+});
+
+// ===== the clear tells the truth =====
+
+test("a clear the log does not confirm is a failure, not a success", async () => {
+  // The backend answers with the number of lines it *was* holding; a
+  // delete that failed on the disk is swallowed there, so the answer
+  // would still say "cleared". The panel reads the log back and
+  // believes the log (AC-F-037).
+  const outcome = await runClear(
+    async () => ({ cleared: 12 }),
+    async () => ({ count: 12, total: 12, entries: [] })
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.cleared, 0);
+  assert.match(outcome.message, /清空失败/);
+  assert.doesNotMatch(outcome.message, /已清空/);
+});
+
+test("a clear the log confirms is a success", async () => {
+  const outcome = await runClear(
+    async () => ({ cleared: 12 }),
+    async () => ({ count: 0, total: 0, entries: [] })
+  );
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.cleared, 12);
+  assert.match(outcome.message, /已清空 12 条记录/);
+});
+
+test("a clear that cannot be checked is not reported as done", async () => {
+  // If the log cannot be read back, it cannot be said to be empty.
+  const outcome = await runClear(
+    async () => ({ cleared: 12 }),
+    async () => {
+      throw new Error("后端不在");
+    }
+  );
+  assert.equal(outcome.ok, false);
+  assert.doesNotMatch(outcome.message, /已清空/);
+});
+
+test("the log decides whether the clear worked", () => {
+  assert.equal(clearSucceeded(12, 0), true); // the log is gone
+  assert.equal(clearSucceeded(12, 3), true); // only new calls came in
+  assert.equal(clearSucceeded(12, 12), false); // the old lines are still there
+  assert.equal(clearSucceeded(12, 20), false);
+  assert.equal(clearSucceeded(0, 0), true); // there was nothing to clear
+});
+
+test("a failed clear leaves the table as it was", () => {
+  // AC-F-037: the table must not be emptied when nothing was cleared.
+  const failed = applyClear([CALL], 1, {
+    ok: false,
+    cleared: 0,
+    message: "清空失败：后端不在",
+  });
+  assert.equal(failed.entries.length, 1);
+  assert.equal(failed.total, 1);
+});
+
+test("a clear that worked empties the table and the count", () => {
+  const done = applyClear([CALL], 1, {
+    ok: true,
+    cleared: 1,
+    message: "已清空 1 条记录",
+  });
+  assert.deepEqual(done.entries, []);
+  assert.equal(done.total, 0);
+});
+
+test("the panel asks the log whether the clear worked", () => {
+  // The decision lives in a function a test can see, not in a branch
+  // of the component.
+  assert.match(tabSource, /applyClear\(entries, total, outcome\)/);
+  assert.match(tabSource, /runClear\(clearAuditLog, \(\) =>/);
+});
+
+test("the totals of a log that is gone are zero, not the old numbers", () => {
+  // The summary must not keep the numbers of a log that no longer
+  // exists.
+  assert.match(tabSource, /setStats\(null\)/);
+  assert.equal(auditSummary(null).calls, 0);
+  assert.equal(auditSummary(null).tokens, 0);
+  assert.equal(auditSummary(null).failures, 0);
 });
 
 // ===== the confirmation =====
@@ -237,6 +344,50 @@ test("the clear asks first, in place", () => {
 test("the confirmation is a second state of the button, and it can be taken back", () => {
   assert.match(tabSource, /setConfirming\(false\)/);
   assert.match(tabSource, /取消/);
+});
+
+// ===== how much of the log the panel can see =====
+
+test("the limit stays inside what the backend accepts", () => {
+  // The backend refuses anything above a thousand with a 422 - the
+  // reader would get a raw HTTP error instead of the log.
+  assert.equal(clampAuditLimit(100), 100);
+  assert.equal(clampAuditLimit(0), 1);
+  assert.equal(clampAuditLimit(-5), 1);
+  assert.equal(clampAuditLimit(5000), AUDIT_LIMIT_MAX);
+  assert.equal(clampAuditLimit(undefined), AUDIT_LIMIT);
+});
+
+test("more is asked for in steps, up to the ceiling", () => {
+  assert.equal(nextAuditLimit(100), 500);
+  assert.equal(nextAuditLimit(500), AUDIT_LIMIT_MAX);
+  assert.equal(nextAuditLimit(AUDIT_LIMIT_MAX), AUDIT_LIMIT_MAX);
+});
+
+test("nothing asks the backend for more than it will give", () => {
+  assert.match(apiSource, /clampAuditLimit/);
+  // and the shell clamps it again, as a second hand
+  assert.match(commandsSource, /clamp\(1, 1000\)/);
+});
+
+test("the reader can look further back than the last hundred calls", () => {
+  // The audit log is worth having because the one call that went wrong
+  // can be found (ADR-056) - the last hundred are not enough.
+  assert.match(tabSource, /nextAuditLimit/);
+  assert.match(tabSource, /显示更多/);
+});
+
+// ===== the table and the totals are two requirements =====
+
+test("the table shows even when the totals cannot be read", () => {
+  assert.match(tabSource, /allSettled/);
+  assert.match(tabSource, /读不到审计记录/);
+  assert.match(tabSource, /读不到审计汇总/);
+});
+
+test("a number that could not be read is a dash, not a zero", () => {
+  // The log holds calls - a zero would say it is empty.
+  assert.match(tabSource, /summaryKnown \? formatCount\(value\) : EMPTY/);
 });
 
 // ===== the bridge =====

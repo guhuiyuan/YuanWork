@@ -878,11 +878,12 @@ pub async fn list_audit_entries(
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     // The backend caps the list at a thousand lines - the panel shows
-    // the recent ones, not the whole file.
+    // the recent ones, not the whole file. The cap is applied here as
+    // well: a larger number would come back as a raw 422.
     let url = format!(
         "{}/api/v1/audit?limit={}",
         backend.url(),
-        limit.unwrap_or(100)
+        limit.unwrap_or(100).clamp(1, 1000)
     );
 
     let response = client.get(&url).send().await.map_err(|e| e.to_string())?;

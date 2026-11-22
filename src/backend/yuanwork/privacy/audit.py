@@ -119,12 +119,20 @@ class AuditLogger:
         except Exception as e:
             logger.warning(f"Failed to write audit log: {e}")
 
-    def clear(self) -> None:
-        """Clear the audit log."""
+    def clear(self) -> bool:
+        """Clear the audit log.
+
+        Whether it worked is the answer, not an exception the caller has
+        to guess about. Clearing the reader's own records cannot be
+        undone, and saying "cleared" while the file is still there is a
+        lie the reader has no way to check (AC-F-037).
+        """
         try:
             self.audit_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - the file may be locked
+            logger.warning("Failed to clear the audit log: %s", e)
+            return False
+        return True
 
     def read_all(self) -> list[dict[str, Any]]:
         """Read all audit entries."""

@@ -94,8 +94,17 @@ async def audit_stats(request: Request) -> dict[str, Any]:
 
 @router.delete("", summary="Clear the audit log")
 async def clear_audit_log(request: Request) -> dict[str, Any]:
-    """Delete all audit entries. Returns the count that was removed."""
+    """Delete all audit entries. Returns the count that was removed.
+
+    A clear that did not happen is a failure, not a clear of zero: the
+    file may be locked by another process, and answering "cleared" would
+    leave the reader believing their records are gone (AC-F-037).
+    """
     audit_logger = _get_audit_logger(request)
     before = len(audit_logger.read_all())
-    audit_logger.clear()
+    if not audit_logger.clear():
+        raise HTTPException(
+            status_code=500,
+            detail="审计记录没有被删除（文件可能正被别的进程占用）",
+        )
     return {"cleared": before}

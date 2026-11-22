@@ -82,6 +82,14 @@ export interface AuditClearResult {
 /** How many entries the panel asks for. */
 export const AUDIT_LIMIT = 100;
 
+/**
+ * The most entries the backend hands out at once.
+ *
+ * Asking for more comes back as a 422 - and a raw HTTP error is not
+ * something the reader can act on (ADR-056).
+ */
+export const AUDIT_LIMIT_MAX = 1000;
+
 /** The label of the clear button - it clears on the first click. */
 export const CLEAR_LABEL = "清空";
 
@@ -89,7 +97,7 @@ export const CLEAR_LABEL = "清空";
 export const CONFIRM_CLEAR_LABEL = "确认清空？";
 
 /** The empty cell of the table - a dash, not a blank. */
-const EMPTY = "—";
+export const EMPTY = "—";
 
 /** The kinds of task the gateway routes, in the reader's words. */
 export const AUDIT_TASK_LABELS: Record<string, string> = {
@@ -141,7 +149,7 @@ export const AUDIT_COLUMNS: AuditColumn[] = [
   { key: "timestamp", label: "时刻", width: "92px" },
   { key: "task", label: "任务", width: "68px" },
   { key: "model", label: "模型", width: "92px" },
-  { key: "tokens", label: "令牌", width: "76px" },
+  { key: "tokens", label: "令牌（提示/回答）", width: "108px" },
   { key: "duration", label: "耗时", width: "58px" },
   { key: "outcome", label: "结果", width: "44px" },
 ];
@@ -191,6 +199,14 @@ export interface AuditClearOutcome {
   message: string;
 }
 
+/** What the table shows after the reader tried to clear the log. */
+export interface AuditPanelState {
+  /** The lines of the table. */
+  entries: AuditEntry[];
+  /** How many lines the log holds. */
+  total: number;
+}
+
 /** A number the backend sent, or zero when it sent nothing. */
 function numberOf(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -199,6 +215,39 @@ function numberOf(value: unknown): number {
 /** A number the backend sent, or null when it sent nothing. */
 function countOf(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The limit inside what the backend accepts.
+ *
+ * The backend refuses anything below 1 or above a thousand with a 422;
+ * the panel would show the reader a raw HTTP error instead of the log.
+ */
+export function clampAuditLimit(limit: number | null | undefined): number {
+  const n = countOf(limit);
+  if (n === null) return AUDIT_LIMIT;
+  return Math.min(AUDIT_LIMIT_MAX, Math.max(1, Math.round(n)));
+}
+
+/**
+ * The next step of "show me more": 100, then 500, then the ceiling.
+ *
+ * The log holds thousands of lines and the panel is narrow - but the
+ * point of the audit log is to look up the one call that went wrong,
+ * which the last hundred calls alone cannot answer (ADR-056).
+ */
+export function nextAuditLimit(current: number): number {
+  const n = countOf(current);
+  const base = n === null || n < 1 ? AUDIT_LIMIT : n;
+  return clampAuditLimit(base * 5);
+}
+
+/** What to say about a failure - the message of the error, in words. */
+export function reasonOf(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (error === null || error === undefined) return "未知错误";
+  return String(error);
 }
 
 /**
@@ -241,17 +290,34 @@ export function formatFullTimestamp(raw: string | undefined | null): string {
   return raw.replace("T", " ").slice(0, 19);
 }
 
+/**
+ * The two token counts, told apart.
+ *
+ * A pair of bare numbers ("640 / 128") leaves the reader guessing which
+ * is the prompt and which is the answer - the header says it, and so
+ * does the tooltip of the row (AC-F-036).
+ */
+function tokenParts(
+  prompt?: number | null,
+  completion?: number | null
+): { prompt: string; completion: string } | null {
+  const p = countOf(prompt);
+  const c = countOf(completion);
+  if (p === null && c === null) return null;
+  return {
+    prompt: p === null ? EMPTY : formatCount(p),
+    completion: c === null ? EMPTY : formatCount(c),
+  };
+}
+
 /** What the prompt and the answer cost - "128 / 64". */
 export function formatTokens(
   prompt?: number | null,
   completion?: number | null
 ): string {
-  const p = countOf(prompt);
-  const c = countOf(completion);
-  if (p === null && c === null) return EMPTY;
-  const left = p === null ? EMPTY : formatCount(p);
-  const right = c === null ? EMPTY : formatCount(c);
-  return `${left} / ${right}`;
+  const parts = tokenParts(prompt, completion);
+  if (!parts) return EMPTY;
+  return `${parts.prompt} / ${parts.completion}`;
 }
 
 /** How long the call took - "820 毫秒" or "1.2 秒". */
@@ -286,7 +352,8 @@ export function formatErrorKind(errorKind?: string | null): string {
  *
  * This is where the prompt hash lives: the table itself stays narrow,
  * and the hash is there for the reader who needs to tell two calls
- * apart (ADR-056).
+ * apart (ADR-056). The tooltip also says which of the two token
+ * numbers is the prompt and which is the answer.
  */
 export function auditHint(entry: AuditEntry): string {
   const parts: string[] = [];
@@ -294,6 +361,8 @@ export function auditHint(entry: AuditEntry): string {
   if (when !== EMPTY) parts.push(when);
   if (entry?.model) parts.push(`模型：${entry.model}`);
   if (entry?.prompt_hash) parts.push(`提示词哈希：${entry.prompt_hash}`);
+  const tokens = tokenParts(entry?.prompt_tokens, entry?.completion_tokens);
+  if (tokens) parts.push(`令牌：提示 ${tokens.prompt} / 回答 ${tokens.completion}`);
   if (entry?.success === false) {
     const kind = formatErrorKind(entry.error_kind);
     parts.push(kind === EMPTY ? "失败" : `失败原因：${kind}`);
@@ -344,26 +413,88 @@ export function auditSummary(
 }
 
 /**
+ * Whether the log really is empty after the clear.
+ *
+ * The backend answers with the number of lines it was holding - but a
+ * delete that fails on disk is swallowed there, and the answer would
+ * still say "cleared". So the panel asks the log itself: if the old
+ * lines are still there, the clear did not happen (AC-F-037).
+ */
+export function clearSucceeded(cleared: number, totalAfter: number): boolean {
+  // There was nothing to clear, so nothing could have survived.
+  if (cleared <= 0) return true;
+  // The log is empty - it is gone.
+  if (totalAfter <= 0) return true;
+  // Fewer lines than before: what is left are calls made in between.
+  return totalAfter < cleared;
+}
+
+/**
  * Clear the log - and say what happened.
  *
  * Clearing takes the reader's records off their own machine, so it has
  * to report how many went away. A failure says so: a log that says
- * "cleared" when nothing was cleared is a lie the reader cannot
- * check (AC-F-037).
+ * "cleared" when nothing was cleared is a lie the reader cannot check
+ * (AC-F-037).
+ *
+ * The `verify` step reads the log back after the delete. Without it
+ * the panel would repeat the number the backend handed it - and that
+ * number is the number the backend *was* holding, not the number that
+ * went away.
  */
 export async function runClear(
-  clear: () => Promise<{ cleared?: number | null } | undefined>
+  clear: () => Promise<{ cleared?: number | null } | undefined>,
+  verify?: () => Promise<AuditListPayload | undefined>
 ): Promise<AuditClearOutcome> {
+  let cleared: number;
   try {
     const result = await clear();
-    const cleared = numberOf(result?.cleared);
-    return {
-      ok: true,
-      cleared,
-      message: `已清空 ${formatCount(cleared)} 条记录`,
-    };
+    cleared = numberOf(result?.cleared);
   } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    return { ok: false, cleared: 0, message: `清空失败：${reason}` };
+    return { ok: false, cleared: 0, message: `清空失败：${reasonOf(e)}` };
   }
+
+  if (verify) {
+    let after: AuditListPayload | undefined;
+    try {
+      after = await verify();
+    } catch (e) {
+      // The log cannot be read, so it cannot be said to be empty.
+      return {
+        ok: false,
+        cleared: 0,
+        message: `清空失败：清空后读不到审计记录，没法确认是否清空（${reasonOf(e)}）`,
+      };
+    }
+    const left = numberOf(after?.total);
+    if (!clearSucceeded(cleared, left)) {
+      return {
+        ok: false,
+        cleared: 0,
+        message: `清空失败：还有 ${formatCount(left)} 条记录没被删除`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    cleared,
+    message: `已清空 ${formatCount(cleared)} 条记录`,
+  };
+}
+
+/**
+ * What the table shows after the reader tried to clear the log.
+ *
+ * The table is emptied only when the clear really happened: a failed
+ * clear leaves the records on the screen, so the reader can see what
+ * did not go away (AC-F-037).
+ */
+export function applyClear(
+  entries: AuditEntry[],
+  total: number,
+  outcome: AuditClearOutcome
+): AuditPanelState {
+  if (!outcome.ok) return { entries, total };
+  return { entries: [], total: 0 };
 }
