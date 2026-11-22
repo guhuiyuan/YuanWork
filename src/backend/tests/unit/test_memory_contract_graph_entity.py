@@ -171,6 +171,36 @@ async def test_the_graph_has_a_node_per_page(store):
 
 
 async def test_the_graph_has_an_edge_per_page_link(store):
+    """A page link the library records becomes an edge.
+
+    ``references`` is what ``WikiLinker.auto_link_page`` writes for an
+    explicit ``[[link]]`` in the page body - the page-to-page relation
+    ADR-054 lists as having a basis.
+    """
+    await store.upsert_wiki_page(
+        page_id="p1", title="甲", markdown="# 甲", summary="",
+    )
+    await store.upsert_wiki_page(
+        page_id="p2", title="乙", markdown="# 乙", summary="",
+    )
+    await store.add_wiki_link(
+        source_id="p1", source_type="page", target_id="p2", target_type="page",
+        link_type="references",
+    )
+    graph = await WikiGraph(store).build_graph()
+    assert len(graph["edges"]) == 1
+    edge = graph["edges"][0]
+    assert edge["type"] == "references"
+    assert {edge["source"], edge["target"]} == {"p1", "p2"}
+
+
+async def test_the_graph_draws_no_edge_without_a_basis(store):
+    """A link whose type says nothing about the relation is not drawn.
+
+    ``related`` is only the default of ``add_wiki_link`` - it says the
+    two pages are connected but not how. ADR-054: an edge has to be
+    able to say what relation it is; one that cannot is left out.
+    """
     await store.upsert_wiki_page(
         page_id="p1", title="甲", markdown="# 甲", summary="",
     )
@@ -182,7 +212,7 @@ async def test_the_graph_has_an_edge_per_page_link(store):
         link_type="related",
     )
     graph = await WikiGraph(store).build_graph()
-    assert len(graph["edges"]) == 1
+    assert graph["edges"] == []
 
 
 async def test_the_related_pages_walk_is_bounded(store):

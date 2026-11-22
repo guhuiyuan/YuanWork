@@ -190,9 +190,15 @@ export interface WikiBacklinksPayload {
 export interface WikiGraphNode {
   id: string;
   label: string;
-  type: string; // "page" | "entity_person" | "entity_concept" | ...
-  category?: string;
+  type: string; // "page" | "document" | "entity_person" | "entity_concept" | ...
+  category?: string | null;
   weight: number;
+  /** What the page says, in short - the graph shows it on the node. */
+  key_points?: string[];
+  /** The other names an entity goes by. */
+  aliases?: string[];
+  /** The pages this node is connected to. */
+  related_pages?: string[];
 }
 
 export interface WikiGraphEdge {
@@ -323,6 +329,17 @@ interface AppState {
 
   wikiGraph: WikiGraph | null;
   setWikiGraph: (g: WikiGraph | null) => void;
+
+  /**
+   * Where the reader left each node of the graph.
+   *
+   * The graph and the Wiki are two views of the same thing, and going
+   * back and forth between them is ordinary. The positions are kept
+   * here so the reader does not have to find the nodes again
+   * (ADR-055).
+   */
+  graphNodePositions: Record<string, { x: number; y: number }>;
+  setGraphNodePosition: (id: string, pos: { x: number; y: number }) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -412,4 +429,10 @@ export const useAppStore = create<AppState>((set) => ({
 
   wikiGraph: null,
   setWikiGraph: (g) => set({ wikiGraph: g }),
+
+  graphNodePositions: {},
+  setGraphNodePosition: (id, pos) =>
+    set((s) => ({
+      graphNodePositions: { ...s.graphNodePositions, [id]: pos },
+    })),
 }));

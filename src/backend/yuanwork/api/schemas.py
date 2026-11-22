@@ -502,15 +502,22 @@ class WikiPagesResponse(BaseModel):
 
 
 class WikiGraphNode(BaseModel):
-    """A node in the wiki graph (page or entity)."""
+    """A node in the wiki graph (page, document or entity)."""
 
     id: str
     label: str
     type: str
     category: str | None = None
+    #: How much this node weighs in the graph: a page is its version,
+    #: a document is how many pages were compiled from it, an entity is
+    #: how many pages mention it.
     weight: int = 1
     #: The key points of a page - what the page says, in short.
     key_points: list[str] = Field(default_factory=list)
+    #: The other names an entity goes by.
+    aliases: list[str] = Field(default_factory=list)
+    #: The pages this node is connected to.
+    related_pages: list[str] = Field(default_factory=list)
 
 
 class WikiGraphEdge(BaseModel):
@@ -519,6 +526,11 @@ class WikiGraphEdge(BaseModel):
     source: str
     target: str
     type: str
+    #: How strong the relation is. One scale, always 1 or more: 1 for
+    #: 「came from」 and 「mentions」, the number of pages they share a
+    #: page for 「co-occurs」, 1 + the shared proportion for
+    #: 「shares evidence」. The drawing uses it as the line width, so
+    #: the scales have to agree.
     weight: float = 1.0
 
 

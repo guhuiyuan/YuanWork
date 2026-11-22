@@ -372,6 +372,8 @@ async def get_wiki_graph() -> WikiGraphResponse:
             category=n.get("category"),
             weight=n.get("weight", 1) or 1,
             key_points=n.get("key_points", []),
+            aliases=n.get("aliases", []),
+            related_pages=n.get("related_pages", []),
         )
         for n in raw.get("nodes", [])
     ]

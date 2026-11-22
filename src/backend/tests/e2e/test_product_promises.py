@@ -25,7 +25,7 @@ import pytest
 from yuanwork.api import deps
 from yuanwork.db.sqlite import SQLiteStore
 from yuanwork.wiki.entity_extractor import EntityExtractor
-from yuanwork.wiki.graph import WikiGraph
+from yuanwork.wiki.graph import NODE_PREFIX_ENTITY, WikiGraph
 from yuanwork.wiki.page_generator import WikiPageGenerator
 
 from .harness import ScriptedLLM, evidence, make_agent
@@ -292,6 +292,19 @@ async def test_the_graph_has_the_entities_and_the_edges(store):
     assert entities, "the document's entities did not make it into the graph"
     assert entities[0]["name"] == "华润"
 
+    # A page that names the entity. This is where the edge comes from:
+    # the name is in the page's own text (ADR-054).
+    await store.upsert_wiki_page(
+        page_id="p1",
+        title="违约金条款",
+        markdown="# 违约金条款\n\n华润按合同总额的三分之一支付违约金。",
+        summary="华润的违约金条款。",
+    )
+
+    # `entity_relations` is **not** a source for the graph: ADR-054
+    # left that table empty and gave the writing path to another task.
+    # The relation below is recorded, and the graph does not draw it -
+    # a relation from an entity to itself says nothing either.
     await store.add_entity_relation(
         source_id=entities[0]["id"],
         target_id=entities[0]["id"],
@@ -300,5 +313,24 @@ async def test_the_graph_has_the_entities_and_the_edges(store):
 
     graph = await WikiGraph(store).build_graph()
     node_ids = [n["id"] for n in graph["nodes"]]
-    assert entities[0]["id"] in node_ids
+    # The entity's node id is namespaced: a page called 「华润」 and an
+    # entity called 「华润」 would otherwise be one node with two names
+    # (TASK-093).
+    assert NODE_PREFIX_ENTITY + entities[0]["id"] in node_ids
     assert any(n["type"].startswith("entity_") for n in graph["nodes"])
+
+    # And the edges - a graph with nodes but no edges is a scatter of
+    # dots that only looks like a web (ADR-054).
+    mentions = [
+        e
+        for e in graph["edges"]
+        if e["type"] == "mentions"
+        and e["target"] == NODE_PREFIX_ENTITY + entities[0]["id"]
+    ]
+    assert mentions, "the graph has no edge between the page and the entity"
+    edge = mentions[0]
+    assert edge["source"] == "p1"
+    # Both ends of an edge are nodes that are really there - the
+    # drawing library throws on a node it cannot find.
+    assert edge["source"] in node_ids
+    assert edge["target"] in node_ids
