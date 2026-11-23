@@ -290,6 +290,31 @@ curl -X DELETE http://localhost:8765/api/v1/audit
 
 ---
 
+## 规范驱动开发（SDD）
+
+这个项目的**规范是唯一事实源**：代码是规范的衍生物，规范与实现冲突时以规范为准。
+
+| 规范 | 位置 | 内容 |
+|---|---|---|
+| 需求定义 | [`specs/yuanwork/proposal.md`](specs/yuanwork/proposal.md) | 做什么 / 不做什么，67 条验收标准（AC） |
+| 架构设计 | [`specs/yuanwork/design.md`](specs/yuanwork/design.md) | 57 条架构决策（ADR）、接口契约、数据模型 |
+| 任务拆解 | [`specs/yuanwork/tasks.md`](specs/yuanwork/tasks.md) | 98 个任务、40 个里程碑、每个任务的验证命令 |
+
+改动前先在 `tasks.md` 里找到对应的任务；每个任务都有「验证命令」，跑通了才算完成。
+验收记录在 [`specs/yuanwork/acceptance-report.md`](specs/yuanwork/acceptance-report.md)。
+
+**本机还有一份 Claude Code 的设置**（`.claude/`，**不进仓库**——里面是本机的路径与
+许可，不是项目的一部分）。新克隆的仓库自己装一份：
+
+```bash
+python ~/.claude/skills/sdd/scripts/install_hook.py --root . --feature yuanwork
+```
+
+它装的是权限 hook（auto 模式的安全分类器不可达时，由它决定放不放行）与命令白名单。
+
+
+---
+
 ## 项目结构
 
 ```

@@ -94,5 +94,12 @@ logs/
 # Session locks (managed by Claude Code, not project state)
 .claude/scheduled_tasks.lock
 
+# The local Claude Code setup: the permission hook, the allowlist and the
+# project settings. They are **this machine's** setup - they carry absolute
+# paths and the commands this workspace happens to use - so they do not
+# belong in the repository. A fresh clone sets its own up:
+#   python ~/.claude/skills/sdd/scripts/install_hook.py --root . --feature yuanwork
+.claude/
+
 # User-specific KB paths
 kb_personal/
