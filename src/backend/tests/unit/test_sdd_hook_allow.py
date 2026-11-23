@@ -297,3 +297,63 @@ def test_the_hook_never_raises(hook: ModuleType):
     """hook 崩了会把整个会话搞挂——它宁可什么都不做。"""
     for command in ("", "   ", "&&", "|||", "((((", "'unclosed"):
         hook.evaluate(command)  # 不抛异常就算过
+
+
+# --------------------------------------------------------------------------
+# 环境变量前缀
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # 换掉命令查找路径：放一个假的 pytest 进去就能执行任意代码
+        "PATH=/tmp/evil .venv/Scripts/python.exe -m pytest src/backend/tests -q",
+        # 往进程里注入代码
+        "LD_PRELOAD=/tmp/evil.so .venv/Scripts/python.exe -m pytest src/backend/tests -q",
+        # 让 git 写到另一个仓库
+        "GIT_DIR=/tmp/other.git git status",
+        # 让程序去别处找凭据
+        "HOME=/tmp/other .venv/Scripts/python.exe -m pytest src/backend/tests -q",
+        "XDG_CONFIG_HOME=/tmp/other .venv/Scripts/python.exe -m pytest src/backend/tests -q",
+    ],
+)
+def test_the_hook_does_not_let_a_dangerous_environment_prefix_through(
+    hook: ModuleType, command: str
+):
+    assert hook.evaluate(command) is None, f"这条命令被放行了：{command}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # 普通变量只是配置，不碰「命令从哪来、写到哪个仓库」
+        "PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest src/backend/tests -q",
+        "YUANWORK_GRAPH_DB=D:/yuanwork/data/store.db "
+        ".venv/Scripts/python.exe -m pytest src/backend/tests -q",
+    ],
+)
+def test_an_ordinary_environment_prefix_is_fine(
+    hook: ModuleType, command: str
+):
+    """项目自己的验证命令常带这种前缀——整个形状都要能跑。"""
+    assert hook.evaluate(command) is not None, f"这条命令被拒了：{command}"
+
+
+def test_the_allowlist_survives_a_trailing_comma(hook: ModuleType, tmp_path: Path):
+    """白名单是人手写的：末尾多一个逗号不能让**整个文件**读不出来。
+
+    实测踩过：一条命令后面多了个逗号，六十多条白名单全作废，
+    于是每条命令都被拒。
+    """
+    good = tmp_path / "good.json"
+    good.write_text('{"extra": ["pytest -q"]}', encoding="utf-8")
+    assert hook.load_json_lenient(str(good)) == {"extra": ["pytest -q"]}
+
+    typo = tmp_path / "typo.json"
+    typo.write_text('{\n  "extra": [\n    "pytest -q",\n  ]\n}', encoding="utf-8")
+    assert hook.load_json_lenient(str(typo)) == {"extra": ["pytest -q"]}
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json at all", encoding="utf-8")
+    assert hook.load_json_lenient(str(broken)) is None

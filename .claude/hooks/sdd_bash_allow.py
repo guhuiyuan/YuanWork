@@ -146,6 +146,11 @@ auto 模式下「派发子 agent」这一步本身也要服务端分类器 → �
 - **命令替换**(``$( )`` 与反引号)—— 在**整条命令**上查,包括 ``cd`` 的参数里:
   ``cd $(whoami) && pytest`` 曾经在剥掉 cd 前缀后逃过检查
 - **引号没闭合**的整条命令(shell 会报语法错)
+- **危险的环境变量前缀**(``PATH=… cmd`` / ``LD_PRELOAD=… cmd`` /
+  ``GIT_DIR=… cmd`` / ``HOME=… cmd``)—— 前缀能换掉命令查找路径、
+  往进程里注入代码、让 git 写到别的仓库。普通变量名
+  (``PYTHONUTF8=1``、``YUANWORK_GRAPH_DB=…``)照常放行 ——
+  项目自己的验证命令常带这种前缀,之前整个形状都跑不了
 
 ## 安全边界
 
@@ -317,6 +322,32 @@ TRANSPARENT_PREFIXES = ('time', 'timeout')
 
 #: timeout 的时长参数(`300` / `10m` / `1.5s`)—— 不是命令,剥掉
 DURATION_RE = re.compile(r'^\d+(\.\d+)?[smhd]?$')
+
+#: ``VAR=value`` 前缀里的赋值 —— bash 的写法:`FOO=bar cmd`
+ENV_ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', re.DOTALL)
+
+#: 环境变量前缀里**这些名字**一律不放行 —— 它们能改变「命令从哪来、
+#: 怎么被执行、写到哪个仓库」:
+#: ``PATH`` 换掉命令查找路径(放一个假的 pytest 进去就能执行任意代码)、
+#: ``LD_PRELOAD`` 往进程里注入代码、``GIT_DIR`` 让 git 写到另一个仓库、
+#: ``HOME`` 让程序去别处找凭据。名字比对忽略大小写。
+DANGEROUS_ENV_VARS = frozenset({
+    # 命令查找与执行
+    'PATH', 'PATHEXT', 'CDPATH', 'IFS', 'SHELL', 'COMSPEC', 'SYSTEMROOT',
+    'WINDIR', 'BASH_ENV', 'ENV', 'PROMPT_COMMAND', 'PS4', 'BASHOPTS',
+    'SHELLOPTS', 'CDPATH',
+    # 程序去哪里找配置与凭据
+    'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA',
+    'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+    'TEMP', 'TMP', 'TMPDIR',
+    # 解释器与运行时的加载路径
+    'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONUSERBASE',
+    'PYTHONEXECUTABLE', 'PERL5LIB', 'RUBYLIB', 'RUBYOPT', 'NODE_PATH',
+    'NODE_OPTIONS', 'JAVA_TOOL_OPTIONS', 'CLASSPATH',
+})
+
+#: 危险环境变量的前缀(``LD_*`` / ``GIT_*`` / …)
+DANGEROUS_ENV_PREFIXES = ('LD_', 'DYLD_', 'GIT_', 'BASH_FUNC_')
 
 # 这些选项后面的参数是「模式/表达式」,**不是文件路径** —— 不做路径判定。
 #
@@ -995,6 +1026,34 @@ def allowlist_candidates():
     return uniq
 
 
+def load_json_lenient(path):
+    """读 JSON;顺带修掉「尾逗号」这类笔误再试一次。
+
+    白名单是人手写的(agent 也写),末尾多一个逗号就会让**整个文件**读不出来
+    → hook 拿不到任何额外白名单 → 每条命令都被拒(实测 YuanWork 踩过:
+    一条命令后面多了个逗号,六十多条白名单全作废)。
+
+    只修「逗号 + 换行 + 收尾括号」这一种,不去动字符串里的内容;
+    修不回来就返回 None(调用方按「没有白名单」处理,fail-closed)。
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            text = fh.read()
+    except Exception:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    fixed = re.sub(r',(\s*\n\s*[\]}])', r'\1', text)
+    if fixed == text:
+        return None
+    try:
+        return json.loads(fixed)
+    except Exception:
+        return None
+
+
 def load_allowlist():
     """读白名单。读不到就当只有内置默认项。
 
@@ -1005,11 +1064,7 @@ def load_allowlist():
     """
     extra, tools, write_paths = list(DEFAULT_EXTRA), [], []
     for path in allowlist_candidates():
-        try:
-            with open(path, 'r', encoding='utf-8') as fh:
-                data = json.load(fh)
-        except Exception:
-            continue
+        data = load_json_lenient(path)
         if not isinstance(data, dict):
             continue
         for item in data.get('extra') or []:
@@ -1034,8 +1089,14 @@ def pattern_is_loose(pattern):
     等于开了一个后门。解释器要么钉死脚本、要么钉死模块名,才算合格的模式。
 
     危险可执行文件开头的模式同样算太松:``sh`` 会前缀匹配 ``sh -c "任意命令"``。
+
+    **环境变量前缀要跳过** —— ``FOO=1 python`` 里的危险是 ``python`` 那个,
+    不是前缀;不看穿它就会把 ``FOO=1 python`` 当成一条安全的模式收进白名单。
     """
-    parts = pattern.split()
+    parts = tokenize(pattern)
+    if not parts:
+        return True
+    _names, parts = split_env_prefix(parts)
     if not parts:
         return True
     exe = os.path.basename(parts[0]).lower()
@@ -1054,24 +1115,36 @@ def pattern_is_loose(pattern):
 
 
 def match_extra(command, tokens, extra):
-    """额外命令前缀匹配。"""
+    """额外命令前缀匹配。
+
+    **环境变量前缀按「可有可无」处理**:规范里登记的是
+    ``YUANWORK_GRAPH_DB=D:/… .venv/… pytest …``,而 agent 可能用另一个值跑
+    同一条命令 —— 所以原文与「剥掉前缀后」两种形态都比一遍。
+    (前缀里的变量名另有 Dangerous 检查,这里只管命令对不对得上。)
+    """
     if not extra:
         return None
     normalized = ' '.join(tokens)
+    stripped_normalized = ' '.join(split_env_prefix(tokens)[1])
     for pattern in extra:
         pattern = pattern.strip()
         if not pattern or pattern_is_loose(pattern):
             continue
-        for candidate in (command.strip(), normalized):
+        stripped_pattern = strip_env_prefix_text(pattern)
+        for candidate in (command.strip(), normalized,
+                          stripped_normalized):
             if not candidate:
                 continue
-            if candidate == pattern:
-                return pattern
-            if candidate.startswith(pattern + ' '):
-                return pattern
-            # 以分隔符结尾的模式(如 "pytest tests/")按前缀匹配
-            if pattern[-1] in '/\\-_' and candidate.startswith(pattern):
-                return pattern
+            for form in (pattern, stripped_pattern):
+                if not form:
+                    continue
+                if candidate == form:
+                    return pattern
+                if candidate.startswith(form + ' '):
+                    return pattern
+                # 以分隔符结尾的模式(如 "pytest tests/")按前缀匹配
+                if form[-1] in '/\\-_' and candidate.startswith(form):
+                    return pattern
     return None
 
 
@@ -1205,6 +1278,52 @@ def strip_transparent(tokens):
     return out
 
 
+def env_name_is_dangerous(name: str) -> bool:
+    """这个环境变量名危险吗?
+
+    危险的是**能改变「命令从哪来、怎么被执行、写到哪个仓库」**的那些:
+    ``PATH`` 换掉命令查找路径、``LD_PRELOAD`` 往进程里注入代码、
+    ``GIT_DIR`` 让 git 写到另一个仓库、``HOME`` 让程序去别处找凭据。
+    别的变量(``PYTHONUTF8``、``YUANWORK_GRAPH_DB`` 之类)只是配置,不碰这个。
+    """
+    upper = str(name or '').upper()
+    if upper in DANGEROUS_ENV_VARS:
+        return True
+    return any(upper.startswith(prefix) for prefix in DANGEROUS_ENV_PREFIXES)
+
+
+def split_env_prefix(tokens):
+    """剥掉命令前面的 ``VAR=value`` 前缀。
+
+    bash 里 ``FOO=bar cmd`` 就是「带着这个环境变量跑 cmd」—— 那是**项目
+    自己的验证命令**的常见写法(`YUANWORK_GRAPH_DB=… pytest …`),
+    之前整个形状放行不了 → agent 每次都撞墙。
+
+    返回 (变量名列表, 剩下的 tokens);前缀里有危险变量名时返回
+    ``(None, [])`` —— 调用方按「不放行」处理(fail-closed)。
+    """
+    names = []
+    idx = 0
+    while idx < len(tokens):
+        m = ENV_ASSIGN_RE.match(tokens[idx])
+        if not m:
+            break
+        name = m.group(1)
+        if env_name_is_dangerous(name):
+            return None, []
+        names.append(name)
+        idx += 1
+    return names, tokens[idx:]
+
+
+def strip_env_prefix_text(text: str) -> str:
+    """把一段命令文本里的 ``VAR=value`` 前缀去掉(只留真正的命令)。"""
+    parts = str(text or '').split()
+    while parts and ENV_ASSIGN_RE.match(parts[0]):
+        parts.pop(0)
+    return ' '.join(parts)
+
+
 def evaluate_segment(tokens, extra, base=None, raw=None):
     """判定**单个**命令段。命中返回理由,否则返回 None。
 
@@ -1214,7 +1333,16 @@ def evaluate_segment(tokens, extra, base=None, raw=None):
     """
     if not tokens:
         return None
-    tokens = strip_transparent(tokens)
+    # 环境变量前缀与透明包装器可以叠着出现(`FOO=1 time cmd`),
+    # 所以交替剥,直到两者都没有了。
+    while True:
+        before = list(tokens)
+        tokens = strip_transparent(tokens)
+        env_names, tokens = split_env_prefix(tokens)
+        if env_names is None:
+            return None      # 环境变量前缀里有危险变量 → 不放行
+        if tokens == before:
+            break
     if not tokens:
         return None
     # 危险可执行文件一律不放行 —— 白名单是用户可编辑的,不能成为后门
