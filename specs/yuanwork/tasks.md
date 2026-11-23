@@ -1558,7 +1558,7 @@ idenceScorer.score()` 的实际键名都对过）。前端的 7 步因此是**�
 - **依赖**: TASK-085（点名了文件就答那份文件）、TASK-004
 - **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests -q` 与
   `cd src/app && npm test`
-- **验证结果**: 后端全量 **1974 passed / 1 skipped**（新增
+- **验证结果**: 后端全量 **1982 passed / 1 skipped**（新增
   `test_follow_up_context.py` 14 条，全过；另有 1 条**已知的偶发失败**
   `test_core_stale_marker_contract.py::test_a_changed_file_marks_its_pages`
   ——单独跑通过，与本任务无关，那是 TASK-089 留下的 1 毫秒容差）；
@@ -1589,7 +1589,7 @@ idenceScorer.score()` 的实际键名都对过）。前端的 7 步因此是**�
 - **验收标准**: 覆盖 AC-E-017（该条已扩到对话记录这一半）
 - **依赖**: TASK-046
 - **验证命令**: `.venv/Scripts/python.exe -m pytest src/backend/tests -q`
-- **验证结果**: 后端全量 **1974 passed / 1 skipped**（`test_episodic_retention_contract.py`
+- **验证结果**: 后端全量 **1982 passed / 1 skipped**（`test_episodic_retention_contract.py`
   从 14 条加到 **22 条**，新增的 8 条全是对话原文这一半：条数上限、
   老的先走、太老的要淘汰、上限之内留着、写完就清、淘汰的不留副本、
   清不动只写日志、上限与事件一致）；前端 **256 passed**；Rust **87 passed**。

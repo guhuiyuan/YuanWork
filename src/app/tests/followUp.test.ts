@@ -50,6 +50,19 @@ test("there is no context when nothing has been answered yet", () => {
   assert.equal(buildFollowUp([assistant("答了，但没有引用")]), null);
 });
 
+test("a turn that ended in a refusal has nothing to carry", () => {
+  // The last turn is a refusal - it has no positions. The reader's
+  // next question after a refusal is a new question, not a follow-up.
+  const context = buildFollowUp([
+    user("把这份合同的违约金讲清楚"),
+    assistant("上一轮模型生成的回答原文 [1]。", [citation("采购合同.pdf", 3)]),
+    user("再详细点"),
+    assistant("证据不足", []),
+  ]);
+
+  assert.equal(context, null);
+});
+
 test("the context is the previous positions and the reader's own question", () => {
   const context = buildFollowUp([
     user("把这份合同的违约金讲清楚"),

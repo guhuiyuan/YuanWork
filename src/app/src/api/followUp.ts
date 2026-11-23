@@ -54,12 +54,15 @@ function positionOf(citation: Citation): FollowUpPosition | null {
  * It is only worth sending when the previous turn actually answered
  * something with positions: without them there is nothing to carry
  * over, and a bare question would only add noise to the prompt.
+ *
+ * The pairing is the **last** turn: a turn that ended in a refusal
+ * (no positions) has nothing to carry, and the reader's next question
+ * after a refusal is a new question.
  */
 export function buildFollowUp(messages: ChatMessage[]): FollowUpContext | null {
-  const answered = [...messages]
-    .reverse()
-    .find((m) => m.role === "assistant" && (m.citations?.length ?? 0) > 0);
+  const answered = [...messages].reverse().find((m) => m.role === "assistant");
   if (!answered) return null;
+  if ((answered.citations?.length ?? 0) === 0) return null;
 
   const asked = [...messages]
     .reverse()
