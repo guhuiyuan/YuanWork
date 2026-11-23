@@ -1930,5 +1930,6 @@ graph TD
 | 桌面端启动 | `run.bat` | 工作目录必须是项目根（sidecar 从 cwd 往上找 `src/backend/` 与 `.venv/`） |
 | 界面真机核对 | `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` 起应用，再用 `scripts/bench/cdp_probe.py` 问页面 | 布局与交互的问题单测查不出来，只能问页面本身 |
 | 改写历史（发布前脱敏） | `git filter-branch --force --env-filter ... --msg-filter ... --tree-filter ... -- --all` | 改作者身份、把历史里的个人信息一并抹掉时用；改完要删掉 `refs/original/` 并 `git gc --prune=now`（否则旧历史还留在对象库里） |
+| 清理旧历史 | `git update-ref -d refs/original/refs/heads/main` 与 `git gc --prune=now` | 重写完历史**必须**做这两步：备份的引用与旧对象都还在的话，旧历史里的东西照样能被翻出来 |
 | 挂远端 | `git remote add origin <地址>` | 推送本身（`git push`）由钩子挡着——**推送要人过一眼** |
 
