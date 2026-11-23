@@ -1094,6 +1094,53 @@ class SQLiteStore:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
+    async def oldest_episode(self) -> dict | None:
+        """The oldest conversation record that is still stored."""
+        async with self.conn.execute(
+            "SELECT * FROM episodes "
+            "ORDER BY datetime(created_at) ASC, id ASC LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+            return _row_to_dict(row) if row else None
+
+    async def prune_episodes(
+        self,
+        max_count: int = 5000,
+        cutoff: str | None = None,
+    ) -> int:
+        """Evict the conversation records that are over the limits.
+
+        The same two limits as the events (ADR-038): how many are kept,
+        and how old the oldest kept one may be. The oldest go first.
+        Whatever is over goes - and only a number comes out, never the
+        records themselves: keeping a copy of what was deleted would
+        make the cleanup another copy of the dialogue.
+        """
+        pruned = 0
+
+        # The ones that grew too old.
+        if cutoff:
+            async with self.conn.execute(
+                "DELETE FROM episodes WHERE datetime(created_at) < datetime(?)",
+                (cutoff,),
+            ) as cursor:
+                pruned += cursor.rowcount or 0
+
+        # The ones that made it over the count - the oldest first.
+        count = await self.count_episodes()
+        if count > max_count:
+            async with self.conn.execute(
+                "DELETE FROM episodes WHERE id NOT IN ("
+                "  SELECT id FROM episodes"
+                "  ORDER BY datetime(created_at) DESC, id DESC LIMIT ?"
+                ")",
+                (max_count,),
+            ) as cursor:
+                pruned += cursor.rowcount or 0
+
+        await self.conn.commit()
+        return pruned
+
     async def list_episodes_by_session(self, session_id: str) -> list[dict]:
         """List all episodes in a session, ordered chronologically."""
         async with self.conn.execute(

@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from yuanwork.db.sqlite import SQLiteStore
+from yuanwork.memory.episodic import EpisodicMemory
 from yuanwork.memory.episodic_recorder import (
     DEFAULT_MAX_AGE_DAYS,
     DEFAULT_MAX_EVENTS,
@@ -251,3 +252,120 @@ async def test_a_check_that_fails_does_not_break_the_record(store):
     event_id = await recorder.record(event())
 
     assert event_id > 0
+
+
+# --------------------------------------------------------------------------
+# the conversation records (TASK-096)
+# --------------------------------------------------------------------------
+#
+# The `episodes` table keeps the dialogue itself - what was said. It is
+# the raw material the consolidation layer reads (ADR-013), and it grows
+# turn by turn, so it gets the same two limits as the events (ADR-038).
+
+
+def test_the_records_use_the_same_limits_as_the_events():
+    """Same numbers, same reason: both grow turn by turn."""
+    assert EpisodicMemory.DEFAULT_MAX_RECORDS == DEFAULT_MAX_EVENTS
+    assert EpisodicMemory.DEFAULT_MAX_AGE_DAYS == DEFAULT_MAX_AGE_DAYS
+
+
+def test_the_memory_uses_those_limits(store):
+    memory = EpisodicMemory(store)
+    assert memory.max_records == 5000
+    assert memory.max_age_days == 180
+
+
+async def test_the_records_over_the_count_limit_are_evicted(store):
+    memory = EpisodicMemory(store, max_records=3)
+
+    for index in range(5):
+        await memory.add(session_id="s1", role="user", content=f"问 {index}")
+
+    assert await store.count_episodes() == 3
+
+
+async def test_the_oldest_records_go_first(store):
+    memory = EpisodicMemory(store, max_records=2)
+
+    await memory.add(session_id="s1", role="user", content="第一句")
+    await memory.add(session_id="s1", role="user", content="第二句")
+    await memory.add(session_id="s1", role="user", content="第三句")
+
+    kept = await store.list_recent_episodes(limit=10)
+    contents = {row["content"] for row in kept}
+    assert "第三句" in contents
+    assert "第二句" in contents
+    assert "第一句" not in contents
+
+
+async def test_the_records_that_grew_too_old_are_evicted(store):
+    memory = EpisodicMemory(store)
+
+    await memory.add(session_id="s1", role="user", content="老的一句")
+    async with store.conn.execute(
+        "UPDATE episodes SET created_at = ?", (ago(200),)
+    ):
+        pass
+    await store.conn.commit()
+
+    await memory.add(session_id="s1", role="user", content="新的一句")
+
+    kept = await store.list_recent_episodes(limit=10)
+    contents = {row["content"] for row in kept}
+    assert "新的一句" in contents
+    assert "老的一句" not in contents
+
+
+async def test_a_record_inside_the_limits_stays(store):
+    memory = EpisodicMemory(store, max_records=10)
+
+    await memory.add(session_id="s1", role="user", content="一句")
+
+    assert await store.count_episodes() == 1
+
+
+async def test_the_cleanup_runs_after_a_record_is_written(store):
+    """The dialogue is written first - the cleanup never blocks it."""
+    memory = EpisodicMemory(store, max_records=2)
+
+    for index in range(4):
+        await memory.add(session_id="s1", role="user", content=f"问 {index}")
+
+    assert await store.count_episodes() == 2
+
+
+async def test_the_evicted_records_are_not_kept_anywhere(store):
+    """Only a number comes out - the dialogue itself is gone."""
+    memory = EpisodicMemory(store, max_records=1)
+
+    await memory.add(session_id="s1", role="user", content="老的一句")
+    await memory.add(session_id="s1", role="user", content="新的一句")
+
+    assert await store.count_episodes() == 1
+    kept = await store.list_recent_episodes(limit=10)
+    assert "老的一句" not in {row["content"] for row in kept}
+
+
+async def test_a_cleanup_that_fails_only_writes_a_log(store):
+    """A cleanup that fails is a cleanup that is late - the record is
+    still written."""
+
+    class BrokenCleanupStore:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        async def prune_episodes(self, *args, **kwargs):
+            raise RuntimeError("the store is gone")
+
+    memory = EpisodicMemory(BrokenCleanupStore(store), max_records=1)
+
+    first = await memory.add(session_id="s1", role="user", content="一")
+    second = await memory.add(session_id="s1", role="user", content="二")
+
+    assert first > 0
+    assert second > 0
+    # Both records are still there - nothing was evicted, nothing broke.
+    assert await store.count_episodes() == 2
