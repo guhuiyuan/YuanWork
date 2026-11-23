@@ -47,21 +47,45 @@ def test_a_query_of_8001_characters_is_rejected():
 def test_the_optional_fields_have_empty_defaults():
     req = ChatRequest(query="hello")
     assert req.session_id is None
-    assert req.history == []
+    assert req.follow_up is None
     assert req.opts == {}
 
 
-def test_a_session_id_and_history_are_accepted():
+def test_a_session_id_and_a_follow_up_are_accepted():
+    """The follow-up carries the previous positions and the reader's
+    own question - **not** the previous answer (ADR-057)."""
     req = ChatRequest(
         query="hello",
         session_id="abc",
-        history=[{"role": "user", "content": "hi"}],
+        follow_up={
+            "question": "上一句问话",
+            "positions": [{"file_name": "采购合同.pdf", "page": 3}],
+        },
         opts={"k": "v"},
     )
     assert req.session_id == "abc"
-    assert req.history[0].role == "user"
-    assert req.history[0].content == "hi"
+    assert req.follow_up is not None
+    assert req.follow_up.question == "上一句问话"
+    assert req.follow_up.positions[0].file_name == "采购合同.pdf"
+    assert req.follow_up.positions[0].page == 3
     assert req.opts == {"k": "v"}
+
+
+def test_a_follow_up_is_bounded():
+    """The prompt must not grow with the chat (ADR-057)."""
+    with pytest.raises(ValidationError):
+        ChatRequest(
+            query="hello",
+            follow_up={"question": "x" * 501, "positions": []},
+        )
+    with pytest.raises(ValidationError):
+        ChatRequest(
+            query="hello",
+            follow_up={
+                "question": "问话",
+                "positions": [{"file_name": f"f{i}.pdf"} for i in range(11)],
+            },
+        )
 
 
 # --------------------------------------------------------------------------

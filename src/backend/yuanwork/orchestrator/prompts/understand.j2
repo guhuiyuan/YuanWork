@@ -18,7 +18,23 @@ Your task: Analyze the user's query and extract structured information.
   "entity_hints": ["string"],   // specific entities mentioned, e.g., ["华润", "海淀"]
   "requires_evidence": boolean, // true if the question needs citation-backed answers
   "needs_refusal_if_no_match": boolean  // true if should refuse when no evidence
+  "is_follow_up": boolean       // true if this question is asking about the previous turn
 }
+
+{% if follow_up %}
+## 上一轮（读者的上一句问话与上一轮答到的位置）
+
+{{ follow_up }}
+
+如果这一问是在**追问上一轮**（例如「再详细点」「那第二份呢」「它」），
+把 `is_follow_up` 填成 true，并把 `file_hint` 填成上一轮那个文件的名字、
+`topic` 填成上一轮在讲的主题。
+如果这一问是**新问题**（哪怕在同一段对话里），把 `is_follow_up` 填成 false，
+`file_hint` 与 `topic` 按这一问本身来填。
+
+上面这段里只有**位置**与**读者自己的问话**——上一轮的回答原文不在这里，
+也不要假设自己记得上一轮说过什么。
+{% endif %}
 
 ## User Query:
 {{ query }}

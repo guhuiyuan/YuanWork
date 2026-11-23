@@ -18,6 +18,40 @@ use crate::sse;
 pub struct ChatRequest {
     pub query: String,
     pub session_id: Option<String>,
+    /// The previous turn's positions and the reader's own question.
+    /// **The previous answer is not here** - it has no source, and
+    /// sending it would open a way to answer without evidence
+    /// (ADR-057).
+    #[serde(default)]
+    pub follow_up: Option<FollowUpContext>,
+}
+
+/// Where the previous answer pointed, plus the reader's own question.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct FollowUpContext {
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub positions: Vec<FollowUpPosition>,
+}
+
+/// One place in the original.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct FollowUpPosition {
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub slide_number: Option<u32>,
+    #[serde(default)]
+    pub section: Option<String>,
+    #[serde(default)]
+    pub sheet: Option<String>,
+    #[serde(default)]
+    pub row: Option<u32>,
+    #[serde(default)]
+    pub location: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]

@@ -41,7 +41,7 @@ class FakeAgentLoop:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
-    async def stream(self, query, session_id, history=None, opts=None):
+    async def stream(self, query, session_id, follow_up=None, opts=None):
         FakeAgentLoop.last_session_id = session_id
         for event in FakeAgentLoop.events:
             yield event

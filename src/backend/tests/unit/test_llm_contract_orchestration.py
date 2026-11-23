@@ -227,19 +227,32 @@ def test_the_wiki_compile_result_is_passed_through():
 # --------------------------------------------------------------------------
 
 
-def test_the_history_is_accepted_and_ignored():
-    """The history never reaches the model — there is no multi-turn
-    context."""
+def test_the_context_reaches_the_understand_step_only():
+    """The positions and the reader's own question are what the model
+    judges the follow-up by - they go into the **understand** step.
+
+    They do not go into the answer prompt unless the model says this
+    is a follow-up: a question that is not a follow-up is answered
+    exactly as it would be without a context (AC-F-038).
+    """
     llm = FakeLLM()
-    agent = make_agent(llm, evidence=evidence(3))
+    agent = make_agent(llm=llm, evidence=evidence(3))
     asyncio.run(agent.run(
-        query="第二问",
+        query="再详细点",
         session_id="s",
-        history=[{"role": "user", "content": "第一问"}],
+        follow_up={
+            "question": "读者上一句问话",
+            "positions": [{"file_name": "合同.pdf", "page": 3}],
+        },
     ))
-    for task in llm.tasks:
-        assert "第一问" not in task.messages[0].content
-        assert "第一问" not in task.messages[-1].content
+    understand = next(t for t in llm.tasks if t.task_type == "understand")
+    assert "《合同.pdf》第 3 页" in understand.messages[0].content
+    assert "读者上一句问话" in understand.messages[0].content
+
+    # The fake model does not say it is a follow-up - so the answer
+    # prompt has no context in it.
+    answer = next(t for t in llm.tasks if t.task_type == "answer")
+    assert "《合同.pdf》第 3 页" not in answer.messages[0].content
 
 
 def test_the_options_are_accepted_and_ignored():

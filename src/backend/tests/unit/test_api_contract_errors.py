@@ -144,7 +144,7 @@ class FailingAgentLoop:
     def __init__(self, **kwargs):
         pass
 
-    async def run(self, query, session_id, history=None, opts=None):
+    async def run(self, query, session_id, follow_up=None, opts=None):
         raise RuntimeError("模型连接失败：api.minimaxi.com")
 
 

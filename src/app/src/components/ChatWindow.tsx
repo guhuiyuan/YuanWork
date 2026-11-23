@@ -3,11 +3,13 @@ import { useAppStore, ChatMessage, Citation, RefusalPosition, TermContext } from
 import {
   cancelChat,
   chatStream,
+  ChatRequest,
   ChatResponse,
   ConflictInfo,
   getTermContext,
   openCitation,
 } from "../api/backend";
+import { buildFollowUp } from "../api/followUp";
 import { citationLabel, openedNotice } from "../api/citations";
 import { termContextSummary } from "../api/terms";
 import { AnswerMarkdown } from "./AnswerMarkdown";
@@ -120,6 +122,12 @@ export function ChatWindow() {
     const q = input.trim();
     if (!q || isStreaming) return;
 
+    // The context of the previous turn - the positions it pointed at
+    // and the reader's own question, **never the previous answer**
+    // (ADR-057). It is built before this question joins the
+    // conversation, or it would pick up the question being asked now.
+    const followUp = buildFollowUp(useAppStore.getState().messages);
+
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -152,7 +160,12 @@ export function ChatWindow() {
     sessionIdRef.current = sessionId;
 
     try {
-      const resp: ChatResponse = await chatStream({ query: q, session_id: sessionId }, (ev) => {
+      const req: ChatRequest = {
+        query: q,
+        session_id: sessionId,
+        follow_up: followUp ?? undefined,
+      };
+      const resp: ChatResponse = await chatStream(req, (ev) => {
         switch (ev.type) {
           case "trace": {
             // The steps of the run. The panel on the right shows them

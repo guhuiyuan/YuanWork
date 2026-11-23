@@ -19,6 +19,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _follow_up(body: ChatRequest) -> dict | None:
+    """这次请求带的追问上下文（没有就是没有）。
+
+    **只有位置与读者上一句问话**——上一轮模型生成的回答不在请求里，
+    也不该在（ADR-057）。
+    """
+    if body.follow_up is None:
+        return None
+    return body.follow_up.model_dump()
+
+
 def _build_redactor(request: Request) -> Redactor:
     """The redactor for this request, built from the settings.
 
@@ -82,7 +93,7 @@ async def chat_stream(request: Request, body: ChatRequest) -> EventSourceRespons
             async for event in agent.stream(
                 query=body.query,
                 session_id=session_id,
-                history=body.history,
+                follow_up=_follow_up(body),
                 opts=body.opts,
             ):
                 yield {
@@ -164,7 +175,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         result = await agent.run(
             query=body.query,
             session_id=session_id,
-            history=body.history,
+            follow_up=_follow_up(body),
             opts=body.opts,
         )
 

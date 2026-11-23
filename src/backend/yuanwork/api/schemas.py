@@ -135,11 +135,38 @@ class KBFilesResponse(BaseModel):
 # ===== Chat =====
 
 
-class ChatMessage(BaseModel):
-    """A single chat message."""
+class FollowUpPosition(BaseModel):
+    """上一轮答到的位置 —— 是一个**位置**，不是一段引文。
 
-    role: Literal["user", "assistant", "system"]
-    content: str
+    读者可以自己去看它，这是它与「上一轮的回答」的根本区别
+    （ADR-057）。
+    """
+
+    file_name: str
+    page: int | None = None
+    slide_number: int | None = None
+    section: str | None = None
+    sheet: str | None = None
+    row: int | None = None
+    location: str | None = Field(
+        default=None, description="人类可读的位置，例如「第 12 页」"
+    )
+
+
+class FollowUpContext(BaseModel):
+    """上一轮的位置与读者上一句问话。
+
+    **这里没有上一轮模型生成的回答** —— 它没有出处，带进提示词等于
+    开了一条「不用证据也能说」的通道（ADR-057）。读者自己的问话是
+    **意图**（「它」指什么），不是结论。
+    """
+
+    question: str = Field(..., max_length=500, description="读者上一句问话")
+    positions: list[FollowUpPosition] = Field(
+        default_factory=list,
+        max_length=10,
+        description="上一轮答到的位置",
+    )
 
 
 class ChatRequest(BaseModel):
@@ -147,7 +174,9 @@ class ChatRequest(BaseModel):
 
     query: str = Field(..., min_length=1, max_length=8000)
     session_id: str | None = Field(default=None)
-    history: list[ChatMessage] = Field(default_factory=list)
+    follow_up: FollowUpContext | None = Field(
+        default=None, description="上一轮的位置与读者上一句问话（追问时才有）"
+    )
     opts: dict[str, Any] = Field(default_factory=dict)
 
 

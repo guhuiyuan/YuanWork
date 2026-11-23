@@ -14,6 +14,7 @@ import {
   type AuditListPayload,
   type AuditStats,
 } from "./audit.ts";
+import type { FollowUpContext } from "./followUp.ts";
 import type {
   Citation,
   KbFile,
@@ -68,6 +69,9 @@ async function callBackend<T>(path: string, init?: RequestInit): Promise<T> {
 export interface ChatRequest {
   query: string;
   session_id?: string;
+  /** The previous turn's positions and the reader's own question.
+   *  **The previous answer is not here** - it has no source (ADR-057). */
+  follow_up?: FollowUpContext;
 }
 
 export interface ChatResponse {

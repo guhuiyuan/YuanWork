@@ -18,12 +18,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from yuanwork.api.errors import classify_exception
-from yuanwork.api.schemas import ChatMessage
 from yuanwork.llm.gateway import LLMGateway
 from yuanwork.memory.episodic import EpisodicMemory
 from yuanwork.memory.episodic_recorder import EpisodicEvent
 from yuanwork.memory.semantic import SemanticMemory
 from yuanwork.orchestrator import cancel
+from yuanwork.orchestrator import follow_up
 from yuanwork.orchestrator.steps.understand import understand_query
 from yuanwork.orchestrator.steps.localize import localize_files
 from yuanwork.orchestrator.steps.extract import extract_evidence
@@ -71,7 +71,17 @@ class AgentState:
 
     query: str
     session_id: str
-    history: list[ChatMessage] = field(default_factory=list)
+    #: 上一轮的位置与读者上一句问话（追问时才有）——**不含上一轮的回答**
+    #: （ADR-057）
+    follow_up: dict[str, Any] | None = None
+    #: 这一问是不是在追问上一轮 —— 由理解步骤判断（ADR-057）
+    is_follow_up: bool = False
+    #: 给提示词看的那段上下文。只有真的在追问时才有内容 ——
+    #: 不是追问时，行为与没有上下文时完全一样。
+    follow_up_block: str = ""
+    #: 检索通道真正用的查询。追问时它比 query 多上一轮的问句与文件名
+    #: ——只有「再详细点」三个字时，检索什么都召不回来。
+    search_query: str = ""
 
     # Step outputs
     understanding: dict[str, Any] | None = None
@@ -165,7 +175,7 @@ class AgentLoop:
         self,
         query: str,
         session_id: str,
-        history: list[ChatMessage] | None = None,
+        follow_up: dict[str, Any] | None = None,
         opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the agent loop and return the final state as a dict.
@@ -176,7 +186,8 @@ class AgentLoop:
         state = AgentState(
             query=query,
             session_id=session_id,
-            history=history or [],
+            follow_up=follow_up,
+            search_query=query,
         )
         cancel_event = cancel.start(session_id)
         try:
@@ -225,7 +236,7 @@ class AgentLoop:
         self,
         query: str,
         session_id: str,
-        history: list[ChatMessage] | None = None,
+        follow_up: dict[str, Any] | None = None,
         opts: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream events during agent execution.
@@ -237,7 +248,8 @@ class AgentLoop:
         state = AgentState(
             query=query,
             session_id=session_id,
-            history=history or [],
+            follow_up=follow_up,
+            search_query=query,
         )
         cancel_event = cancel.start(session_id)
         try:
@@ -414,8 +426,13 @@ class AgentLoop:
 
     async def _step_understand(self, state: AgentState) -> None:
         """Step 1: Understand the query."""
+        # The context of the previous turn - positions and the reader's
+        # own question, never the previous answer (ADR-057).
+        context = follow_up.block(state.follow_up)
         try:
-            state.understanding = await understand_query(self.llm, state.query)
+            state.understanding = await understand_query(
+                self.llm, state.query, follow_up=context
+            )
         except Exception as e:
             logger.exception(f"Understand step failed: {e}")
             state.understanding = {
@@ -426,7 +443,20 @@ class AgentLoop:
                 "entity_hints": [],
                 "requires_evidence": True,
                 "needs_refusal_if_no_match": True,
+                "is_follow_up": False,
             }
+
+        # A follow-up is searched for with more than the three words
+        # "再详细点" - the previous question and the file names go in
+        # too, or the retrieval channel recalls nothing (ADR-057).
+        # When it is not a follow-up, everything here stays empty and
+        # the run is exactly the run without a context.
+        state.is_follow_up = bool(state.understanding.get("is_follow_up"))
+        if state.is_follow_up and state.follow_up:
+            state.follow_up_block = context
+            terms = follow_up.search_terms(state.follow_up)
+            if terms:
+                state.search_query = f"{state.query}\n{terms}"
 
         state.trace.append({
             "step": "understand",
@@ -466,7 +496,7 @@ class AgentLoop:
         sqlite = get_sqlite_store()
 
         state.candidates = await localize_files(
-            query=state.query,
+            query=state.search_query or state.query,
             understanding=state.understanding or {},
             sqlite=sqlite,
             semantic=self.semantic,
@@ -483,7 +513,7 @@ class AgentLoop:
         scope_doc_ids = self._scope_from_file_hint(state)
         intent = str((state.understanding or {}).get("intent") or "").lower()
         result = await extract_evidence(
-            query=state.query,
+            query=state.search_query or state.query,
             candidates=state.candidates,
             retriever=self.retriever,
             top_k=10,
@@ -632,6 +662,7 @@ class AgentLoop:
                     confidence=state.confidence or {},
                     redactor=self.redactor,
                     tier_conflict=conflict_note(state.tier_conflicts),
+                    follow_up=state.follow_up_block,
                 )
             else:
                 # The call cannot be interrupted from the inside, so it
@@ -644,6 +675,7 @@ class AgentLoop:
                         confidence=state.confidence or {},
                         redactor=self.redactor,
                         tier_conflict=conflict_note(state.tier_conflicts),
+                        follow_up=state.follow_up_block,
                     ),
                     cancel_event,
                 )
@@ -795,6 +827,7 @@ class AgentLoop:
                 confidence=state.confidence or {},
                 redactor=self.redactor,
                 tier_conflict=conflict_note(state.tier_conflicts),
+                follow_up=state.follow_up_block,
             ):
                 if cancel_event is not None and cancel_event.is_set():
                     # Stop asking the model - the user does not want the

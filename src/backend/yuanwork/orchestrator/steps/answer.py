@@ -100,6 +100,7 @@ def _build_answer_task(
     confidence: dict[str, Any],
     redactor: "Redactor | None" = None,
     tier_conflict: str = "",
+    follow_up: str = "",
 ) -> LLMTask:
     """Render the answer prompt into an LLM task.
 
@@ -114,6 +115,10 @@ def _build_answer_task(
     ``tier_conflict`` says that the core layer and the long tail gave
     different answers. The core layer wins (ADR-034), and the answer
     has to tell the reader that the two disagree (AC-E-016).
+
+    ``follow_up`` is the previous turn's positions and the reader's own
+    question - **never the previous answer** (ADR-057). It tells the
+    model what this question is about; it is not evidence.
     """
     template = _jinja_env.get_template("answer.j2")
 
@@ -139,6 +144,7 @@ def _build_answer_task(
         evidence=formatted_evidence,
         confidence=confidence,
         tier_conflict=tier_conflict,
+        follow_up=follow_up,
     )
 
     return LLMTask(
@@ -159,6 +165,7 @@ async def generate_answer(
     confidence: dict[str, Any],
     redactor: Redactor | None = None,
     tier_conflict: str = "",
+    follow_up: str = "",
 ) -> str:
     """Generate final answer with mandatory citations.
 
@@ -170,7 +177,12 @@ async def generate_answer(
     The evidence is redacted before it goes into the prompt.
     """
     task = _build_answer_task(
-        query, evidence, confidence, redactor=redactor, tier_conflict=tier_conflict
+        query,
+        evidence,
+        confidence,
+        redactor=redactor,
+        tier_conflict=tier_conflict,
+        follow_up=follow_up,
     )
     response = await llm.complete(task)
     return response.content
@@ -183,6 +195,7 @@ async def generate_answer_stream(
     confidence: dict[str, Any],
     redactor: Redactor | None = None,
     tier_conflict: str = "",
+    follow_up: str = "",
 ) -> AsyncIterator[str]:
     """Generate the answer, yielding text deltas as the model produces them.
 
@@ -190,7 +203,12 @@ async def generate_answer_stream(
     receives the text incrementally instead of waiting for the whole answer.
     """
     task = _build_answer_task(
-        query, evidence, confidence, redactor=redactor, tier_conflict=tier_conflict
+        query,
+        evidence,
+        confidence,
+        redactor=redactor,
+        tier_conflict=tier_conflict,
+        follow_up=follow_up,
     )
     async for delta in llm.stream(task):
         yield delta
