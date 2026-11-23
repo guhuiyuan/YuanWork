@@ -10,7 +10,7 @@
 //!   `python -m yuanwork` from the `src/backend/` directory. This avoids
 //!   needing to package Python for every development iteration.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -157,12 +157,52 @@ pub fn start_backend(app: &AppHandle) -> Result<BackendHandle, Box<dyn std::erro
     }
 
     let child = cmd.spawn()?;
+    // The child's output has to be read. A pipe nobody reads fills up
+    // (64 KB on Windows), and the backend then blocks on its next log
+    // line - the port is still listening, but nothing answers anymore.
+    // That is what happened to a running backend on 2026-11-23: it
+    // answered /health for hours, then stopped answering anything at
+    // all while still holding the port.
+    let mut child = child;
+    drain_output(&mut child);
     let handle = BackendHandle::new(child);
 
     // Wait for the backend to become healthy
     wait_for_backend_ready(&handle.url(), &instance_token)?;
 
     Ok(handle)
+}
+
+/// Read the child's stdout and stderr so their pipes cannot fill up.
+///
+/// The lines go into the app's log. Nothing else needs them - what
+/// matters is that the pipe is empty when the backend writes to it.
+fn drain_output(child: &mut Child) {
+    if let Some(stdout) = child.stdout.take() {
+        read_lines(stdout, false);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        read_lines(stderr, true);
+    }
+}
+
+/// One thread per stream, until the stream ends.
+fn read_lines<R: Read + Send + 'static>(reader: R, is_error: bool) {
+    std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(reader);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if is_error {
+                        log::error!("[backend] {}", line);
+                    } else {
+                        log::info!("[backend] {}", line);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 /// A token that identifies this launch of the app.
@@ -635,14 +675,18 @@ mod tests {
     }
 
     #[test]
-    fn the_child_output_is_never_read() {
-        // The child's stdout and stderr are piped, but nothing drains
-        // them — the pipe buffer can fill up and block the backend.
+    fn the_child_output_is_read() {
+        // The child's stdout and stderr are piped, so somebody has to
+        // read them: a pipe nobody reads fills up (64 KB on Windows) and
+        // the backend then blocks on its next log line — the port is
+        // still listening, but nothing answers anymore. That is what
+        // happened to a running backend on 2026-11-23.
         let source = include_str!("sidecar.rs");
         assert!(source.contains("Stdio::piped()"));
+        assert!(source.contains("drain_output(&mut child)"));
         // built at runtime so this test's own text cannot satisfy it
         let reader = format!("Buf{}", "Reader");
-        assert!(!source.contains(&reader));
+        assert!(source.contains(&reader));
     }
 
     #[test]
