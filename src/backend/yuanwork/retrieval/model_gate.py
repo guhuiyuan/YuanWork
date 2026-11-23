@@ -82,23 +82,31 @@ class ModelSelfAssessGate:
         self,
         evidence: list[dict[str, Any]],
         question: str,
+        follow_up: str = "",
     ) -> ModelAssessment:
         """The gate calls the model gate; this is the model gate."""
-        return await self.assess(evidence, question)
+        return await self.assess(evidence, question, follow_up)
 
     async def assess(
         self,
         evidence: list[dict[str, Any]],
         question: str,
+        follow_up: str = "",
     ) -> ModelAssessment:
-        """Ask the model whether the evidence answers the question."""
+        """Ask the model whether the evidence answers the question.
+
+        ``follow_up`` is the follow-up context (ADR-057) - the positions
+        of the last round and the reader's own last question. It is
+        empty when this turn is not a follow-up, and then the judge sees
+        exactly what it has always seen.
+        """
         if not evidence:
             # Nothing to judge - and nothing to answer from.
             return ModelAssessment(
                 sufficient=False, reason="没有证据可判", failed=False
             )
 
-        prompt = self._build_prompt(evidence, question)
+        prompt = self._build_prompt(evidence, question, follow_up)
 
         task = LLMTask(
             task_type="evidence_gate",
@@ -128,6 +136,7 @@ class ModelSelfAssessGate:
         self,
         evidence: list[dict[str, Any]],
         question: str,
+        follow_up: str = "",
     ) -> str:
         template = _jinja_env.get_template("evidence_gate.j2")
         pieces = []
@@ -143,7 +152,9 @@ class ModelSelfAssessGate:
                 "text": text,
             })
 
-        return template.render(question=question, pieces=pieces)
+        return template.render(
+            question=question, pieces=pieces, follow_up=follow_up
+        )
 
     # ----- the verdict -----
 

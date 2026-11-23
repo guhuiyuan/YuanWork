@@ -624,7 +624,13 @@ class AgentLoop:
         """
         started = time.perf_counter()
         try:
-            state.gate = await self.gate.evaluate(state.evidence, state.query)
+            # The judge needs the follow-up context too (ADR-057):
+            # without it "再详细点" reads as a question with no
+            # subject, and the judge can only say the evidence does
+            # not answer it.
+            state.gate = await self.gate.evaluate(
+                state.evidence, state.query, state.follow_up_block
+            )
         except Exception as e:  # noqa: BLE001 - a broken gate must not answer
             logger.exception(f"Evidence gate failed: {e}")
             state.gate = EvidenceGateResult(

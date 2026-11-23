@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -270,6 +271,11 @@ class SemanticMemory:
         # model is ready.
         self._prewarm_in_flight: bool = False
         self._prewarm_task: asyncio.Task | None = None
+        #: The model is loaded at most once at a time. The prewarm in
+        #: the background and a question that arrives while it is still
+        #: running must not each load their own copy (see
+        #: `load_embedding_model`).
+        self._load_lock = threading.Lock()
         # Toggle: when True, embed_texts also asks bge-m3 for sparse
         # vectors. Off by default: the retrieval side does not use
         # them (the sparse channel is the full-text index), and asking
@@ -438,6 +444,27 @@ class SemanticMemory:
         if self._embedder is not None:
             return
 
+        with self._load_lock:
+            if self._embedder is not None:
+                # The load we were queued behind finished while we waited -
+                # its model is the model.
+                return
+            self._load_embedding_model()
+
+    def _load_embedding_model(self) -> None:
+        """The load itself. It runs under the lock.
+
+        Only one load at a time: the backend prewarms the model in the
+        background at startup, and a question that arrives while that
+        load is still running would otherwise start a *second* one - two
+        copies of a 2.3 GB model on the same card, and an encoder left
+        pointing at one copy while the model field points at the other.
+        The query vector then comes out in the wrong precision and the
+        vector channel dies ("mat1 and mat2 must have the same dtype"),
+        which the retrieval swallows - the app then answers "the
+        documents do not say that" about documents that do say it
+        (AC-F-004).
+        """
         BGEM3FlagModel = _import_flag_embedding()
 
         # Suppress noisy output from FlagEmbedding

@@ -8,10 +8,10 @@
 |------|------|----------|
 | 需求定义 proposal | `specs/yuanwork/proposal.md` | v0.1 · AC 67 条 |
 | 架构设计 design | `specs/yuanwork/design.md` | v0.1 · ADR 57 条 |
-| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 94/96 完成 |
+| 任务拆解 tasks | `specs/yuanwork/tasks.md` | v0.1 · 96/97 完成 |
 
-**当前阶段**：Phase 5 — 验证与交付（TASK-095 追问接得上、TASK-096 对话原文也有上界，做完即 96/96）
-**下一步**：TASK-095 追问只带上一轮的位置、TASK-096 对话原文与事件同一个双上限
+**当前阶段**：Phase 5 — 验证与交付（TASK-097 修「预热与第一个问题撞车时模型被加载两次」，做完即 97/97）
+**下一步**：TASK-097 模型加载排队——后端起来之后的第一个问题不能撞上预热
 
 规则：
 1. 任何代码改动必须对应 `tasks.md` 中的一个 Task，不得做范围外的事。

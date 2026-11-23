@@ -290,6 +290,38 @@ def test_the_answer_prompt_has_no_context_when_it_is_not_a_follow_up():
     assert "《采购合同.pdf》第 3 页" not in answer.messages[0].content
 
 
+def test_the_gate_prompt_carries_the_context_only_when_it_is_a_follow_up():
+    """裁判也要看到上下文 —— 否则「再详细点」没有主语，只能判不足。
+
+    实测：裁判只看到「再详细点」三个字时，会说「未指明需要展开的主题」，
+    于是这一轮被判成证据不足 —— 追问就断在那里（ADR-057）。
+    """
+    llm = FakeLLM(
+        '{"intent": "explain", "topic": "违约金", "file_hint": "采购合同.pdf", '
+        '"is_follow_up": true}'
+    )
+    agent = make_agent(llm)
+
+    asyncio.run(agent.run(query="再详细点", session_id="s", follow_up=CONTEXT))
+
+    gate = next(t for t in llm.tasks if t.task_type == "evidence_gate")
+    assert "《采购合同.pdf》第 3 页" in gate.messages[0].content
+    assert "把这份合同的违约金讲清楚" in gate.messages[0].content
+
+
+def test_the_gate_prompt_has_no_context_when_it_is_not_a_follow_up():
+    llm = FakeLLM(
+        '{"intent": "explain", "topic": "违约金", "file_hint": null, '
+        '"is_follow_up": false}'
+    )
+    agent = make_agent(llm)
+
+    asyncio.run(agent.run(query="另起一个问题", session_id="s", follow_up=CONTEXT))
+
+    gate = next(t for t in llm.tasks if t.task_type == "evidence_gate")
+    assert "《采购合同.pdf》第 3 页" not in gate.messages[0].content
+
+
 def test_without_a_context_the_run_is_the_same_run():
     """没有上一轮时，一切与从前一样。"""
     llm = FakeLLM('{"intent": "explain", "topic": "违约金"}')

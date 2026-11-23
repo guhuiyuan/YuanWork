@@ -69,8 +69,10 @@ class ModelAssessment:
 
 
 #: A model gate: given the evidence and the question, what does the
-#: model have to say about them?
-ModelGate = Callable[[list[dict[str, Any]], str], Awaitable["ModelAssessment"]]
+#: model have to say about them? The third argument is the follow-up
+#: context - the positions of the last round and the reader's own last
+#: question (ADR-057). It is empty when this turn is not a follow-up.
+ModelGate = Callable[[list[dict[str, Any]], str, str], Awaitable["ModelAssessment"]]
 
 
 @dataclass
@@ -190,8 +192,15 @@ class EvidenceGate:
         self,
         evidence: list[dict[str, Any]],
         question: str,
+        follow_up: str = "",
     ) -> EvidenceGateResult:
         """Decide whether the evidence may back an answer.
+
+        ``follow_up`` is the follow-up context (ADR-057): the positions
+        of the last round and the reader's own last question. The judge
+        needs it: without it "再详细点" reads as a question with no
+        subject, and the judge can only say "the evidence does not
+        answer that".
 
         The model gate is only asked when the hard rule has not already
         decided: a refusal the rules can settle does not need a model
@@ -206,7 +215,7 @@ class EvidenceGate:
         if self.model_gate is not None and hard.ok:
             model_evaluated = True
             try:
-                assessment = await self.model_gate(evidence, question)
+                assessment = await self.model_gate(evidence, question, follow_up)
             except Exception:  # noqa: BLE001 - a gate that crashes must not answer
                 # A model that cannot be reached cannot vouch for the
                 # evidence either.

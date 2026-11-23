@@ -170,7 +170,11 @@ def test_the_model_is_loaded_with_the_device_and_the_precision(monkeypatch):
 
     from yuanwork.memory import semantic as semantic_module
 
-    source = inspect.getsource(semantic_module.SemanticMemory.load_embedding_model)
+    # The class, not one method: the load may sit in a helper (the
+    # lock around it lives in `load_embedding_model`, the load itself
+    # in `_load_embedding_model`), and what matters is that the device
+    # and the precision are passed to the model.
+    source = inspect.getsource(semantic_module.SemanticMemory)
     assert "devices=self.embedding_device" in source
     assert "use_fp16" in source
 
@@ -181,7 +185,5 @@ def test_the_embedding_passes_the_token_budget():
 
     from yuanwork.memory import semantic as semantic_module
 
-    source = inspect.getsource(
-        semantic_module.SemanticMemory.load_embedding_model
-    )
+    source = inspect.getsource(semantic_module.SemanticMemory)
     assert "max_length=self.embedding_max_tokens" in source

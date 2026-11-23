@@ -25,7 +25,7 @@
 | AC-F-002 | 给定工作域内的受支持文件，当执行建库时，系统 SHALL 把文件解析为带结构信息的块、切块并… | TASK-001, TASK-002, TASK-003, TASK-051, TASK-068, TASK-072, TASK-088, TASK-089 | test_workspace_contract.py 21 passed；test_anchor_contract.py 17 passed；test_storage_contract_chunker.py 11 passed；TASK-051 127 passed；test_chunk_to…；TASK-088 重建后账本与索引分毫不差；TASK-089 重建只读它必须读的文件 | ✅ 通过 |
 | AC-F-032 | 给定账本记录为已入库、而索引中并无该文件的文件，当用户就该文件提问时，系统 SHALL 说明… | TASK-088 | 后端 1808 + 前端 175 passed；真机复验：拒答说「这份文件在账本里，可索引里没有它」；重建后同一个问题正常作答 | ✅ 通过 |
 | AC-F-003 | 给定工作域内含 PDF、PPT、Word、Excel 与 Markdown 文件，当建立索引… | TASK-002, TASK-072 | test_anchor_contract.py 17 passed；test_ingestion_contract_parsers.py 19 passed | ✅ 通过 |
-| AC-F-004 | 给定一次提问，当执行检索时，系统 SHALL 同时走向量与全文两路召回并融合排序，且 SHA… | TASK-014, TASK-015 | test_retrieval_contract_confidence.py 13 passed；test_retrieval_contract_edges.py 17 passed | ✅ 通过 |
+| AC-F-004 | 给定一次提问，当执行检索时，系统 SHALL 同时走向量与全文两路召回并融合排序，且 SHA… | TASK-014, TASK-015, TASK-097 | test_retrieval_contract_confidence.py 13 passed；test_retrieval_contract_edges.py 17 passed；TASK-097 test_embedding_load_race_contract.py **3 passed**——**向量那一路不能死**：真机上它死过（预热与第一个问题各加载了一份模型 → 精度对不上 → 稠密检索抛异常被咽下去 → 只剩文件名匹配） | ✅ 通过 |
 | AC-F-005 | 给定一次作答，当返回答案时，系统 SHALL 为每条结论附上引用，引用 SHALL 含文件名… | TASK-012 | test_citation_validation.py 20 passed | ✅ 通过 |
 | AC-F-006 | 给定一条带位置锚点的引用，当用户点击它时，系统 SHALL 在系统默认程序中打开该文件并定位… | TASK-027, TASK-084, TASK-085 | TASK-027 7 passed；TASK-084 Rust 83 + 前端 152 passed；TASK-085 真机复验：默认程序打开原文、应用说出位置 | ✅ 通过 |
 | AC-F-007 | 给定检索到的证据条数低于阈值，或存在无法定位到原文的证据，当准备作答时，系统 SHALL 拒… | TASK-009 | test_evidence_gate_hard_rules.py 31 passed | ✅ 通过 |
@@ -58,7 +58,7 @@
 | AC-F-035 | 给定工作域内已建立页面、实体与它们之间的关系，当构建图谱时，系统 SHALL 同时产出节点与关系边，每条边 SHALL 对应… | TASK-093 | 后端 test_wiki_graph_edges.py 40 passed；真机：**89 个节点 / 216 条边**（derived_from 63、mentions 65、co_occurs 79、shares_evidence 9），没有一条边指向不存在的节点，**孤立的节点 0 个**；核对在**库的副本**上做（读者那本库全程没被打开） | ✅ 通过 |
 | AC-F-036 | 给定本地已留下模型调用的审计记录，当用户打开右栏「审计」页时，系统 SHALL 显示一张记录表，逐条列出每次模型调… | TASK-094 | 前端 audit.test.ts 34 passed；Rust 87 passed（桥接层三个命令）；真机：审计日志里 2152 条记录，字段逐条核对过 | ✅ 通过 |
 | AC-F-037 | 给定审计页已显示记录，当用户执行清空时，系统 SHALL 删除本地的审计记录并把该表清空，SHALL 报告清空的条数… | TASK-094 | 前端 audit.test.ts（清空那几条）；后端 test_privacy_contract_audit_io.py 14 passed——**清空失败后端回 500 而不是「cleared」** | ✅ 通过 |
-| AC-F-038 | 给定上一轮问答已答到一些位置，当用户这一问是在追问上一轮时，系统 SHALL 接着那些位置… | TASK-095 | 后端 test_follow_up_context.py **14 passed**；前端 followUp.test.ts **7 passed**——上下文里**只有位置与读者自己的问话**，上一轮模型生成的回答进不来；不是追问时检索的查询一个字不多 | ✅ 通过 |
+| AC-F-038 | 给定上一轮问答已答到一些位置，当用户这一问是在追问上一轮时，系统 SHALL 接着那些位置… | TASK-095 | 后端 test_follow_up_context.py **16 passed**；前端 followUp.test.ts **7 passed**——上下文里**只有位置与读者自己的问话**，上一轮模型生成的回答进不来；不是追问时检索的查询一个字不多；**真机核对**：《示例文档.pdf》问一句、再追问「再详细点」，追问的 9 条引用**全部落在同一份文件上**（核对中抓出并修掉了「裁判看不到追问上下文」这个断点） | ✅ 通过 |
 | AC-P-001 | 给定基准机与其上的一个真实工作域（结构画像由验收工具采集，随验收报告一起记录），当执行首次建… | TASK-001, TASK-003, TASK-042, TASK-045, TASK-059, TASK-070 | test_workspace_contract.py 21 passed；test_storage_contract_chunker.py 11 passed；test_perf_benchmark_contract.py 18 passed；test_ingest_parallel_cont… | ✅ 通过 |
 | AC-P-002 | 给定一次提问，当执行检索时，系统 SHALL 在 2 秒以内返回首批证据（不含模型生成耗时） | TASK-014, TASK-015, TASK-071 | test_retrieval_contract_confidence.py 13 passed；test_retrieval_contract_edges.py 17 passed；TASK-071  passed；延迟实测 0.338 | ✅ 通过 |
 | AC-P-003 | 给定一次提问，当模型开始作答时，系统 SHALL 在 5 秒以内产出首个 token | TASK-010, TASK-013, TASK-071 | test_evidence_gate_model.py 22 passed；test_conflict_rewrite.py 14 passed；TASK-071  passed；延迟实测 3.63 | ✅ 通过 |
@@ -649,11 +649,60 @@ understand / localize / extract / wiki_compile / gate / answer / check_conflicts
   决定 `file_hint` 填不填上一轮那个文件；
 - **追问时检索的查询要扩**：上一轮的问句与文件名并进查询——不然只有
   「再详细点」三个字，召回不了任何东西；
+- **证据充分性判定那一步也看到同一段上下文**：裁判只看到「再详细点」三个字
+  时，不知道这一问要什么，只能判不足——真机核对时正是这样断掉的（详见下）；
 - **不是追问时，行为与没有上下文时完全一样**：检索的查询一个字不多，
   答案的提示词里也没有上一轮（AC-F-038 的后半句）；
 - 桥接层也加了 `follow_up` 字段——不加它，桌面端发的上下文会被 serde
   静静丢掉。
 
-**这一批没有做真机核对**：后端由读者自己启动，追问的效果要在真实工作域上
-用真实问题试（问一句、再追问一句，看引用是不是落在同一份文件上）。单测与
-前端测试钉住的是规则本身（上下文里有什么、没什么、什么时候扩查询）。
+**真机核对做了**（2026-11-23，真实工作域，真实模型，库里真实存在的
+《示例文档.pdf》）：
+
+| 这一问 | 结果 |
+|--------|------|
+| 「《示例文档.pdf》里讲的贪心算法是什么？」 | 答出 **9 条引用**，8 条落在这一份文件上 |
+| 「再详细点」+（上一轮的位置 + 读者上一句问话） | 被理解步骤认成追问（`is_follow_up: true`），答出 **9 条引用，全部落在同一份文件上** ✓ |
+
+**核对时抓出一个真问题**：第一版实现里，**证据充分性判定那一步看不到这段
+上下文**。裁判只看到「再详细点」三个字，检索明明回来了 10 条证据，它仍以
+「用户仅说『再详细点』，未指明需要展开的主题或此前回答内容」为由判为不充分
+——追问就断在那里，位置带得再准也没用。修法是把同一段上下文（仍然只有
+位置与读者自己的问话，**没有上一轮的回答原文**）也送进裁判的提示词；
+design.md 的 ADR-057 代价小节与 §1.2 数据流都补了这一条，并加了 2 条单测
+（裁判的提示词带着上下文 / 不追问时没有上下文）。
+
+**另一件事，不是代码问题**：读者当时开着的后端是**改到一半时的旧进程**
+（它的 OpenAPI 里还是 `history`，没有 `follow_up`），请求在进模型之前就抛了
+（TypeError → INTERNAL_ERROR，1.5 秒，无轨迹、无审计记录）——**那个进程
+该重启**。判据是它的 OpenAPI：跑着的进程与磁盘上的代码对不上，就该重启。
+
+### 6.19 后端起来之后的第一个问题：向量那一路会死
+
+追问的那次真机核对里，**检索通道时灵时不灵**——同一段代码单独跑召回 10 条，
+挂在应用里却只召回 1 条（而且那 1 条是文件名匹配，不是向量召回）。应用里的
+告警说得很直白：
+
+```
+Vector candidate aggregation failed: mat1 and mat2 must have the same dtype, but got Half and Float
+```
+
+**检索把异常咽了下去**（只记一条告警，照旧返回空的向量召回），于是那一问
+对**明明写着答案的文件**说「证据不足」。
+
+**为什么**：后端启动时会在后台**预热**嵌入模型（`.env` 里
+`YUANWORK_PREWARM_EMBEDDING=1`）。读者在预热还在跑的时候问第一个问题，
+那条路看到「模型还没加载」，于是**又加载了一次**——两份 2.3 GB 的模型挤在
+同一张卡上，编码器与模型字段可能各指向一份，查询向量的精度就错了，稠密检索
+当场抛错。真机上六次里有三次：模型先加载好再发请求，就不复现；预热还在飞的
+时候发请求，就复现。
+
+**修法**：模型同一时刻只加载一份，后来的那个**等**前一个加载完，用等来的
+那个模型（不再自己再加载一份）；一次加载失败也不锁死，还能再试
+（`test_embedding_load_race_contract.py` 3 条）。
+
+**顺带记一笔**：稠密检索失败时把异常咽掉、只记一条告警，这个降级**本身是有
+意的**（一条通道坏了不该让整条检索死掉，另一条通道还能答）。但那条告警
+**只在后端的日志里**，而桌面端把后端的输出接了管道却从不读——于是这一问在
+界面上只是「证据不足」，看不出「向量那一路当时是坏的」。**告警怎么送到读者
+眼前，留着**（TASK-097 只修根因，不动告警的通路）。

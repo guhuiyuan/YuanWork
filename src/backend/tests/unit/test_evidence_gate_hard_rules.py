@@ -249,7 +249,7 @@ def test_both_verdicts_are_visible():
 
 
 def test_the_model_gate_can_veto_a_passing_hard_rule():
-    async def model_gate(evidence, question):
+    async def model_gate(evidence, question, follow_up=""):
         return ModelAssessment(sufficient=False, reason="证据与问题无关")
 
     gate = EvidenceGate(model_gate=model_gate)
@@ -264,7 +264,7 @@ def test_the_model_gate_can_veto_a_passing_hard_rule():
 
 def test_the_model_gate_cannot_veto_a_failing_hard_rule():
     """The reverse direction: the model is sure, the rules say no."""
-    async def model_gate(evidence, question):
+    async def model_gate(evidence, question, follow_up=""):
         return ModelAssessment(sufficient=True)
 
     gate = EvidenceGate(model_gate=model_gate)
@@ -277,7 +277,7 @@ def test_the_model_gate_cannot_veto_a_failing_hard_rule():
 
 
 def test_both_gates_passing_means_the_answer_is_allowed():
-    async def model_gate(evidence, question):
+    async def model_gate(evidence, question, follow_up=""):
         return ModelAssessment(sufficient=True)
 
     gate = EvidenceGate(model_gate=model_gate)
@@ -293,7 +293,7 @@ def test_both_gates_passing_means_the_answer_is_allowed():
 def test_a_model_gate_that_crashes_refuses():
     """A model that cannot be reached cannot vouch for the evidence."""
 
-    async def model_gate(evidence, question):
+    async def model_gate(evidence, question, follow_up=""):
         raise RuntimeError("boom")
 
     gate = EvidenceGate(model_gate=model_gate)
@@ -306,11 +306,35 @@ def test_a_model_gate_that_crashes_refuses():
     assert result.reason == REASON_MODEL_UNAVAILABLE
 
 
+def test_the_follow_up_context_reaches_the_model_gate():
+    """追问时裁判要看到上下文 —— 否则「再详细点」没有主语（ADR-057）。"""
+    seen: list[str] = []
+
+    async def model_gate(evidence, question, follow_up=""):
+        seen.append(follow_up)
+        return ModelAssessment(sufficient=True)
+
+    gate = EvidenceGate(model_gate=model_gate)
+
+    asyncio.run(
+        gate.evaluate(
+            located(3),
+            "再详细点",
+            "读者上一句问：把这份合同的违约金讲清楚\n"
+            "上一轮答到的位置：《采购合同.pdf》第 3 页",
+        )
+    )
+
+    assert seen, "the model gate was not asked"
+    assert "《采购合同.pdf》第 3 页" in seen[0]
+    assert "把这份合同的违约金讲清楚" in seen[0]
+
+
 def test_the_model_gate_is_not_asked_when_the_rules_already_decided():
     """A refusal the rules can settle does not need a model call."""
     asked: list[str] = []
 
-    async def model_gate(evidence, question):
+    async def model_gate(evidence, question, follow_up=""):
         asked.append(question)
         return ModelAssessment(sufficient=True)
 
@@ -329,7 +353,7 @@ def test_the_model_gate_is_not_asked_when_the_rules_already_decided():
 def test_an_empty_knowledge_base_refuses_even_when_the_model_is_sure():
     """The model may be confident - there is still nothing to answer
     from, and the answer would not be checkable."""
-    async def model_gate(evidence, question):
+    async def model_gate(evidence, question, follow_up=""):
         return ModelAssessment(sufficient=True)
 
     gate = EvidenceGate(model_gate=model_gate)
