@@ -90,7 +90,8 @@
     "npm run build",
     ".venv/Scripts/python.exe scripts/bench/probe_graph_edges.py",
     ".venv/Scripts/python.exe scripts/bench/probe_legacy_formats.py",
-    "YUANWORK_GRAPH_DB=D:/yuanwork/data/store.db .venv/Scripts/python.exe -m pytest src/backend/tests -q -k real"
+    "YUANWORK_GRAPH_DB=D:/yuanwork/data/store.db .venv/Scripts/python.exe -m pytest src/backend/tests -q -k real",
+    "cargo build --release --features custom-protocol"
   ],
   "tools": [],
   "write_paths": []

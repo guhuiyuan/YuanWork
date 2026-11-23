@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"python\" \"d:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
+            "command": "\"python\" \"D:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
           }
         ]
       },
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"python\" \"d:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
+            "command": "\"python\" \"D:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
           }
         ]
       },
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"python\" \"d:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
+            "command": "\"python\" \"D:/prep for work/Projects/YuanWork/.claude/hooks/sdd_bash_allow.py\""
           }
         ]
       }
